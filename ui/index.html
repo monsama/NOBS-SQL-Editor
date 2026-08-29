@@ -391,6 +391,17 @@ function floatApplyPos(id){
  box.style.top=pos.top+'px';
  box.style.left=pos.left+'px';
 }
+// Floating windows used to open at a fixed left offset baked into their markup (left:100px,
+// left:180px, ...), which put them well off to the left on a wide screen. Centre horizontally on
+// open instead, measured from the box's own width so boxes of different widths all land centred.
+// The inline top is left alone. Only called when the window has no remembered position, so once
+// it has been dragged the dragged position keeps winning.
+function floatCenterX(id){
+ const box=$(id).querySelector('.box');
+ if(!box)return;
+ const w=box.getBoundingClientRect().width;
+ box.style.left=Math.max(0,Math.round((window.innerWidth-w)/2))+'px';
+}
 let _floatDrag=null;
 function floatDragStart(e,id){
  e.preventDefault();
@@ -472,7 +483,7 @@ function show(id){
   // looking state that would otherwise occur since neither classList.add('show') above nor the
   // position-apply below touches box.style.display at all.
   if(window._floatingMinimized[id]) floatRestore(id);
-  else { floatBringToFront(id); floatApplyPos(id); }
+  else { floatBringToFront(id); if(!window._floatingPos[id]) floatCenterX(id); floatApplyPos(id); }
  }
 }
 function hide(id){
