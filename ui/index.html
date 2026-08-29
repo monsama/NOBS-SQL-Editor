@@ -964,7 +964,10 @@ function progStop(prefix){
 async function cancelJob(prefix){
   const jobId=_progJobIds[prefix]; if(!jobId)return;
   const lbl=$(prefix+'ProgLabel'); if(lbl)lbl.textContent='Cancelling...';
-  try{await fetch('/api/cancel-job',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN,jobId})});}catch(e){}
+  // Goes through api() like every other call, so it reaches the Tauri command rather than an
+  // HTTP server that only exists in the PowerShell build. As a raw fetch this rejected silently,
+  // leaving the user with a Cancel button that logged "Cancel requested" and cancelled nothing.
+  try{await api('/api/cancel-job',{jobId});}catch(e){}
   log('Cancel requested for '+prefix+' job.');
 }
 function renderObjects(){const box=$('objects');box.innerHTML='';if(!objData)return;const db=objData.db,r=objData.r;const f=($('objFilter').value||'').toLowerCase();
