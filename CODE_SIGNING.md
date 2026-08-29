@@ -1,9 +1,17 @@
 # Code signing policy
 
-Free code signing on Windows is provided by [SignPath.io](https://signpath.io),
-certificate by the [SignPath Foundation](https://signpath.org).
+## Current status
 
-## What is signed
+Releases are **not code-signed**. Windows SmartScreen warns that the publisher
+is unknown; choose **More info -> Run anyway** to install.
+
+Code signing via the [SignPath Foundation](https://signpath.org) is planned but
+not yet in place. The release workflow already contains the signing steps; they
+stay inactive until the project is accepted and SignPath credentials are
+configured, so every release until then is published unsigned. This document
+describes the policy that will apply once signing is active.
+
+## What will be signed
 - Windows installer packages (`.exe` / `.msi`) published on GitHub Releases.
 
 ## Build & signing process
@@ -14,7 +22,7 @@ certificate by the [SignPath Foundation](https://signpath.org).
 
 ## Roles
 - Author / maintainer: Viktor Ljuca (https://monsama.ch)
-- Reviewers: (add GitHub usernames of anyone who reviews releases)
+- Release approval: the maintainer, who reviews and tags each release.
 
 ## Privacy
 This application does not transmit user data to the author. Database
