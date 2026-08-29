@@ -8,6 +8,11 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      # The `secrets` context is not available in a step-level `if:`, so expose the
+      # token as an env var here and test `env.SIGNPATH_API_TOKEN` in the signing
+      # steps below. Unset secret -> empty string -> those steps are skipped.
+      SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
 
@@ -46,14 +51,14 @@ jobs:
 
       - name: Upload unsigned NSIS installer for signing
         id: upload-unsigned-nsis
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: unsigned-nsis
           path: "**/target/release/bundle/nsis/*-setup.exe"
 
       - name: Sign NSIS installer
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -66,14 +71,14 @@ jobs:
 
       - name: Upload unsigned MSI installer for signing
         id: upload-unsigned-msi
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: unsigned-msi
           path: "**/target/release/bundle/msi/*.msi"
 
       - name: Sign MSI installer
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
         uses: signpath/github-action-submit-signing-request@v2
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -85,7 +90,7 @@ jobs:
           output-artifact-directory: signed/msi
 
       - name: Upload signed installers
-        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        if: ${{ env.SIGNPATH_API_TOKEN != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: windows-installers-signed
