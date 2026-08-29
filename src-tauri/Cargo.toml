@@ -1,0 +1,31 @@
+[package]
+name = "nobs-sql-editor"
+version = "1.0.0"
+edition = "2021"
+description = "NOBS SQL Editor - a cross-platform MySQL/MariaDB client"
+default-run = "nobs-sql-editor"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+tokio = { version = "1", features = ["full"] }
+mysql = "25"
+dirs = "5"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+csv = "1"
+hex = "0.4"
+tempfile = "3"
+chrono = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+zip = "2"
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"

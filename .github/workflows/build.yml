@@ -1,0 +1,95 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]        # build installers on version tags
+  workflow_dispatch: {} # allow manual runs
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install frontend deps
+        run: npm ci || npm install
+
+      - name: Build Tauri app (NSIS + MSI)
+        run: npm run tauri build
+
+      - name: Upload installers (unsigned)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers
+          path: |
+            **/target/release/bundle/nsis/*-setup.exe
+            **/target/release/bundle/msi/*.msi
+          if-no-files-found: warn
+
+      # --- Everything below requires SignPath Foundation approval first (see CODE_SIGNING.md)
+      # and three values only you can provide once approved: the SIGNPATH_API_TOKEN secret and
+      # the SIGNPATH_ORGANIZATION_ID variable (both under repo Settings > Secrets and variables
+      # > Actions), plus the project-slug/signing-policy-slug below (from your SignPath
+      # dashboard, on your project's signing policy page). Until SIGNPATH_API_TOKEN is set,
+      # every step below is skipped automatically rather than failing the build - so pushing a
+      # tag before SignPath is set up still produces a normal, unsigned build, same as today.
+
+      - name: Upload unsigned NSIS installer for signing
+        id: upload-unsigned-nsis
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-nsis
+          path: "**/target/release/bundle/nsis/*-setup.exe"
+
+      - name: Sign NSIS installer
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'
+          project-slug: 'nobs-sql-editor'          # replace with your actual SignPath project slug
+          signing-policy-slug: 'release-signing'   # replace with your actual SignPath signing policy slug
+          github-artifact-id: '${{ steps.upload-unsigned-nsis.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: signed/nsis
+
+      - name: Upload unsigned MSI installer for signing
+        id: upload-unsigned-msi
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-msi
+          path: "**/target/release/bundle/msi/*.msi"
+
+      - name: Sign MSI installer
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'
+          project-slug: 'nobs-sql-editor'
+          signing-policy-slug: 'release-signing'
+          github-artifact-id: '${{ steps.upload-unsigned-msi.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: signed/msi
+
+      - name: Upload signed installers
+        if: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installers-signed
+          path: |
+            signed/nsis/**
+            signed/msi/**
+          if-no-files-found: warn

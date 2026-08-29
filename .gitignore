@@ -1,0 +1,26 @@
+# Rust / Tauri build output
+/target/
+/src-tauri/target/
+**/*.rs.bk
+
+# Node
+/node_modules/
+/dist/
+/ui/dist/
+
+# Downloaded client tools / app data (never commit binaries)
+/src-tauri/binaries/*.exe
+/binaries/*.exe
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets / signing (never commit)
+*.pfx
+*.p12
+*.key
+.env
+.env.*
