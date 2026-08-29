@@ -8,6 +8,8 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
+    permissions:
+      contents: write   # required to create the GitHub Release
     env:
       # The `secrets` context is not available in a step-level `if:`, so expose the
       # token as an env var here and test `env.SIGNPATH_API_TOKEN` in the signing
@@ -98,3 +100,31 @@ jobs:
             signed/nsis/**
             signed/msi/**
           if-no-files-found: warn
+
+      # --- Publish the installers as a GitHub Release so they are publicly
+      # downloadable. The Actions artifacts above expire and require a GitHub
+      # login; Release assets do neither. Exactly one of the two steps below
+      # runs, so a release never carries both signed and unsigned installers.
+      # Releases are created as drafts - review the notes, then publish.
+
+      - name: Publish GitHub Release (signed)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && env.SIGNPATH_API_TOKEN != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            signed/nsis/**/*.exe
+            signed/msi/**/*.msi
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+      - name: Publish GitHub Release (unsigned)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && env.SIGNPATH_API_TOKEN == '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          draft: true
+          generate_release_notes: true
+          fail_on_unmatched_files: true
