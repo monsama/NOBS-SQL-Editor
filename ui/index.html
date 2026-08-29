@@ -3146,8 +3146,13 @@ let _pingFails = 0;
 function _ping(){ return fetch('/api/ping', { method:'POST', keepalive:true }).then(()=>{_pingFails=0;}).catch(()=>{_pingFails++; if(_pingFails>=2) showDead();}); }
 // No local HTTP server exists under Tauri (native process, not a browser-hosted server), so the
 // heartbeat is meaningless there and would falsely show the 'server not responding' overlay.
-if(!(window.__TAURI__)) setInterval(_ping, 5000);
-document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) _ping(); });
+// The visibility handler needs the SAME guard as the interval, not just the interval: a ping on
+// regaining focus can only fail under Tauri, _pingFails is never reset because no ping ever
+// succeeds, and the second time the window was re-focused the overlay covered a healthy app.
+if(!(window.__TAURI__)){
+ setInterval(_ping, 5000);
+ document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) _ping(); });
+}
 document.body.classList.add('disconnected');
 window.addEventListener('beforeunload',e=>{saveSession();if(anyPending()){e.preventDefault();e.returnValue='';return '';}});
 (function(){function initSideResize(){const sd=$('side'),rz=$('sideResize'),mn=$('main');if(!sd||!rz||!mn){setTimeout(initSideResize,300);return;}const saved=parseInt(localStorage.getItem('sideW')||'',10);if(saved&&saved>=180)sd.style.width=saved+'px';let drag=false;rz.addEventListener('pointerdown',e=>{drag=true;rz.classList.add('drag');try{rz.setPointerCapture(e.pointerId);}catch(_){}document.body.style.userSelect='none';e.preventDefault();});rz.addEventListener('pointermove',e=>{if(!drag)return;const left=mn.getBoundingClientRect().left;let w=e.clientX-left;const max=Math.max(200,window.innerWidth-320);w=Math.max(180,Math.min(w,max));sd.style.width=w+'px';});const end=e=>{if(!drag)return;drag=false;rz.classList.remove('drag');try{rz.releasePointerCapture(e.pointerId);}catch(_){}document.body.style.userSelect='';localStorage.setItem('sideW',String(parseInt(sd.style.width,10)||280));};rz.addEventListener('pointerup',end);rz.addEventListener('pointercancel',end);rz.addEventListener('dblclick',()=>{sd.style.width='280px';localStorage.setItem('sideW','280');});}initSideResize();})();
