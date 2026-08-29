@@ -3,8 +3,14 @@
 A lightweight, cross-platform desktop client for **MySQL** and **MariaDB**, built
 with [Tauri](https://tauri.app) (Rust backend + HTML/JS frontend).
 
-> Free code signing on Windows provided by [SignPath.io](https://signpath.io),
-> certificate by the [SignPath Foundation](https://signpath.org).
+## Download
+
+Windows installers are published on the
+[Releases](https://github.com/monsama/NOBS-SQL-Editor/releases) page.
+
+They are **not code-signed yet**, so Windows SmartScreen shows a "Windows
+protected your PC" warning naming an unknown publisher. Choose **More info ->
+Run anyway** to continue. See [CODE_SIGNING.md](CODE_SIGNING.md) for the plan.
 
 ## Features
 
@@ -52,7 +58,7 @@ Copyright (C) 2026 Viktor Ljuca — https://monsama.ch
 ## Third-party components
 
 Built with Tauri and the Rust crates mysql, reqwest, zip, keyring, tokio, serde,
-serde_json, dirs, csv, hex, tempfile and chrono (and their dependencies), each
-under its own license (mostly MIT / Apache-2.0). The MariaDB client tools, when
-downloaded, are © MariaDB Foundation under GPLv2 and are obtained from
+serde_json, regex, dirs, csv, hex, tempfile and chrono (and their dependencies),
+each under its own license (mostly MIT / Apache-2.0). The MariaDB client tools,
+when downloaded, are © MariaDB Foundation under GPLv2 and are obtained from
 mariadb.org; they are not bundled with this application.
