@@ -22,6 +22,90 @@ use tauri::Emitter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 static EXPORT_CANCEL: AtomicBool = AtomicBool::new(false);
+
+// ---------- cancellable Export / Import jobs ----------
+// One "job" is a single Export or Import run started from the UI, identified by the jobId the
+// UI generates and passes in. Such a run shells out to mysqldump/mysql once per database, table
+// or file, so cancelling has to do two things: stop the loop before it starts the next child,
+// and kill the child already running. Stopping only between children would leave a large single
+// dump writing for minutes after the user pressed Cancel, which is what the Cancel button
+// appeared to do before this existed. Mirrors the PowerShell backend's Api-CancelJob.
+struct Job {
+    cancelled: AtomicBool,
+    // The child currently running for this job, if any. Held in its own lock so the cancelling
+    // thread can reach it while the worker thread is polling it.
+    child: Mutex<Option<std::process::Child>>,
+}
+static JOBS: OnceLock<Mutex<std::collections::HashMap<String, std::sync::Arc<Job>>>> = OnceLock::new();
+fn jobs() -> &'static Mutex<std::collections::HashMap<String, std::sync::Arc<Job>>> {
+    JOBS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+fn job_start(id: &str) -> Option<std::sync::Arc<Job>> {
+    if id.is_empty() { return None; }
+    let j = std::sync::Arc::new(Job { cancelled: AtomicBool::new(false), child: Mutex::new(None) });
+    jobs().lock().ok()?.insert(id.to_string(), j.clone());
+    Some(j)
+}
+fn job_is_cancelled(job: &Option<std::sync::Arc<Job>>) -> bool {
+    job.as_ref().map(|j| j.cancelled.load(Ordering::SeqCst)).unwrap_or(false)
+}
+// Deregisters on every exit path, including the `?` early returns inside the worker closure -
+// a job left in the map would make a later cancel look like it succeeded against a dead run.
+struct JobGuard(String);
+impl Drop for JobGuard {
+    fn drop(&mut self) {
+        if !self.0.is_empty() { if let Ok(mut m) = jobs().lock() { m.remove(&self.0); } }
+    }
+}
+
+// Runs one child process as part of `job`, returning what Command::output() would have.
+// Two differences from output(), both required here:
+//   - the Child is parked in the job so cancel_job can kill it mid-run;
+//   - the wait is a poll rather than a blocking wait(), because holding the child's lock across
+//     a blocking wait would make the cancelling thread wait for the process it wants to kill.
+// stderr is drained on its own thread for the reason output() does the same internally: a child
+// that fills the stderr pipe buffer blocks forever if nobody is reading it.
+fn run_job_child(job: Option<&std::sync::Arc<Job>>, cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    let mut child = cmd.stderr(Stdio::piped()).spawn()?;
+    let mut pipe = child.stderr.take();
+    let reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(p) = pipe.as_mut() { use std::io::Read; let _ = p.read_to_end(&mut buf); }
+        buf
+    });
+    let status = match job {
+        None => child.wait()?,
+        Some(j) => {
+            if let Ok(mut slot) = j.child.lock() { *slot = Some(child); }
+            loop {
+                let mut finished = None;
+                if let Ok(mut slot) = j.child.lock() {
+                    if let Some(c) = slot.as_mut() {
+                        if j.cancelled.load(Ordering::SeqCst) { let _ = c.kill(); }
+                        finished = c.try_wait()?;
+                    } else {
+                        // Nothing parked: treat as finished rather than spinning forever.
+                        break std::process::ExitStatus::default();
+                    }
+                }
+                if let Some(st) = finished {
+                    if let Ok(mut slot) = j.child.lock() { *slot = None; }
+                    break st;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(120));
+            }
+        }
+    };
+    // After a kill the child's stderr is of no interest, and anything it spawned that inherited
+    // the pipe can hold it open long after the kill - joining then would block for exactly as
+    // long as cancelling was meant to save. Leave that reader to finish on its own.
+    let stderr = if job.map(|j| j.cancelled.load(Ordering::SeqCst)).unwrap_or(false) {
+        Vec::new()
+    } else {
+        reader.join().unwrap_or_default()
+    };
+    Ok(std::process::Output { status, stdout: Vec::new(), stderr })
+}
 // Tracks in-flight SELECT queries so Cancel can stop them server-side, the same way MySQL
 // Workbench does it: keep the query's own MySQL CONNECTION_ID(), and to cancel, open a brand
 // new connection and run KILL QUERY <id> on it (you can't cancel over the same connection
@@ -826,31 +910,41 @@ async fn import(app: tauri::AppHandle, req: Value) -> R {
     }
     let mbin = match resolve_tool(&app, "mysql", &["mysql", "mariadb"], "MYSQL_BIN") { Ok(b) => b, Err(e) => return Ok(json!({"ok":false,"error":e})) };
     tokio::task::spawn_blocking(move || {
+        let jid = req["jobId"].as_str().unwrap_or("").to_string();
+        let job = job_start(&jid);
+        let _guard = JobGuard(jid);
         let (_f, cnf) = cnf_file(&req["conn"])?;
         let files: Vec<String> = req["files"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         let target = req["targetDb"].as_str().unwrap_or("").to_string();
         let mut log = Vec::new();
+        let mut cancelled = false;
         if !target.is_empty() && req["createDb"].as_bool().unwrap_or(false) {
             let _ = Command::new(&mbin).arg(format!("--defaults-extra-file={}", cnf))
                 .arg("-e").arg(format!("CREATE DATABASE IF NOT EXISTS {}", sql_id(&target))).output();
             log.push(format!("Ensured database {}", target));
         }
         for f in files {
+            if job_is_cancelled(&job) { log.push("CANCELLED (remaining files skipped)".into()); cancelled = true; break; }
             if !std::path::Path::new(&f).exists() { log.push(format!("SKIP (missing): {}", f)); continue; }
             let mut args = vec![format!("--defaults-extra-file={}", cnf)];
             if req["force"].as_bool().unwrap_or(false) { args.push("--force".into()); }
             if req["fkOff"].as_bool().unwrap_or(false) { args.push("--init-command=SET FOREIGN_KEY_CHECKS=0; SET UNIQUE_CHECKS=0".into()); }
             if !target.is_empty() { args.push(target.clone()); }
             let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
-            let out = Command::new(&mbin).args(&args).stdin(Stdio::from(file)).stderr(Stdio::piped()).stdout(Stdio::null()).spawn()
-                .and_then(|c| c.wait_with_output());
+            let mut cmd = Command::new(&mbin);
+            cmd.args(&args).stdin(Stdio::from(file)).stdout(Stdio::null());
+            let out = run_job_child(job.as_ref(), &mut cmd);
+            let short = || std::path::Path::new(&f).file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| f.clone());
             match out {
-                Ok(o) if o.status.success() => log.push(format!("OK  {}", std::path::Path::new(&f).file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| f.clone()))),
-                Ok(o) => log.push(format!("FAILED {} : {}", std::path::Path::new(&f).file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| f.clone()), first_err(&String::from_utf8_lossy(&o.stderr)))),
+                Ok(o) if o.status.success() => log.push(format!("OK  {}", short())),
+                // A killed child reports failure, but "FAILED file : ..." would read as a broken
+                // import rather than the cancel the user just asked for.
+                Ok(_) if job_is_cancelled(&job) => { log.push(format!("CANCELLED {}", short())); cancelled = true; break; }
+                Ok(o) => log.push(format!("FAILED {} : {}", short(), first_err(&String::from_utf8_lossy(&o.stderr)))),
                 Err(e) => log.push(format!("FAILED {} : {}", f, e)),
             }
         }
-        Ok(json!({"ok":true,"log":log}))
+        Ok(json!({"ok":true,"cancelled":cancelled,"log":log}))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -865,6 +959,9 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
     let dbin = match resolve_tool(&app, "mysqldump", &["mysqldump", "mariadb-dump"], "MYSQLDUMP_BIN") { Ok(b) => b, Err(e) => return Ok(json!({"ok":false,"error":e})) };
     EXPORT_CANCEL.store(false, Ordering::SeqCst);
     tokio::task::spawn_blocking(move || {
+        let jid = req["jobId"].as_str().unwrap_or("").to_string();
+        let job = job_start(&jid);
+        let _guard = JobGuard(jid);
         let (_f, cnf) = cnf_file(&req["conn"])?;
         let dbs: Vec<String> = req["dbs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         if dbs.is_empty() { return Ok(json!({"ok":false,"error":"No databases selected."})); }
@@ -901,7 +998,9 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
         if let Some(mp) = o["maxpacket"].as_str() { if !mp.is_empty() { common.push(format!("--max-allowed-packet={}", mp)); } }
 
         let run = |bin: &str, args: &[String], file: &str| -> Result<(bool, String), String> {
-            let out = Command::new(bin).args(args).output();
+            let mut cmd = Command::new(bin);
+            cmd.args(args);
+            let out = run_job_child(job.as_ref(), &mut cmd);
             match out {
                 Ok(o2) if o2.status.success() => {
                     let sz = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
@@ -934,7 +1033,7 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
             }
         } else if mode == "db" {
             for d in &dbs {
-                if EXPORT_CANCEL.load(Ordering::SeqCst) { log.push("CANCELLED (remaining databases skipped)".into()); cancelled = true; break; }
+                if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { log.push("CANCELLED (remaining databases skipped)".into()); cancelled = true; break; }
                 let file = mkfile(d);
                 let mut a = common.clone();
                 a.push("--databases".into());
@@ -955,7 +1054,7 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
         } else {
             // PER TABLE (default): dump every table to its own file, like Workbench's Dump Project Folder.
             'dbloop: for d in &dbs {
-                if EXPORT_CANCEL.load(Ordering::SeqCst) { log.push("CANCELLED (remaining databases skipped)".into()); cancelled = true; break; }
+                if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { log.push("CANCELLED (remaining databases skipped)".into()); cancelled = true; break; }
                 let mut conn = match build_conn(&req["conn"]) { Ok(c) => c, Err(e) => { log.push(format!("FAILED (connect) {} : {}", d, e)); continue; } };
                 let sql = format!("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA={} ORDER BY TABLE_NAME", sql_lit(d));
                 let tabs: Vec<String> = match run_select(&mut conn, &sql) {
@@ -964,7 +1063,7 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
                 };
                 if tabs.is_empty() { log.push(format!("(no tables) {}", d)); }
                 for t in &tabs {
-                    if EXPORT_CANCEL.load(Ordering::SeqCst) { log.push("CANCELLED (remaining tables skipped)".into()); cancelled = true; break 'dbloop; }
+                    if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { log.push("CANCELLED (remaining tables skipped)".into()); cancelled = true; break 'dbloop; }
                     let key = format!("{}.{}", d, t);
                     if excl.contains(&key) { log.push(format!("(excluded) {}", key)); continue; }
                     let file = mkfile(&key);
@@ -1931,6 +2030,27 @@ async fn browse(req: Value) -> R {
 #[tauri::command]
 fn cancel_export() { EXPORT_CANCEL.store(true, Ordering::SeqCst); }
 
+// Cancels one Export or Import run by the jobId the UI generated for it. Sets the flag the run's
+// loops check before starting the next child, and kills the child running right now so a large
+// single dump stops immediately instead of finishing minutes later. Messages match the
+// PowerShell backend's Api-CancelJob, including the case where the job already completed.
+#[tauri::command]
+fn cancel_job(req: Value) -> R {
+    let id = req["jobId"].as_str().unwrap_or("").to_string();
+    if id.is_empty() { return Ok(json!({"ok":false,"error":"no jobId"})); }
+    let job = jobs().lock().ok().and_then(|m| m.get(&id).cloned());
+    match job {
+        Some(j) => {
+            j.cancelled.store(true, Ordering::SeqCst);
+            if let Ok(mut slot) = j.child.lock() {
+                if let Some(c) = slot.as_mut() { let _ = c.kill(); }
+            }
+            Ok(json!({"ok":true,"message":"Cancel requested."}))
+        }
+        None => Ok(json!({"ok":false,"error":"Job not found - it may have already finished."})),
+    }
+}
+
 #[tauri::command]
 async fn export_table(app: tauri::AppHandle, req: Value) -> R {
     tokio::task::spawn_blocking(move || -> R {
@@ -2185,7 +2305,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             connect, schemas, objects, ddl, pk, query, exec, rowop, script,
-            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, app_info, get_config, save_config, download_tools, tools_status, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd
+            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, tools_status, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
