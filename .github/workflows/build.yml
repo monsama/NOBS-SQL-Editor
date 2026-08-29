@@ -16,9 +16,9 @@ jobs:
       # steps below. Unset secret -> empty string -> those steps are skipped.
       SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -27,6 +27,12 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          # Cargo.toml lives in src-tauri/, not the repo root. Without this the
+          # action caches a non-existent target/ dir, finds no Cargo.lock to key
+          # on, and errors in post-job cleanup - so nothing is ever cached and
+          # every build recompiles all dependencies from scratch.
+          workspaces: src-tauri
 
       - name: Install frontend deps
         run: npm ci || npm install
