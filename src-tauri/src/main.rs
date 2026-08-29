@@ -227,10 +227,16 @@ fn sql_id(name: &str) -> String { format!("`{}`", name.replace('`', "``")) }
 // This is the server-side enforcement backing a connection's "read-only / safe mode" flag.
 fn sql_is_readonly(sql: &str) -> bool {
     if sql.trim().is_empty() { return true; }
+    // /*! ... */ and /*!50000 ... */ are NOT comments: MySQL executes their contents. Stripping
+    // them like a comment hid the statement inside from the keyword check below, so
+    // "/*!50000 DELETE FROM t */" passed as read-only and then deleted rows. Unwrap them first
+    // so the SQL they carry is checked like any other, and only then strip real comments.
+    let re_exec  = regex::Regex::new(r"(?s)/\*!\d*(.*?)\*/").unwrap();
     let re_block = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
     let re_dash  = regex::Regex::new(r"(?m)--.*$").unwrap();
     let re_hash  = regex::Regex::new(r"(?m)#.*$").unwrap();
-    let step1 = re_block.replace_all(sql, " ");
+    let unwrapped = re_exec.replace_all(sql, " $1 ");
+    let step1 = re_block.replace_all(&unwrapped, " ");
     let step2 = re_dash.replace_all(&step1, " ");
     let s = re_hash.replace_all(&step2, " ");
     const ALLOW: &[&str] = &["SELECT","SHOW","DESCRIBE","DESC","EXPLAIN","USE","WITH","SET","HELP","VALUES","TABLE","ANALYZE","CHECK","CHECKSUM"];
@@ -239,6 +245,15 @@ fn sql_is_readonly(sql: &str) -> bool {
         if t.is_empty() { continue; }
         let w = t.split_whitespace().next().unwrap_or("").to_uppercase();
         if !ALLOW.contains(&w.as_str()) { return false; }
+        // SET is allowed because a session variable is harmless, but SET GLOBAL / SET PERSIST -
+        // and their @@GLOBAL. / @@PERSIST. spellings - reconfigure the server for every
+        // connection, which is not something a read-only connection should be able to do.
+        if w == "SET" {
+            let up = t.to_uppercase();
+            let second = up.split_whitespace().nth(1).unwrap_or("");
+            if second.starts_with("GLOBAL") || second.starts_with("PERSIST")
+                || up.contains("@@GLOBAL") || up.contains("@@PERSIST") { return false; }
+        }
     }
     true
 }
@@ -2349,4 +2364,160 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests for the pure helpers that sit on destructive paths: the read-only
+// gate, statement splitting, identifier and literal quoting, and the USE-prefix
+// handling that decides WHICH database a script runs against. These are where a
+// bug silently loses or corrupts someone's data, and they are all pure
+// functions, so there is no reason not to pin their behaviour.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sql_id_wraps_and_escapes_backticks() {
+        assert_eq!(sql_id("users"), "`users`");
+        assert_eq!(sql_id("my table"), "`my table`");
+        assert_eq!(sql_id("we`ird"), "`we``ird`");
+        assert_eq!(sql_id("t` ; DROP TABLE x; --"), "`t`` ; DROP TABLE x; --`");
+    }
+
+    #[test]
+    fn sql_lit_escapes_quotes_and_backslashes() {
+        assert_eq!(sql_lit("plain"), "'plain'");
+        assert_eq!(sql_lit("O'Brien"), "'O''Brien'");
+        assert_eq!(sql_lit("back\\slash"), "'back\\\\slash'");
+        assert_eq!(sql_lit("'; DROP TABLE x; --"), "'''; DROP TABLE x; --'");
+    }
+
+    #[test]
+    fn sql_val_lit_passes_hex_through_unquoted() {
+        assert_eq!(sql_val_lit("0xDEADBEEF"), "0xDEADBEEF");
+        assert_eq!(sql_val_lit("0x00"), "0x00");
+        assert_eq!(sql_val_lit("0xZZ"), "'0xZZ'");
+        assert_eq!(sql_val_lit("hello"), "'hello'");
+    }
+
+    #[test]
+    fn read_only_allows_reads() {
+        for sql in ["SELECT 1", "select * from t", "SHOW TABLES", "EXPLAIN SELECT 1",
+                    "DESCRIBE t", "WITH x AS (SELECT 1) SELECT * FROM x", "", "   "] {
+            assert!(sql_is_readonly(sql), "should be allowed: {:?}", sql);
+        }
+    }
+
+    #[test]
+    fn read_only_blocks_writes() {
+        for sql in ["DELETE FROM t", "delete from t", "UPDATE t SET a=1", "INSERT INTO t VALUES (1)",
+                    "DROP TABLE t", "TRUNCATE t", "ALTER TABLE t ADD c INT", "CREATE TABLE t (a INT)",
+                    "GRANT ALL ON *.* TO x", "SELECT 1; DELETE FROM t"] {
+            assert!(!sql_is_readonly(sql), "should be blocked: {:?}", sql);
+        }
+    }
+
+    #[test]
+    fn read_only_sees_through_comments() {
+        assert!(!sql_is_readonly("/* harmless */ DELETE FROM t"));
+        assert!(!sql_is_readonly("-- comment\nDELETE FROM t"));
+        assert!(!sql_is_readonly("# comment\nDELETE FROM t"));
+        assert!(sql_is_readonly("SELECT 1 -- DELETE FROM t"));
+    }
+
+    #[test]
+    fn read_only_blocks_mysql_executable_comments() {
+        // MySQL EXECUTES the body of /*! ... */ - it is a version-gated directive, not a
+        // comment - so stripping it before the keyword check lets a write through.
+        assert!(!sql_is_readonly("/*!50000 DELETE FROM t */"));
+        assert!(!sql_is_readonly("SELECT 1; /*!DROP TABLE t */"));
+    }
+
+    #[test]
+    fn read_only_blocks_server_state_changes() {
+        // SET on a session variable is harmless; GLOBAL and PERSIST change the server for
+        // everyone, which "read-only / safe mode" should not permit.
+        assert!(sql_is_readonly("SET autocommit=0"));
+        assert!(!sql_is_readonly("SET GLOBAL max_connections=1"));
+        assert!(!sql_is_readonly("SET PERSIST max_connections=1"));
+    }
+
+    #[test]
+    fn split_handles_plain_statements() {
+        assert_eq!(split_sql_statements("SELECT 1; SELECT 2"), vec!["SELECT 1", "SELECT 2"]);
+        assert_eq!(split_sql_statements("SELECT 1;"), vec!["SELECT 1"]);
+        assert_eq!(split_sql_statements("   "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn split_does_not_break_on_semicolons_inside_strings() {
+        assert_eq!(split_sql_statements("SELECT 'a;b'"), vec!["SELECT 'a;b'"]);
+        assert_eq!(split_sql_statements("SELECT \"a;b\""), vec!["SELECT \"a;b\""]);
+        assert_eq!(split_sql_statements("SELECT 'it''s;fine'"), vec!["SELECT 'it''s;fine'"]);
+    }
+
+    #[test]
+    fn split_honours_delimiter_directive() {
+        let sql = "DELIMITER $$\nCREATE PROCEDURE p() BEGIN SELECT 1; SELECT 2; END$$\nDELIMITER ;";
+        let out = split_sql_statements(sql);
+        assert_eq!(out.len(), 1, "procedure body must stay one statement, got {:?}", out);
+        assert!(out[0].contains("SELECT 1; SELECT 2"), "body was split: {:?}", out);
+    }
+
+    #[test]
+    fn strip_use_reports_last_database_and_remainder() {
+        let (db, rest) = strip_leading_use_statements("USE shop; SELECT 1");
+        assert_eq!(db.as_deref(), Some("shop"));
+        assert_eq!(rest.trim(), "SELECT 1");
+
+        let (db, _) = strip_leading_use_statements("USE `a b`; USE second; SELECT 1");
+        assert_eq!(db.as_deref(), Some("second"), "the LAST USE wins");
+
+        let (db, rest) = strip_leading_use_statements("SELECT 1");
+        assert_eq!(db, None);
+        assert_eq!(rest.trim(), "SELECT 1");
+    }
+
+    #[test]
+    fn row_key_distinguishes_rows_that_differ_only_by_field_boundary() {
+        let a = vec![Some("a".to_string()), Some("b".to_string())];
+        let b = vec![Some("ab".to_string()), None];
+        assert_ne!(row_key(&a), row_key(&b));
+        assert_eq!(row_key(&[None]), row_key(&[Some(String::new())]));
+    }
+
+    #[test]
+    fn ver_key_orders_numerically_not_lexically() {
+        assert!(ver_key("11.4.2") > ver_key("9.9.9"), "11.x must beat 9.x");
+        assert!(ver_key("10.11.0") > ver_key("10.9.0"), "10.11 must beat 10.9");
+    }
+
+    #[test]
+    fn tool_search_dirs_covers_every_real_install_layout() {
+        let root = std::env::temp_dir().join(format!("nobs-tooltest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let layouts = ["Program Files/MariaDB 11.4/bin",
+                       "Program Files/MySQL/MySQL Server 8.0/bin",
+                       "wamp64/bin/mariadb/mariadb11.4/bin"];
+        for l in layouts { std::fs::create_dir_all(root.join(l)).unwrap(); }
+        std::fs::create_dir_all(root.join("Program Files/Unrelated/bin")).unwrap();
+
+        let bases = vec![root.join("Program Files"), root.join("wamp64/bin")];
+        let direct = vec![root.join("xampp/mysql/bin")];
+        let dirs = tool_search_dirs(&bases, &direct);
+
+        for l in layouts { assert!(dirs.contains(&root.join(l)), "layout not searched: {}", l); }
+        assert!(dirs.contains(&root.join("xampp/mysql/bin")), "direct dir not searched");
+        assert!(!dirs.iter().any(|d| d.to_string_lossy().contains("Unrelated")),
+                "unrelated Program Files entry should be skipped");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn first_err_prefers_the_error_line() {
+        assert_eq!(first_err("some echoed statement\nERROR 1064 (42000): You have an error"),
+                   "ERROR 1064 (42000): You have an error");
+        assert_eq!(first_err("plain failure text"), "plain failure text");
+    }
 }
