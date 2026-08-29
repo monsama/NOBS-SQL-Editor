@@ -232,7 +232,11 @@ fn resolve_bin(names: &[&str], env_key: &str) -> Result<String, String> {
     let name = names[0];
     match Command::new(name).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status() {
         Ok(_) => Ok(name.to_string()),
-        Err(_) => Err(format!("Could not find '{}'. Install the MySQL/MariaDB client tools and add their bin folder to PATH, or set the {} environment variable to the full path of {}.exe.", name, env_key, name)),
+        // Names the Settings dialog first: it is the fix inside the app (pick the path, or download
+        // the MariaDB client tools), whereas PATH and the environment variable both need a restart
+        // to take effect. The "Could not find '<tool>'" prefix is matched by showToolError() in the
+        // UI to decide whether to offer an Open Settings button - keep it if this text changes.
+        Err(_) => Err(format!("Could not find '{}'. Open Settings in the app to select {}.exe or download the MariaDB client tools. Alternatively add its bin folder to PATH, or set the {} environment variable to its full path.", name, name, env_key)),
     }
 }
 
