@@ -300,24 +300,55 @@ fn resolve_tool(app: &tauri::AppHandle, base: &str, names: &[&str], env_key: &st
     // 2) fall back to env var / common install dirs / PATH
     resolve_bin(names, env_key)
 }
+// Directories to search for a client-tool executable, in order, under each of `bases`: any child
+// named MariaDB*/MySQL* contributes its own bin, then each of ITS children's bin. Both layouts
+// are needed and the old code only handled the second: MariaDB installs to
+// "Program Files\MariaDB 11.4\bin" (version in the folder name, bin directly inside) while
+// MySQL installs to "Program Files\MySQL\MySQL Server 8.0\bin" (one level deeper). Scanning
+// only <root>\<child>\bin from a "Program Files\MariaDB" root missed every real MariaDB
+// install, and the same shape missed XAMPP, whose bin sits directly at "xampp\mysql\bin" -
+// both of which the Settings dialog claimed were checked. `direct` covers that last case.
+// Kept separate from resolve_bin so it can be exercised against a temporary tree in a test
+// rather than only on a machine that happens to have these products installed.
+fn tool_search_dirs(bases: &[std::path::PathBuf], direct: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    for base in bases {
+        let rd = match std::fs::read_dir(base) { Ok(r) => r, Err(_) => continue };
+        // Sorted so the order is deterministic rather than whatever the filesystem returns.
+        let mut kids: Vec<std::path::PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        kids.sort();
+        for kid in kids {
+            let name = kid.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if !(name.starts_with("mariadb") || name.starts_with("mysql")) { continue; }
+            out.push(kid.join("bin"));
+            if let Ok(sub) = std::fs::read_dir(&kid) {
+                let mut subs: Vec<std::path::PathBuf> = sub.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+                subs.sort();
+                for s in subs { out.push(s.join("bin")); }
+            }
+        }
+    }
+    out.extend(direct.iter().cloned());
+    out
+}
+
 fn resolve_bin(names: &[&str], env_key: &str) -> Result<String, String> {
     if let Ok(p) = std::env::var(env_key) {
         if !p.is_empty() && std::path::Path::new(&p).exists() { return Ok(p); }
     }
-    #[cfg(windows)]
     {
-        let roots = ["C:\\Program Files\\MariaDB", "C:\\Program Files\\MySQL",
-                     "C:\\Program Files (x86)\\MariaDB", "C:\\Program Files (x86)\\MySQL",
-                     "C:\\xampp\\mysql", "C:\\wamp64\\bin\\mariadb", "C:\\wamp64\\bin\\mysql"];
-        for root in roots {
-            if let Ok(rd) = std::fs::read_dir(root) {
-                for e in rd.flatten() {
-                    let mut bin = e.path(); bin.push("bin");
-                    for n in names {
-                        let mut f = bin.clone(); f.push(format!("{}.exe", n));
-                        if f.exists() { return Ok(f.to_string_lossy().to_string()); }
-                    }
-                }
+        #[cfg(windows)]
+        let (bases, direct) = (
+            vec![std::path::PathBuf::from("C:\\Program Files"),
+                 std::path::PathBuf::from("C:\\Program Files (x86)"),
+                 std::path::PathBuf::from("C:\\wamp64\\bin")],
+            vec![std::path::PathBuf::from("C:\\xampp\\mysql\\bin")]);
+        #[cfg(not(windows))]
+        let (bases, direct): (Vec<std::path::PathBuf>, Vec<std::path::PathBuf>) = (vec![], vec![]);
+        for d in tool_search_dirs(&bases, &direct) {
+            for n in names {
+                let f = d.join(format!("{}.exe", n));
+                if f.exists() { return Ok(f.to_string_lossy().to_string()); }
             }
         }
     }
