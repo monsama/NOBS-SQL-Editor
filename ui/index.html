@@ -2764,6 +2764,21 @@ const EXPOPTS=[
  ['gtid','set-gtid-purged=OFF',0,'Do not write GTID replication info: avoids import errors on non-GTID servers.','Compatibility'],
  ['colstats','column-statistics=0',0,'Disable column statistics: fixes an error when a MySQL 8 client dumps MariaDB.','Compatibility']
 ];
+// openExport() rebuilds the option checkboxes every time it runs, so each one came back at
+// its EXPOPTS default and any choice the user had made was silently discarded the next time
+// the dialog opened. Unchecking "routines" and "events" then exporting again quietly dumped
+// them anyway - and the same applied to add-drop-table, which is a good deal worse to get
+// wrong by surprise. Remember the choices and put them back after the rebuild.
+function expOptsLoad(){ try{ const v=JSON.parse(localStorage.getItem('nobsExpOpts')||'{}'); return (v&&typeof v==='object')?v:{}; }catch(e){ return {}; } }
+function expOptsSave(){ const o={}; EXPOPTS.forEach(([k])=>{const el=$('eo_'+k); if(el)o[k]=!!el.checked;}); try{ localStorage.setItem('nobsExpOpts',JSON.stringify(o)); }catch(e){} }
+function expOptsRestore(){
+ const saved=expOptsLoad();
+ EXPOPTS.forEach(([k])=>{
+  const el=$('eo_'+k); if(!el)return;
+  if(Object.prototype.hasOwnProperty.call(saved,k)) el.checked=!!saved[k];
+  el.addEventListener('change',expOptsSave);
+ });
+}
 async function openExport(preselect){const r=await api('/api/schemas');const box=$('expDbs');box.innerHTML='';if(r.ok)r.schemas.forEach(s=>{const safe=s.name.replace(/[^A-Za-z0-9]/g,'_');const dbAttr=esc(s.name).replace(/\x27/g,'\\x27');box.innerHTML+='<div class="expdbrow"><span class="exptoggle" id="expx_'+safe+'" onclick="expTables(\''+dbAttr+'\',\''+safe+'\')" title="Show tables to exclude">\u25B8</span><label class="ck" style="display:inline-flex"><input type="checkbox" class="expdb" value="'+esc(s.name)+'" onchange="expDbToggle(\''+safe+'\',this.checked)"> '+esc(s.name)+'</label><div class="exptbls" id="expt_'+safe+'" style="display:none"></div></div>';});const ob=$('expOpts');ob.innerHTML='';
 const grouped={};EXPOPTS.forEach(o=>{const g=o[4]||'Other';(grouped[g]=grouped[g]||[]).push(o);});
 ['Content','Performance','Compatibility'].forEach(g=>{
@@ -2771,6 +2786,7 @@ const grouped={};EXPOPTS.forEach(o=>{const g=o[4]||'Other';(grouped[g]=grouped[g
   ob.innerHTML+='<div style="grid-column:1/-1;font-weight:600;font-size:11px;color:var(--muted);margin-top:6px">'+g+'</div>';
   grouped[g].forEach(([k,l,d,t])=>{ob.innerHTML+='<label class="ck" title="'+esc(t||'')+'"><input type="checkbox" id="eo_'+k+'" '+(d?'checked':'')+'> '+l+'</label>';});
 });
+expOptsRestore();
 if(preselect&&preselect.db){
   document.querySelectorAll('.expdb').forEach(cb=>{cb.checked=(cb.value===preselect.db);});
   if(preselect.table){
