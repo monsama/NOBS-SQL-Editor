@@ -31,6 +31,9 @@ use tauri::Emitter;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 static EXPORT_CANCEL: AtomicBool = AtomicBool::new(false);
+// Marks a run() that ended because the user pressed Cancel, so the caller can log it as a
+// cancellation rather than a failure. A NUL cannot appear in a mysqldump message.
+const RUN_CANCELLED: &str = "\u{0}cancelled";
 
 // ---------- cancellable Export / Import jobs ----------
 // One "job" is a single Export or Import run started from the UI, identified by the jobId the
@@ -1058,6 +1061,12 @@ async fn import(app: tauri::AppHandle, req: Value) -> R {
 #[tauri::command]
 async fn export(app: tauri::AppHandle, req: Value) -> R {
     let dbin = match resolve_tool(&app, "mysqldump", &["mysqldump", "mariadb-dump"], "MYSQLDUMP_BIN") { Ok(b) => b, Err(e) => return Ok(json!({"ok":false,"error":e})) };
+    export_run(req, dbin).await
+}
+
+// The body, split out so it can be driven from a test without a tauri::AppHandle - resolving
+// the mysqldump path is the only thing the handle was needed for.
+async fn export_run(req: Value, dbin: String) -> R {
     EXPORT_CANCEL.store(false, Ordering::SeqCst);
     tokio::task::spawn_blocking(move || {
         let jid = req["jobId"].as_str().unwrap_or("").to_string();
@@ -1107,7 +1116,17 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
                     let sz = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
                     Ok((true, format!("OK  {} ({:.2} MB)", file, sz as f64 / 1048576.0)))
                 }
-                Ok(o2) => Ok((false, first_err(&String::from_utf8_lossy(&o2.stderr)))),
+                Ok(o2) => {
+                    // A child killed by Cancel has no stderr to report - run_job_child skips
+                    // reading it, because anything holding the pipe open would stall exactly
+                    // the cancel it was asked to perform. That produced "FAILED <table> : "
+                    // with nothing after the colon. Name the real reason instead, and never
+                    // report an empty one.
+                    let e = first_err(&String::from_utf8_lossy(&o2.stderr));
+                    if !e.trim().is_empty() { Ok((false, e)) }
+                    else if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { Ok((false, RUN_CANCELLED.into())) }
+                    else { Ok((false, format!("mysqldump exited with {} and no error output", o2.status))) }
+                }
                 Err(e) => Ok((false, e.to_string())),
             }
         };
@@ -1129,7 +1148,7 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
             a.push(format!("--result-file={}", file));
             match run(&dbin, &a, &file) {
                 Ok((true, msg)) => log.push(msg),
-                Ok((false, err)) => log.push(format!("FAILED all_selected : {}", err)),
+                Ok((false, err)) => { if err == RUN_CANCELLED { log.push("CANCELLED all_selected".into()); cancelled = true; } else { log.push(format!("FAILED all_selected : {}", err)); } }
                 Err(e) => log.push(format!("FAILED all_selected : {}", e)),
             }
         } else if mode == "db" {
@@ -1148,7 +1167,7 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
                 a.push(format!("--result-file={}", file));
                 match run(&dbin, &a, &file) {
                     Ok((true, msg)) => log.push(msg),
-                    Ok((false, err)) => log.push(format!("FAILED {} : {}", d, err)),
+                    Ok((false, err)) => { if err == RUN_CANCELLED { log.push(format!("CANCELLED {}", d)); cancelled = true; } else { log.push(format!("FAILED {} : {}", d, err)); } }
                     Err(e) => log.push(format!("FAILED {} : {}", d, e)),
                 }
             }
@@ -1174,7 +1193,7 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
                     a.push(format!("--result-file={}", file));
                     match run(&dbin, &a, &file) {
                         Ok((true, msg)) => log.push(msg),
-                        Ok((false, err)) => log.push(format!("FAILED {} : {}", key, err)),
+                        Ok((false, err)) => { if err == RUN_CANCELLED { log.push(format!("CANCELLED {}", key)); cancelled = true; } else { log.push(format!("FAILED {} : {}", key, err)); } }
                         Err(e) => log.push(format!("FAILED {} : {}", key, e)),
                     }
                 }
@@ -1189,7 +1208,7 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
                     a.push(format!("--result-file={}", file));
                     match run(&dbin, &a, &file) {
                         Ok((true, msg)) => log.push(format!("{} (routines/events)", msg)),
-                        Ok((false, err)) => log.push(format!("FAILED {} routines/events : {}", d, err)),
+                        Ok((false, err)) => { if err == RUN_CANCELLED { log.push(format!("CANCELLED {} routines/events", d)); cancelled = true; } else { log.push(format!("FAILED {} routines/events : {}", d, err)); } }
                         Err(e) => log.push(format!("FAILED {} routines/events : {}", d, e)),
                     }
                 }
@@ -2693,5 +2712,50 @@ mod apply_tests {
         println!("  after a valid batch: {:?} / {:?}", a["rows"][0][0], b["rows"][0][0]);
         assert_eq!(a["rows"][0][0].as_str().unwrap_or(""), "batch-a");
         assert_eq!(b["rows"][0][0].as_str().unwrap_or(""), "batch-b");
+    }
+}
+
+#[cfg(test)]
+mod export_cancel_tests {
+    use super::*;
+
+    // Cancelling an export kills the running mysqldump, which then has no stderr to report -
+    // run_job_child deliberately does not wait for it. The log line was built from that empty
+    // string, so a cancelled dump appeared as "FAILED <db> routines/events : " with nothing
+    // after the colon: a failure, with no reason, for something the user asked to stop.
+    #[tokio::test]
+    #[ignore]
+    async fn cancelling_an_export_is_logged_as_cancelled_not_an_empty_failure() {
+        let Some(dsn) = std::env::var("NOBS_TEST_DSN").ok() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let p: Vec<&str> = dsn.split(':').collect();
+        let conn = json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"});
+        let dir = std::env::temp_dir().join("nobs-export-cancel");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let jid = "export-cancel-test";
+        let req = json!({
+            "dbs": ["nobs_test"], "folder": dir.to_string_lossy(), "mode": "table",
+            "conn": conn, "jobId": jid, "excludes": [],
+            "options": {"charset":"utf8mb4","routines":true,"events":true,"quick":true,"extinsert":true}
+        });
+        let handle = tokio::spawn(export_run(req, std::env::var("MYSQLDUMP_BIN").unwrap_or_else(|_| "mysqldump".into())));
+        // let it get into the dump of the 100k-row tables, then stop it
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        let c = cancel_job(json!({"jobId": jid})).unwrap();
+        println!("  cancel_job -> {}", c);
+        let r = handle.await.unwrap().unwrap();
+
+        let empty: Vec<Value> = Vec::new();
+        let lines: Vec<String> = r["log"].as_array().unwrap_or(&empty).iter()
+            .map(|v| v.as_str().unwrap_or("").to_string()).collect();
+        for l in &lines { println!("  | {}", l); }
+
+        let empty_failure: Vec<&String> = lines.iter()
+            .filter(|l| l.starts_with("FAILED") && l.trim_end().ends_with(':')).collect();
+        assert!(empty_failure.is_empty(), "a FAILED line with no reason: {:?}", empty_failure);
+        assert!(lines.iter().any(|l| l.contains("CANCELLED")), "nothing reported the cancellation: {:?}", lines);
+        assert_eq!(r["cancelled"], true, "the run should report itself cancelled");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
