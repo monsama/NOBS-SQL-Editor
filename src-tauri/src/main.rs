@@ -2992,3 +2992,48 @@ mod csv_null_tests {
         let _ = std::fs::remove_file(&file);
     }
 }
+
+#[cfg(test)]
+mod interop_tests {
+    use super::*;
+    fn conn_json() -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some(json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"}))
+    }
+
+    // Can a CSV written by another client be read back with NULL and empty string intact?
+    // HeidiSQL defaults to \N for NULL; MySQL Workbench writes the literal word NULL.
+    #[tokio::test]
+    #[ignore]
+    async fn csv_from_heidisql_and_workbench_round_trips() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let q = |sql: &str| { let c = conn.clone(); let s = sql.to_string();
+            async move { query(json!({"sql":s,"conn":c,"db":"nobs_test"})).await.unwrap() } };
+
+        // (label, marker the user would set, file contents as that tool writes them)
+        let cases = [
+            ("HeidiSQL default (\\N)",   "\\N",   "id,v\n1,\\N\n2,\n3,text\n"),
+            ("Workbench (literal NULL)", "NULL",  "id,v\n1,NULL\n2,\n3,text\n"),
+            ("spreadsheet (blank=NULL)", "",      "id,v\n1,\n2,\n3,text\n"),
+        ];
+        for (label, marker, body) in cases {
+            q("DROP TABLE IF EXISTS csv_interop").await;
+            q("CREATE TABLE csv_interop (id INT PRIMARY KEY, v VARCHAR(32) NULL)").await;
+            let f = std::env::temp_dir().join("csv_interop.csv");
+            std::fs::write(&f, body).unwrap();
+            let r = importcsv(json!({"conn":conn,"db":"nobs_test","table":"csv_interop",
+                                     "file":f.to_string_lossy(),"hasHeader":true,"nullValue":marker})).await.unwrap();
+            assert_eq!(r["ok"], true, "{label}: import failed: {r}");
+            let back = q("SELECT id, CASE WHEN v IS NULL THEN 'NULL' WHEN v='' THEN 'empty' ELSE v END AS got FROM csv_interop ORDER BY id").await;
+            let got: Vec<String> = back["rows"].as_array().unwrap().iter()
+                .map(|r| r[1].as_str().unwrap_or("?").to_string()).collect();
+            println!("  {:<26} NULL value={:<6} -> {:?}", label, format!("{:?}", marker), got);
+            assert_eq!(got[0], "NULL", "{label}: row 1 should be NULL");
+            assert_eq!(got[2], "text", "{label}: row 3 should be text");
+            let _ = std::fs::remove_file(&f);
+        }
+        q("DROP TABLE IF EXISTS csv_interop").await;
+    }
+}
