@@ -256,7 +256,10 @@ fn db_err(e: impl std::string::ToString) -> String {
         .map(|r| r.to_string()).unwrap_or(s)
 }
 
-fn run_select(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+// Which columns are binary/BIT is decided here for display encoding; run_select_bin also hands
+// it back so the grid can refuse to write a decimal into one. Typing 8 into a BIT(8) cell stored
+// 56 - the byte value of the character '8' - with no error at all.
+fn run_select_bin(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option<String>>>, Vec<bool>), String> {
     let mut result = conn.query_iter(sql).map_err(db_err)?;
     let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
     let bin: Vec<bool> = result.columns().as_ref().iter().map(|c| is_binaryish(c)).collect();
@@ -270,7 +273,12 @@ fn run_select(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option
         }
         rows.push(cells);
     }
-    Ok((cols, rows))
+    Ok((cols, rows, bin))
+}
+
+fn run_select(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+    let (c, r, _) = run_select_bin(conn, sql)?;
+    Ok((c, r))
 }
 
 // ---------- SQL text helpers (identifier + literal, Workbench-style + hex rule) ----------
@@ -680,14 +688,14 @@ async fn query(req: Value) -> R {
             }
         }
         let t = std::time::Instant::now();
-        let result = match run_select(&mut c, &sql) {
-            Ok((cols, rows)) => {
+        let result = match run_select_bin(&mut c, &sql) {
+            Ok((cols, rows, bin)) => {
                 if cols.is_empty() {
                     Ok(json!({"ok":true,"columns":[],"rows":[],"elapsedMs":t.elapsed().as_millis() as u64,"message":"Query OK. No result set."}))
                 } else {
                     // No artificial row cap here - the query's own LIMIT is what bounds the result;
                     // paging through what's returned is handled client-side (matches the PS version).
-                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"elapsedMs":t.elapsed().as_millis() as u64}))
+                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"elapsedMs":t.elapsed().as_millis() as u64}))
                 }
             }
             Err(e) => {
@@ -2864,5 +2872,24 @@ mod import_tests {
         assert!(line.contains("1046") || line.contains("No database selected"));
         assert!(line.contains("Target database"), "no hint about choosing a target: {line}");
         let _ = std::fs::remove_file(&f);
+    }
+}
+
+#[cfg(test)]
+mod binary_col_tests {
+    use super::*;
+    #[tokio::test]
+    #[ignore]
+    async fn query_reports_which_columns_are_binary() {
+        let Some(dsn) = std::env::var("NOBS_TEST_DSN").ok() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let p: Vec<&str> = dsn.split(':').collect();
+        let conn = json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"});
+        let r = query(json!({"sql":"SELECT id, emoji, bin_col, blob_col, bit_col, bit8 FROM charset_binary",
+                             "conn":conn,"db":"nobs_test"})).await.unwrap();
+        let cols: Vec<String> = r["columns"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        let bin: Vec<bool> = r["binaryCols"].as_array().expect("binaryCols missing").iter().map(|v| v.as_bool().unwrap()).collect();
+        for (c, b) in cols.iter().zip(bin.iter()) { println!("  {:<10} binary={}", c, b); }
+        assert_eq!(bin, vec![false, false, true, true, true, true],
+                   "id and emoji are text; bin_col, blob_col and both BIT columns are binary");
     }
 }
