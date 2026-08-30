@@ -155,9 +155,14 @@ BEGIN
 END$$
 DELIMITER ;
 
-SELECT 'seed complete' AS status,
-       (SELECT COUNT(*) FROM ro_canary)      AS ro_canary,
-       (SELECT COUNT(*) FROM txn_child)      AS txn_child,
-       (SELECT COUNT(*) FROM txn_composite)  AS txn_composite,
-       (SELECT COUNT(*) FROM charset_binary) AS charset_binary,
-       (SELECT COUNT(*) FROM bulk_rows)      AS bulk_rows;
+-- Deliberately NOT ending on a SELECT.
+--
+-- The app splits a pasted script whose LAST statement is a SELECT into two
+-- steps: everything before it goes to the script runner, and the SELECT runs
+-- separately. Those are two different connections, so the USE above would not
+-- carry over and the SELECT would fail with "No database selected". Ending on
+-- a non-SELECT keeps the whole file on the single script path, so this file
+-- works pasted into the editor as well as piped through the mysql CLI.
+--
+-- Run the verification query from docs/TESTING.md afterwards, once nobs_test
+-- is selected in the sidebar.
