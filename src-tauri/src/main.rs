@@ -956,16 +956,30 @@ async fn script(req: Value) -> R {
         let total = statements.len();
         let continue_on_error = req["continueOnError"].as_bool().unwrap_or(false);
 
+        // Applying staged grid edits sends several statements that only make sense together -
+        // if the third fails, the first two must not stay. Without this the batch ran on
+        // autocommit and a failure left the table half-updated, which is the one outcome a
+        // "pending changes" model exists to prevent.
+        let transactional = req["transaction"].as_bool().unwrap_or(false) && !continue_on_error;
+
         if !continue_on_error {
-            // Default, unchanged behavior: stop at the first failure. Every existing caller
-            // (table designer Apply, DDL create-or-replace, compare-databases Apply, pending
-            // grid-edit Apply) omits continueOnError entirely, so this branch - and its exact
-            // response shape - is untouched by this feature's addition.
+            // Default: stop at the first failure. Callers that pass transaction:true also get
+            // everything rolled back; the others keep the original autocommit behaviour.
+            if transactional { c.query_drop("START TRANSACTION").map_err(db_err)?; }
             for (idx, stmt) in statements.iter().enumerate() {
                 if let Err(e) = c.query_drop(stmt) {
                     let preview: String = stmt.chars().take(120).collect();
                     let suffix = if stmt.chars().count() > 120 { "..." } else { "" };
-                    return Ok(json!({"ok":false,"error":format!("Statement {} of {} failed: {}\n\n{}{}", idx+1, total, e, preview, suffix)}));
+                    if transactional { let _ = c.query_drop("ROLLBACK"); }
+                    let e = db_err(e);
+                    let note = if transactional { "\n\nNo changes were applied - the batch was rolled back." } else { "" };
+                    return Ok(json!({"ok":false,"error":format!("Statement {} of {} failed: {}\n\n{}{}{}", idx+1, total, e, preview, suffix, note)}));
+                }
+            }
+            if transactional {
+                if let Err(e) = c.query_drop("COMMIT") {
+                    let _ = c.query_drop("ROLLBACK");
+                    return Ok(json!({"ok":false,"error":format!("Could not commit: {}\n\nNo changes were applied.", db_err(e))}));
                 }
             }
             return Ok(json!({"ok":true}));
@@ -2611,5 +2625,73 @@ mod live_tests {
         println!("  cancelled query        -> {}", r["error"].as_str().unwrap_or(""));
         assert_eq!(r["error"], "Query cancelled.");
         assert_eq!(r["cancelled"], true);
+    }
+}
+
+#[cfg(test)]
+mod apply_tests {
+    use super::*;
+    fn conn_json() -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some(json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"}))
+    }
+    async fn one(conn: &Value, sql: &str) -> Value {
+        query(json!({"sql":sql,"conn":conn,"db":"nobs_test"})).await.unwrap()
+    }
+
+    // Staged grid edits are applied as one batch. If a later statement fails, the earlier ones
+    // must not remain - a half-applied edit is the outcome the pending-changes model exists to
+    // prevent, and the README promises a transaction.
+    #[tokio::test]
+    #[ignore]
+    async fn a_failed_batch_applies_nothing() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        one(&conn, "UPDATE txn_child SET descr='original' WHERE id=1").await;
+        let batch = "UPDATE nobs_test.txn_child SET descr='EDITED FIRST' WHERE id=1 LIMIT 1;\n\
+                     UPDATE nobs_test.txn_child SET qty=-1 WHERE id=2 LIMIT 1;\n\
+                     UPDATE nobs_test.txn_child SET descr='EDITED THIRD' WHERE id=3 LIMIT 1;";
+        let r = script(json!({"sql":batch,"conn":conn,"db":"nobs_test","transaction":true})).await.unwrap();
+        assert_eq!(r["ok"], false, "the batch should fail on the CHECK constraint");
+        println!("  batch error: {}", r["error"].as_str().unwrap_or("").lines().next().unwrap_or(""));
+        let after = one(&conn, "SELECT descr FROM txn_child WHERE id=1").await;
+        let descr = after["rows"][0][0].as_str().unwrap_or("");
+        println!("  descr of row 1 after the failed batch: {:?}", descr);
+        assert_eq!(descr, "original", "an earlier statement survived a failed batch");
+    }
+
+    // Grid edits used to run with FOREIGN_KEY_CHECKS=0, so an edit could point a row at a
+    // parent that does not exist.
+    #[tokio::test]
+    #[ignore]
+    async fn foreign_keys_are_enforced_on_apply() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        one(&conn, "UPDATE txn_child SET parent_id=2 WHERE code='CCC'").await;
+        let batch = "UPDATE nobs_test.txn_child SET parent_id=99 WHERE code='CCC' LIMIT 1;";
+        let r = script(json!({"sql":batch,"conn":conn,"db":"nobs_test","transaction":true})).await.unwrap();
+        println!("  FK-violating edit: ok={} err={}", r["ok"],
+                 r["error"].as_str().unwrap_or("").lines().next().unwrap_or(""));
+        assert_eq!(r["ok"], false, "an edit pointing at a missing parent must be rejected");
+        let after = one(&conn, "SELECT parent_id FROM txn_child WHERE code='CCC'").await;
+        assert_eq!(after["rows"][0][0].as_str().unwrap_or(""), "2", "the orphaning edit was applied anyway");
+    }
+
+    // ...while a valid batch still applies in full.
+    #[tokio::test]
+    #[ignore]
+    async fn a_valid_batch_applies_completely() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        // Rows 4 and 5, which no other test in this module touches: cargo runs these in
+        // parallel against one database, and sharing a row made them race.
+        let batch = "UPDATE nobs_test.txn_child SET descr='batch-a' WHERE id=4 LIMIT 1;\n\
+                     UPDATE nobs_test.txn_child SET descr='batch-b' WHERE id=5 LIMIT 1;";
+        let r = script(json!({"sql":batch,"conn":conn,"db":"nobs_test","transaction":true})).await.unwrap();
+        assert_eq!(r["ok"], true, "valid batch should apply");
+        let a = one(&conn, "SELECT descr FROM txn_child WHERE id=4").await;
+        let b = one(&conn, "SELECT descr FROM txn_child WHERE id=5").await;
+        println!("  after a valid batch: {:?} / {:?}", a["rows"][0][0], b["rows"][0][0]);
+        assert_eq!(a["rows"][0][0].as_str().unwrap_or(""), "batch-a");
+        assert_eq!(b["rows"][0][0].as_str().unwrap_or(""), "batch-b");
     }
 }

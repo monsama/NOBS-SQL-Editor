@@ -98,7 +98,10 @@ one of them illegal, and apply:
 | `qty` of row `BBB` → `-1` | `ERROR 4025` CHECK `chk_txn_qty` |
 | `parent_id` of row `CCC` → `99` | `ERROR 1452` foreign key |
 | `code` of row `DDD` → `AAA` | `ERROR 1062` duplicate key |
-| `code` of row `EEE` → empty | `ERROR 1048` column cannot be null |
+| `code` of row `EEE` → **NULL** (the grid's set-NULL action, not an empty cell) | `ERROR 1048` column cannot be null |
+
+Note that clearing `code` to an **empty string** succeeds — `''` is a perfectly valid
+value for a `NOT NULL VARCHAR`. Only a real NULL is rejected.
 
 Suggested run: change `descr` on `AAA`, `qty` on `CCC`, **and** `qty` on `BBB`
 to `-1`. Apply. The error should surface, and then:

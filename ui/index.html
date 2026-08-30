@@ -2086,7 +2086,11 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
  t.pending.del.forEach(ri=>{const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('DELETE FROM '+tbl+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
  t.pending.ins.forEach(row=>{const cols=Object.keys(row);if(!cols.length)return;S.push('INSERT INTO '+tbl+' ('+cols.map(qid).join(',')+') VALUES ('+cols.map(c=>lit(row[c])).join(',')+');');});
  if(!S.length)return;log('APPLY:\n'+S.join('\n'));
- const r=await api('/api/script',{sql:'SET FOREIGN_KEY_CHECKS=0;\n'+S.join('\n')});
+ // Runs as one transaction, so a failure part-way leaves the table exactly as it was.
+ // Foreign keys are NOT disabled here: they were, which let an edit point a row at a
+ // parent that does not exist and silently break referential integrity the schema was
+ // written to guarantee.
+ const r=await api('/api/script',{sql:S.join('\n'),transaction:true});
  if(r.ok){log('Applied '+S.length+' change(s).');invalidateTableCache(t.db,t.table);openRun(id).then(()=>refreshTabDirty(id));}else{log('APPLY error: '+r.error);alert('Apply failed:\n\n'+r.error);}}
 
 async function applyDdl(id){if(roBlock())return;const t=T(id);const st=$('st_'+id);st.className='status';st.textContent='Applying...';const r=await api('/api/script',{sql:$('ed_'+id).value,db:(t.ddl&&t.ddl.db)||dbOf(t)});if(r.ok){st.textContent='Applied OK.';log('APPLY OK: '+t.title);if(t.ddl)loadObjects(t.ddl.db);}else{st.className='status err';st.textContent=r.error;log('APPLY ERROR: '+r.error);}}
