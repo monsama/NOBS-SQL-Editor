@@ -1536,6 +1536,23 @@ const T=id=>tabs.find(t=>t.id===id);
 // cursor position falls within. Existing callers all omit it, so their return shape (plain
 // trimmed strings) is completely unaffected; only the SAME reset point that already existed
 // (an actual delimiter match, never the DELIMITER directive itself) also updates curStart.
+// Comments are not statements, but splitStmts() has no reason to know that - it splits on the
+// delimiter, so "SELECT 1; -- note" comes back as two pieces and a leading "-- note" ends up
+// glued to the front of the statement it precedes. Both then defeat the keyword test that
+// decides whether a run can show a result grid, so an ordinary commented SELECT ran fine and
+// displayed nothing but "Script OK". Same failure the USE-statement comment above describes.
+// sqlHead() returns a statement with leading whitespace and comments removed, for classifying
+// only - what gets SENT is still the original text, comments and all.
+function sqlHead(s){
+ let t=String(s==null?'':s);
+ for(;;){
+  const b=t.replace(/^\s+/,'');
+  if(b.startsWith('--')||b.startsWith('#')){ const nl=b.indexOf('\n'); if(nl<0)return ''; t=b.slice(nl+1); continue; }
+  if(b.startsWith('/*')){ const e=b.indexOf('*/'); if(e<0)return ''; t=b.slice(e+2); continue; }
+  return b;
+ }
+}
+function isCommentOnly(s){ return sqlHead(s)===''; }
 function splitStmts(sql,withPos){let out=[],cur='',curStart=0,i=0,q=null,delim=';';sql=sql.replace(/\r\n/g,'\n');
  while(i<sql.length){const c=sql[i];
   if(q){cur+=c;if(c==='\\'&&q!=='`'){cur+=sql[i+1]||'';i+=2;continue;}if(c===q)q=null;i++;continue;}
@@ -1551,7 +1568,7 @@ function splitStmts(sql,withPos){let out=[],cur='',curStart=0,i=0,q=null,delim='
 async function runTab(id){await runSql(id,$('ed_'+id).value);}
 async function explainTab(id){
  const ta=$('ed_'+id);const sel=ta.value.substring(ta.selectionStart,ta.selectionEnd).trim();
- const src=sel||ta.value;const stmts=splitStmts(src);const stmt=(stmts[0]||src).trim().replace(/;+\s*$/,'');
+ const src=sel||ta.value;const stmts=splitStmts(src).filter(s=>!isCommentOnly(s));const stmt=(stmts[0]||src).trim().replace(/;+\s*$/,'');
  if(!stmt){toast('Nothing to explain.',true);return;}
  await runSql(id,'EXPLAIN '+stmt);
 }
@@ -1630,7 +1647,7 @@ function dbOf(t){ if(t&&(t.table||t.ddl)&&!t.sqlEdited)return t.db||curSchema||n
 // runSql(): send the editor SQL to the server and show the rows (or the error).
 async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sql!==t.curRun){t.prevRun=t.curRun;t.curRun=sql;}const st=$('st_'+id);st.className='status';st.textContent='Running\u2026';
  addHistory(sql);
- const stmts=splitStmts(sql);
+ const stmts=splitStmts(sql).filter(s=>!isCommentOnly(s));
  const lastStmt=(stmts[stmts.length-1]||sql).trim();
  // Any multi-statement input is now eligible to show a result grid, as long as its FINAL
  // statement is a plain, ordinary SELECT-like one - not just "single statement" or "USE(s) then
@@ -1647,8 +1664,8 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
  //    switches ARE correctly visible to the final query this way, but genuinely session-scoped
  //    state (user-defined @variables, temp tables, an uncommitted transaction spanning both
  //    steps) will NOT carry over, since that state belongs to a connection that's now closed.
- const isSelectLast=/^(select|show|describe|desc|explain|with|table|values)\b/i.test(lastStmt);
- const leadingAreAllUse=stmts.length>1&&stmts.slice(0,-1).every(s=>/^use\s+\S/i.test(s.trim()));
+ const isSelectLast=/^(select|show|describe|desc|explain|with|table|values)\b/i.test(sqlHead(lastStmt));
+ const leadingAreAllUse=stmts.length>1&&stmts.slice(0,-1).every(s=>/^use\s+\S/i.test(sqlHead(s)));
  const needsScriptStep=stmts.length>1&&isSelectLast&&!leadingAreAllUse;
  const isSelect=isSelectLast;
  const reqId=(crypto.randomUUID?crypto.randomUUID():('r'+Date.now()+Math.random()));
