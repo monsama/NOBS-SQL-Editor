@@ -849,6 +849,10 @@ async function loadSchemas() {
             d.classList.add('sel');
             curSchema = sc.name;
             $('objdb').textContent = sc.name;
+            // dbOf() gives curSchema priority for a plain query tab, so this click changes
+            // where the next query runs - the badge has to say so, or it keeps advertising
+            // the previous schema while queries go somewhere else.
+            if (activeTab) updateSchemaBadge(activeTab);
             loadObjects(sc.name);
         };
 
@@ -1608,6 +1612,9 @@ async function runSel(id){
  const hit=stmts.find(s=>pos>=s.start&&pos<=s.end);
  await runSql(id,hit?hit.text:ta.value);
 }
+// Server errors already start with "ERROR 1146 (42S02): ...", so prefixing them produced
+// "ERROR: ERROR 1146 ...". Only add the prefix when the message does not carry one.
+function logErr(msg){ msg=String(msg==null?'':msg); return /^ERROR\b/.test(msg)?msg:('ERROR: '+msg); }
 function dbOf(t){ if(t&&(t.table||t.ddl))return t.db||curSchema||null; /* table-view + DDL tabs keep their own schema */ return curSchema||(t&&t.db)||null; /* plain query tabs follow the selected sidebar schema */ }
 // runSql(): send the editor SQL to the server and show the rows (or the error).
 async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sql!==t.curRun){t.prevRun=t.curRun;t.curRun=sql;}const st=$('st_'+id);st.className='status';st.textContent='Running\u2026';
@@ -1662,7 +1669,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     const r=await api('/api/query',{sql:_q,db:dbOf(t),requestId:reqId},t.abortCtrl.signal);
     if(r.aborted){if(T(id)){st.className='status';st.textContent='Query cancelled.';}return;}
     if(!T(id))return;
-    if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log('ERROR: '+r.error);return;}
+    if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));return;}
     t.cols=r.columns;t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
     if(!r.columns.length){st.textContent=r.message||'Query OK.';$('res_'+id).innerHTML='';updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';return;}
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
