@@ -1039,6 +1039,12 @@ async fn import(app: tauri::AppHandle, req: Value) -> R {
         return Ok(json!({"ok":false,"error":"Read-only mode: statement blocked."}));
     }
     let mbin = match resolve_tool(&app, "mysql", &["mysql", "mariadb"], "MYSQL_BIN") { Ok(b) => b, Err(e) => return Ok(json!({"ok":false,"error":e})) };
+    import_run(req, mbin).await
+}
+
+// The body, split out so a test can drive it without a tauri::AppHandle - resolving the mysql
+// path is the only thing the handle provided.
+async fn import_run(req: Value, mbin: String) -> R {
     tokio::task::spawn_blocking(move || {
         let jid = req["jobId"].as_str().unwrap_or("").to_string();
         let job = job_start(&jid);
@@ -1048,6 +1054,7 @@ async fn import(app: tauri::AppHandle, req: Value) -> R {
         let target = req["targetDb"].as_str().unwrap_or("").to_string();
         let mut log = Vec::new();
         let mut cancelled = false;
+        let mut errors_skipped = 0usize;
         if !target.is_empty() && req["createDb"].as_bool().unwrap_or(false) {
             let _ = Command::new(&mbin).arg(format!("--defaults-extra-file={}", cnf))
                 .arg("-e").arg(format!("CREATE DATABASE IF NOT EXISTS {}", sql_id(&target))).output();
@@ -1066,15 +1073,39 @@ async fn import(app: tauri::AppHandle, req: Value) -> R {
             let out = run_job_child(job.as_ref(), &mut cmd);
             let short = || std::path::Path::new(&f).file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| f.clone());
             match out {
-                Ok(o) if o.status.success() => log.push(format!("OK  {}", short())),
+                Ok(o) if o.status.success() => {
+                    // "Continue on error" passes --force, and mysql then exits 0 even when every
+                    // statement failed, reporting what went wrong on stderr instead. Taking the
+                    // exit code at face value turned a completely failed import into a clean list
+                    // of OK lines - the worst possible outcome for a restore, since it looks like
+                    // it worked. Report what the tool actually said.
+                    let err = String::from_utf8_lossy(&o.stderr);
+                    let errs: Vec<&str> = err.lines().map(|l| l.trim()).filter(|l| l.contains("ERROR")).collect();
+                    if errs.is_empty() {
+                        log.push(format!("OK  {}", short()));
+                    } else {
+                        log.push(format!("OK with {} error(s) SKIPPED  {} : {}{}",
+                            errs.len(), short(), errs[0],
+                            if errs.len() > 1 { format!(" (+{} more)", errs.len() - 1) } else { String::new() }));
+                        errors_skipped += errs.len();
+                    }
+                }
                 // A killed child reports failure, but "FAILED file : ..." would read as a broken
                 // import rather than the cancel the user just asked for.
                 Ok(_) if job_is_cancelled(&job) => { log.push(format!("CANCELLED {}", short())); cancelled = true; break; }
-                Ok(o) => log.push(format!("FAILED {} : {}", short(), first_err(&String::from_utf8_lossy(&o.stderr)))),
+                Ok(o) => {
+                    let e = first_err(&String::from_utf8_lossy(&o.stderr));
+                    // A per-table dump carries no CREATE DATABASE or USE, so it has nowhere to go
+                    // unless a target is chosen. "No database selected" is accurate and useless.
+                    let hint = if e.contains("1046") || e.contains("No database selected") {
+                        "\n  This file has no CREATE DATABASE/USE of its own - set \"Target database\" in the Import dialog."
+                    } else { "" };
+                    log.push(format!("FAILED {} : {}{}", short(), e, hint));
+                }
                 Err(e) => log.push(format!("FAILED {} : {}", f, e)),
             }
         }
-        Ok(json!({"ok":true,"cancelled":cancelled,"log":log}))
+        Ok(json!({"ok":true,"cancelled":cancelled,"errorsSkipped":errors_skipped,"log":log}))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -2783,5 +2814,55 @@ mod export_cancel_tests {
         assert!(lines.iter().any(|l| l.contains("CANCELLED")), "nothing reported the cancellation: {:?}", lines);
         assert_eq!(r["cancelled"], true, "the run should report itself cancelled");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    // "Continue on error" passes --force to mysql, which then exits 0 even when every statement
+    // failed. Trusting the exit code turned a wholly failed import into a list of OK lines - the
+    // worst outcome for a restore, because it looks like it worked.
+    #[tokio::test]
+    #[ignore]
+    async fn force_mode_reports_the_errors_it_skipped() {
+        let Some(dsn) = std::env::var("NOBS_TEST_DSN").ok() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let p: Vec<&str> = dsn.split(':').collect();
+        let conn = json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"});
+        let mbin = std::env::var("MYSQL_BIN").unwrap_or_else(|_| "mysql".into());
+
+        let f = std::env::temp_dir().join("nobs-import-bad.sql");
+        std::fs::write(&f, "INSERT INTO nobs_test.no_such_table VALUES (1);\nSELECT 1;\n").unwrap();
+        let req = json!({"files":[f.to_string_lossy()], "targetDb":"nobs_test", "conn":conn, "force":true});
+        let r = import_run(req, mbin).await.unwrap();
+        let line = r["log"][0].as_str().unwrap_or("").to_string();
+        println!("  log line: {}", line);
+        println!("  errorsSkipped: {}", r["errorsSkipped"]);
+        assert!(!line.starts_with("OK  "), "a failed import was reported as a clean OK: {line}");
+        assert!(line.contains("error(s) SKIPPED"), "the skipped error was not reported: {line}");
+        assert_eq!(r["errorsSkipped"], 1);
+        let _ = std::fs::remove_file(&f);
+    }
+
+    // A per-table dump has no CREATE DATABASE or USE, so without a target it fails with a
+    // message that does not say what to do about it.
+    #[tokio::test]
+    #[ignore]
+    async fn a_missing_target_database_explains_itself() {
+        let Some(dsn) = std::env::var("NOBS_TEST_DSN").ok() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let p: Vec<&str> = dsn.split(':').collect();
+        let conn = json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"});
+        let mbin = std::env::var("MYSQL_BIN").unwrap_or_else(|_| "mysql".into());
+
+        let f = std::env::temp_dir().join("nobs-import-nodb.sql");
+        std::fs::write(&f, "INSERT INTO ro_canary (label) VALUES ('x');\n").unwrap();
+        let req = json!({"files":[f.to_string_lossy()], "targetDb":"", "conn":conn});
+        let r = import_run(req, mbin).await.unwrap();
+        let line = r["log"][0].as_str().unwrap_or("").to_string();
+        println!("  log line: {}", line.replace('\n', " | "));
+        assert!(line.contains("1046") || line.contains("No database selected"));
+        assert!(line.contains("Target database"), "no hint about choosing a target: {line}");
+        let _ = std::fs::remove_file(&f);
     }
 }
