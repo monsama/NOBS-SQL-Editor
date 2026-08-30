@@ -181,16 +181,16 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row">CSV file <input id="csvFile" style="flex:1"><button onclick="browse({title:'Select CSV file',filter:'*.csv',mode:'file',onPick:pp=>$('csvFile').value=pp})">Browse...</button></div>
  <div class="row"><label title="The first row of the CSV contains the column names"><input type="checkbox" id="csvHeader" checked> first row is header</label>
   <span style="margin-left:12px">Mode:</span>
-  <label title="Add the CSV rows to the existing table (does not delete anything)"><input type="radio" name="csvmode" id="csvAppend" checked> Append</label>
+  <label title="Add the CSV rows to the existing table (does not delete anything)"><input type="radio" name="csvmode" id="csvAppend" checked> Append</label><label style="margin-left:14px" title="A cell holding exactly this is imported as NULL. Clear it to treat empty cells as NULL instead.">NULL value <input id="csvNullVal" value="\N" style="width:52px;font-family:Consolas,monospace"></label>
   <label title="Empty the table first, then load (use this to restore a table from its own export)"><input type="radio" name="csvmode" id="csvReplace"> Replace (truncate first)</label></div>
- <div class="muted" style="font-size:11px">Columns are matched to the table by header name; unmatched CSV columns are ignored, and empty cells import as NULL. For an exact restore of a whole database, prefer Export/Import (mysqldump).</div>
+ <div class="muted" style="font-size:11px">Columns are matched to the table by header name; unmatched CSV columns are ignored. A cell equal to the NULL value below is imported as NULL; an empty cell is imported as an empty string. Clear the NULL value to import empty cells as NULL instead, which is usually what a spreadsheet means. For an exact restore of a whole database, prefer Export/Import (mysqldump).</div>
  <div class="row"><button class="go" onclick="runCsvImport()">Import</button><button onclick="hide('mCsv')">Close</button></div>
  <div id="csvLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:200px;overflow:auto;margin-top:6px"></div></div></div>
 <div class="modal floating" id="mExport"><div class="box" style="top:80px;left:120px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mExport')" title="Drag to move"><h3 style="margin:0">Data Export</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mExport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="row"><b>Databases</b> <button onclick="expAll(true)">All</button><button onclick="expAll(false)">None</button></div>
  <div id="expDbs" style="max-height:150px;overflow:auto;border:1px solid var(--bd2);padding:6px"></div>
  <div class="row"><b>Options</b></div><div class="grid2" id="expOpts"></div>
- <div class="row">Charset <select id="expCharset"><option>utf8mb4</option><option>utf8</option><option>latin1</option><option>binary</option></select>
+ <div class="row"><label title="How a NULL is written to CSV. \N is what LOAD DATA reads back; blank makes NULL and an empty string indistinguishable in the file.">NULL value <input id="expNullVal" value="\N" style="width:52px;font-family:Consolas,monospace"></label> Charset <select id="expCharset"><option>utf8mb4</option><option>utf8</option><option>latin1</option><option>binary</option></select>
   <label title="One .sql file per table - lets you restore a single table. Slower, more files (like Workbench Dump Project Folder)."><input type="radio" name="expmode" id="expTable" checked> per table</label><label title="One .sql file per database."><input type="radio" name="expmode" id="expPer"> per DB</label><label title="Everything in one combined .sql file."><input type="radio" name="expmode" id="expSingle"> single file</label>
   <label title="Append a date-time stamp to each file name."><input type="checkbox" id="expStamp" checked> timestamp</label>
   <label title="mysqldump --max-allowed-packet. Raise this for very large rows or BLOBs (e.g. 1G).">max packet <input id="expMaxPacket" value="1G" style="width:56px"></label></div>
@@ -2144,7 +2144,13 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
 async function applyDdl(id){if(roBlock())return;const t=T(id);const st=$('st_'+id);st.className='status';st.textContent='Applying...';const r=await api('/api/script',{sql:$('ed_'+id).value,db:(t.ddl&&t.ddl.db)||dbOf(t)});if(r.ok){st.textContent='Applied OK.';log('APPLY OK: '+t.title);if(t.ddl)loadObjects(t.ddl.db);}else{st.className='status err';st.textContent=r.error;log('APPLY ERROR: '+r.error);}}
 
 function bTSV(cols,rows){return cols.join('\t')+'\n'+rows.map(r=>r.map(v=>v===null?'NULL':v).join('\t')).join('\n');}
-function bCSV(cols,rows){const q=s=>s===null?'':/[",\n]/.test(s)?'"'+String(s).replace(/"/g,'""')+'"':s;return cols.map(q).join(',')+'\n'+rows.map(r=>r.map(q).join(',')).join('\n');}
+// How a NULL is written to CSV. A NULL and an empty string both used to come out as an empty
+// field, so the two were indistinguishable in the file - and the CSV importer reads an empty
+// cell as NULL, so an empty string did not survive a round trip. \N is the default because it
+// is what LOAD DATA reads back and what HeidiSQL defaults to; the Export dialog can change it,
+// including to blank for spreadsheets that would rather show nothing.
+function csvNullMarker(){ const el=$('expNullVal'); return el?el.value:'\\N'; }
+function bCSV(cols,rows){const nm=csvNullMarker();const q=s=>s===null?nm:/[",\n]/.test(s)?'"'+String(s).replace(/"/g,'""')+'"':s;return cols.map(c=>c===null?'':q(c)).join(',')+'\n'+rows.map(r=>r.map(q).join(',')).join('\n');}
 function bMD(cols,rows){
   const esc=s=>s===null?'':String(s).replace(/\|/g,'\\|').replace(/\n/g,' ');
   let h='| '+cols.map(esc).join(' | ')+' |\n';
@@ -3176,7 +3182,7 @@ function acAccept(id){const ta=acTa||$('ed_'+id);const pos=ta.selectionStart;con
 
 let csvTarget={db:null,table:null};
 async function exportFull(db,name,fmt){fmt=fmt||'csv';const ext=(fmt==='inserts')?'sql':'csv';const defName=name+(fmt==='inserts'?'_inserts.sql':'.csv');
- if(window.__TAURI__&&window.__TAURI__.core){let path;try{path=await window.__TAURI__.dialog.save({defaultPath:defName,filters:[{name:ext.toUpperCase()+' file',extensions:[ext]}]});}catch(e){toast('Save dialog failed: '+e,true);return;}if(!path)return;log('Exporting all rows of '+db+'.'+name+'...');const r=await window.__TAURI__.core.invoke('export_table',{req:{conn:getConn(),db:db,table:name,file:path,format:fmt}});if(r&&r.ok)log(r.message);else alert('Export failed: '+(r?r.error:'unknown'));return;}
+ if(window.__TAURI__&&window.__TAURI__.core){let path;try{path=await window.__TAURI__.dialog.save({defaultPath:defName,filters:[{name:ext.toUpperCase()+' file',extensions:[ext]}]});}catch(e){toast('Save dialog failed: '+e,true);return;}if(!path)return;log('Exporting all rows of '+db+'.'+name+'...');const r=await window.__TAURI__.core.invoke('export_table',{req:{conn:getConn(),db:db,table:name,file:path,format:fmt,nullValue:csvNullMarker()}});if(r&&r.ok)log(r.message);else alert('Export failed: '+(r?r.error:'unknown'));return;}
  try{
    const cq=await api('/api/query',{sql:"SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA="+lit(db)+" AND TABLE_NAME="+lit(name)});
    const est=(cq.ok&&cq.rows.length&&cq.rows[0][0]!=null)?+cq.rows[0][0]:null;
@@ -3195,7 +3201,7 @@ async function runCsvImport(){const f=$('csvFile').value.trim();if(!f){toast('Ch
  const doTrunc=$('csvReplace').checked;
  if(doTrunc && !(await ask('REPLACE mode: truncate '+csvTarget.db+'.'+csvTarget.table+' before import? All existing rows will be permanently deleted.')))return;
  $('csvLog').textContent='Importing...';
- const r=await api('/api/importcsv',{db:csvTarget.db,table:csvTarget.table,file:f,hasHeader:$('csvHeader').checked,truncate:doTrunc});
+ const r=await api('/api/importcsv',{nullValue:($('csvNullVal')?$('csvNullVal').value:'\\N'),db:csvTarget.db,table:csvTarget.table,file:f,hasHeader:$('csvHeader').checked,truncate:doTrunc});
  if(!r.ok){$('csvLog').textContent=r.error;log('CSV import error: '+r.error);return;}
  $('csvLog').textContent=r.message;log('CSV import: '+r.message);invalidateTableCache(csvTarget.db,csvTarget.table);if(curSchema)loadObjects(curSchema);}
 
