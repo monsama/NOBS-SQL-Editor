@@ -2149,6 +2149,15 @@ function bTSV(cols,rows){return cols.join('\t')+'\n'+rows.map(r=>r.map(v=>v===nu
 // cell as NULL, so an empty string did not survive a round trip. \N is the default because it
 // is what LOAD DATA reads back and what HeidiSQL defaults to; the Export dialog can change it,
 // including to blank for spreadsheets that would rather show nothing.
+// Copying a grid as CSV writes NULLs as the marker, same as a file export, which is
+// consistent but surprising when the clipboard is on its way to a spreadsheet. Say so once,
+// and only when the copied rows actually contain a NULL - a hint nobody needs is just noise.
+function csvNullHint(rows){
+ const nm=csvNullMarker();
+ if(!nm)return;
+ if(!rows.some(r=>r.some(v=>v===null)))return;
+ toast('NULLs were written as '+nm+'. Clear "NULL value" in the Export dialog to copy them as blanks instead.');
+}
 function csvNullMarker(){ const el=$('expNullVal'); return el?el.value:'\\N'; }
 function bCSV(cols,rows){const nm=csvNullMarker();const q=s=>s===null?nm:/[",\n]/.test(s)?'"'+String(s).replace(/"/g,'""')+'"':s;return cols.map(c=>c===null?'':q(c)).join(',')+'\n'+rows.map(r=>r.map(q).join(',')).join('\n');}
 function bMD(cols,rows){
@@ -2172,13 +2181,13 @@ async function genUserTransfer(){
 function copyUserTransfer(){const v=$('utResult').value;if(!v){toast('Nothing to copy yet - click Generate first.',true);return;}navigator.clipboard.writeText(v).then(()=>log('Copied user transfer script.'));}
 function saveUserTransferFile(){const v=$('utResult').value;if(!v){toast('Nothing to save yet - click Generate first.',true);return;}dl(v,'user_transfer.sql');}
 async function copyCsv(id){const t=T(id);if(!t.cols)return;let cols=t.cols,rows=t.rows;
- navigator.clipboard.writeText(bCSV(cols,rows)).then(()=>log('Copied '+rows.length+' rows (CSV).'));}
+ navigator.clipboard.writeText(bCSV(cols,rows)).then(()=>{csvNullHint(rows);log('Copied '+rows.length+' rows (CSV).');});}
 function copyMd(id){const t=T(id);if(!t.cols)return;navigator.clipboard.writeText(bMD(t.cols,t.rows)).then(()=>log('Copied '+t.rows.length+' rows (Markdown).'));}
 function copyMdSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bMD(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (Markdown).'));}
 function toggleSel(id,ri,ch){const t=T(id);if(!t.selected)t.selected=new Set();if(ch)t.selected.add(ri);else t.selected.delete(ri);updateEditBar(id);}
 function selAll(id,ch){const t=T(id);if(!t.selected)t.selected=new Set();const view=viewIndices(id);view.forEach(ri=>{if(ch)t.selected.add(ri);else t.selected.delete(ri);});renderBody(id);updateEditBar(id);}
 function copySel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bTSV(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (TSV).'));}
-function copySelCsv(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bCSV(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (CSV).'));}
+function copySelCsv(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bCSV(t.cols,rows)).then(()=>{csvNullHint(rows);}).then(()=>log('Copied '+rows.length+' selected row(s) (CSV).'));}
 function csvGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'csv');return;}dl(bCSV(t.cols,t.rows),'result.csv');}
 function insGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'inserts');return;}const s=t.rows.map(r=>'INSERT IGNORE INTO `table` ('+t.cols.map(qid).join(',')+') VALUES ('+r.map(lit).join(',')+');').join('\n');dl(s,'result_inserts.sql');log('Exported '+t.rows.length+' row(s) as INSERTs.');}
 function csvSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}dl(bCSV(t.cols,rows),(t.table||'result')+'_selected.csv');log('Exported '+rows.length+' selected row(s) to CSV.');}
