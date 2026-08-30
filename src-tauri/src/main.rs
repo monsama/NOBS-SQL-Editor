@@ -93,7 +93,9 @@ fn run_job_child(job: Option<&std::sync::Arc<Job>>, cmd: &mut Command) -> std::i
                 let mut finished = None;
                 if let Ok(mut slot) = j.child.lock() {
                     if let Some(c) = slot.as_mut() {
-                        if j.cancelled.load(Ordering::SeqCst) { let _ = c.kill(); }
+                        // DIAGNOSTIC BUILD: the child is deliberately NOT terminated here.
+                        // Cancel now only sets the flag the export loop checks between
+                        // tables, so the dump in flight finishes on its own.
                         finished = c.try_wait()?;
                     } else {
                         // Nothing parked: treat as finished rather than spinning forever.
@@ -2162,9 +2164,8 @@ fn cancel_job(req: Value) -> R {
     match job {
         Some(j) => {
             j.cancelled.store(true, Ordering::SeqCst);
-            if let Ok(mut slot) = j.child.lock() {
-                if let Some(c) = slot.as_mut() { let _ = c.kill(); }
-            }
+            // DIAGNOSTIC BUILD: no Child::kill() here either. If the crash disappears with
+            // this build, the crash is in terminating mysqldump.exe mid-write on Windows.
             Ok(json!({"ok":true,"message":"Cancel requested."}))
         }
         None => Ok(json!({"ok":false,"error":"Job not found - it may have already finished."})),
