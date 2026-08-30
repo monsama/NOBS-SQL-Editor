@@ -11,8 +11,26 @@ touches no other schema:
 mysql -u root -p < tests/fixtures/seed.sql
 ```
 
-It should print `seed complete` with `3 / 5 / 4 / 3 / 100000` and take about a
-second. Remove it afterwards with `DROP DATABASE nobs_test;`.
+You can also paste the whole file into the app's editor and run it — that path
+is tested and reports `OK. 31 statement(s) executed.`
+
+Select `nobs_test` in the sidebar, then confirm the load:
+
+```sql
+SELECT (SELECT COUNT(*) FROM ro_canary)      AS ro_canary,      -- 3
+       (SELECT COUNT(*) FROM txn_child)      AS txn_child,      -- 5
+       (SELECT COUNT(*) FROM txn_composite)  AS txn_composite,  -- 4
+       (SELECT COUNT(*) FROM charset_binary) AS charset_binary, -- 3
+       (SELECT COUNT(*) FROM bulk_rows)      AS bulk_rows;      -- 100000
+```
+
+Remove it all afterwards with `DROP DATABASE nobs_test;`.
+
+> The fixture deliberately does not end on a `SELECT`. A pasted script whose
+> last statement is a `SELECT` is split into two steps that run on separate
+> connections, so the `USE` in the script would not reach the `SELECT` and it
+> would fail with *No database selected*. Worth knowing when writing your own
+> scripts, not just this one.
 
 Work through the scenarios in order — they are sorted by what a failure costs.
 
