@@ -1305,6 +1305,7 @@ async fn importcsv(req: Value) -> R {
         let csv_cols: Vec<String> = if has_header {
             rdr.headers().map_err(|e| e.to_string())?.iter().map(String::from).collect()
         } else { table_cols.clone() };
+        let null_marker = req["nullValue"].as_str().unwrap_or("\\N").to_string();
         let use_idx: Vec<usize> = csv_cols.iter().enumerate().filter(|(_, n)| table_cols.contains(n)).map(|(i, _)| i).collect();
         if use_idx.is_empty() { return Ok(json!({"ok":false,"error":"No CSV columns match the table columns (check the header row)."})); }
         let use_cols: Vec<String> = use_idx.iter().map(|&i| csv_cols[i].clone()).collect();
@@ -1319,7 +1320,16 @@ async fn importcsv(req: Value) -> R {
         for rec in rdr.records() {
             let rec = rec.map_err(|e| e.to_string())?;
             let vals: Vec<String> = use_idx.iter().map(|&i| {
-                match rec.get(i) { None | Some("") => "NULL".to_string(), Some(s) => sql_lit(s) }
+                // The marker decides what an empty cell means. With one set (the default, \N)
+                // the file states NULL explicitly, so an empty cell is an empty string and a
+                // round trip keeps both. Clearing the marker restores the older reading, where a
+                // blank means NULL - which is what a spreadsheet usually intends.
+                match rec.get(i) {
+                    None => "NULL".to_string(),
+                    Some(s) if !null_marker.is_empty() && s == null_marker => "NULL".to_string(),
+                    Some("") if null_marker.is_empty() => "NULL".to_string(),
+                    Some(s) => sql_lit(s),
+                }
             }).collect();
             batch.push(format!("({})", vals.join(","))); n += 1;
             if batch.len() >= 500 {
@@ -2238,6 +2248,12 @@ fn cancel_job(req: Value) -> R {
 
 #[tauri::command]
 async fn export_table(app: tauri::AppHandle, req: Value) -> R {
+    export_table_run(Some(app), req).await
+}
+
+// The body, split out so a test can drive it without a tauri::AppHandle. The handle is only used
+// to emit progress events, which simply do not fire when there is nobody to receive them.
+async fn export_table_run(app: Option<tauri::AppHandle>, req: Value) -> R {
     tokio::task::spawn_blocking(move || -> R {
         use std::io::Write as _;
         let db = req["db"].as_str().unwrap_or("").to_string();
@@ -2259,8 +2275,14 @@ async fn export_table(app: tauri::AppHandle, req: Value) -> R {
              sl.iter().map(|c| is_binaryish(c)).collect())
         };
         let collist = cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
+        // A NULL and an empty string both used to come out as an empty field, so the two were
+        // indistinguishable in the file - and the CSV importer turns an empty cell into NULL, so
+        // an empty string did not survive a round trip. Write NULL as an explicit marker
+        // instead, defaulting to \N, which is what LOAD DATA reads and what HeidiSQL defaults
+        // to. The marker is never quoted: the server only recognises \N unenclosed.
+        let null_marker = req["nullValue"].as_str().unwrap_or("\\N").to_string();
         let csv_field = |o: &Option<String>| -> String {
-            match o { None => String::new(), Some(s) => {
+            match o { None => null_marker.clone(), Some(s) => {
                 if s.contains('"') || s.contains(',') || s.contains('\n') { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.clone() }
             }}
         };
@@ -2287,7 +2309,7 @@ async fn export_table(app: tauri::AppHandle, req: Value) -> R {
                 w.write_all(line.as_bytes()).map_err(|e| e.to_string())?; w.write_all(b"\n").map_err(|e| e.to_string())?;
             }
             n += 1;
-            if n % 2000 == 0 { let _ = app.emit("export_progress", json!({"rows": n})); }
+            if n % 2000 == 0 { if let Some(a) = &app { let _ = a.emit("export_progress", json!({"rows": n})); } }
         }
         if fmt == "inserts" && !batch.is_empty() && !cancelled {
             w.write_all(format!("INSERT IGNORE INTO {} ({}) VALUES {};\n", tbl, collist, batch.join(",")).as_bytes()).map_err(|e| e.to_string())?;
@@ -2299,7 +2321,7 @@ async fn export_table(app: tauri::AppHandle, req: Value) -> R {
             log_line(&format!("EXPORT cancelled: {} ({} rows written before cancel)", tbl, n));
             return Ok(json!({"ok":false,"error":"Export cancelled.","cancelled":true}));
         }
-        let _ = app.emit("export_progress", json!({"rows": n, "done": true}));
+        if let Some(a) = &app { let _ = a.emit("export_progress", json!({"rows": n, "done": true})); }
         log_line(&format!("EXPORT ok: {} rows from {} to {}", n, tbl, file));
         Ok(json!({"ok":true,"message":format!("Exported {} row(s) to {}", n, file)}))
     }).await.map_err(|e| e.to_string())?
@@ -2891,5 +2913,82 @@ mod binary_col_tests {
         for (c, b) in cols.iter().zip(bin.iter()) { println!("  {:<10} binary={}", c, b); }
         assert_eq!(bin, vec![false, false, true, true, true, true],
                    "id and emoji are text; bin_col, blob_col and both BIT columns are binary");
+    }
+}
+
+#[cfg(test)]
+mod csv_null_tests {
+    use super::*;
+    fn conn_json() -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some(json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"}))
+    }
+
+    // A NULL and an empty string both came out as an empty field, so a CSV could not tell them
+    // apart - and the importer reads an empty cell as NULL, so an empty string did not survive a
+    // round trip at all.
+    #[tokio::test]
+    #[ignore]
+    async fn null_and_empty_string_survive_a_csv_round_trip() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let q = |sql: &str| { let c = conn.clone(); let s = sql.to_string();
+            async move { query(json!({"sql":s,"conn":c,"db":"nobs_test"})).await.unwrap() } };
+
+        q("DROP TABLE IF EXISTS csv_null_rt").await;
+        q("CREATE TABLE csv_null_rt (id INT PRIMARY KEY, v VARCHAR(32) NULL)").await;
+        q("INSERT INTO csv_null_rt VALUES (1, NULL), (2, ''), (3, 'text')").await;
+
+        let file = std::env::temp_dir().join("csv_null_rt.csv");
+        let r = export_table_run(None, json!({"conn":conn,"db":"nobs_test","table":"csv_null_rt",
+                                    "file":file.to_string_lossy(),"format":"csv","nullValue":"\\N"})).await.unwrap();
+        assert_eq!(r["ok"], true, "export failed: {}", r);
+        let text = std::fs::read_to_string(&file).unwrap();
+        println!("  exported csv:");
+        for l in text.lines() { println!("    {}", l); }
+        assert!(text.contains("1,\\N"), "NULL was not written as the marker");
+        assert!(text.contains("2,\n") || text.ends_with("2,"), "empty string should be an empty field");
+
+        // read it back into a fresh table
+        q("DROP TABLE IF EXISTS csv_null_rt2").await;
+        q("CREATE TABLE csv_null_rt2 (id INT PRIMARY KEY, v VARCHAR(32) NULL)").await;
+        let ir = importcsv(json!({"conn":conn,"db":"nobs_test","table":"csv_null_rt2",
+                                  "file":file.to_string_lossy(),"hasHeader":true,"nullValue":"\\N"})).await.unwrap();
+        assert_eq!(ir["ok"], true, "import failed: {}", ir);
+
+        let back = q("SELECT id, v IS NULL AS is_null, v = '' AS is_empty FROM csv_null_rt2 ORDER BY id").await;
+        let rows = back["rows"].as_array().unwrap();
+        for r in rows { println!("  back: id={} is_null={:?} is_empty={:?}", r[0], r[1], r[2]); }
+        assert_eq!(rows[0][1].as_str(), Some("1"), "row 1 must come back as NULL");
+        assert_eq!(rows[1][1].as_str(), Some("0"), "row 2 must NOT be NULL - it was an empty string");
+        assert_eq!(rows[1][2].as_str(), Some("1"), "row 2 must come back as an empty string");
+
+        q("DROP TABLE IF EXISTS csv_null_rt").await;
+        q("DROP TABLE IF EXISTS csv_null_rt2").await;
+        let _ = std::fs::remove_file(&file);
+    }
+
+    // Clearing the marker restores the older reading, where a blank cell means NULL - which is
+    // what a spreadsheet exported from Excel usually intends.
+    #[tokio::test]
+    #[ignore]
+    async fn an_empty_marker_makes_blank_cells_null_again() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let q = |sql: &str| { let c = conn.clone(); let s = sql.to_string();
+            async move { query(json!({"sql":s,"conn":c,"db":"nobs_test"})).await.unwrap() } };
+        q("DROP TABLE IF EXISTS csv_blank_rt").await;
+        q("CREATE TABLE csv_blank_rt (id INT PRIMARY KEY, v VARCHAR(32) NULL)").await;
+        let file = std::env::temp_dir().join("csv_blank_rt.csv");
+        std::fs::write(&file, "id,v\n1,\n2,text\n").unwrap();
+        let ir = importcsv(json!({"conn":conn,"db":"nobs_test","table":"csv_blank_rt",
+                                  "file":file.to_string_lossy(),"hasHeader":true,"nullValue":""})).await.unwrap();
+        assert_eq!(ir["ok"], true, "import failed: {}", ir);
+        let back = q("SELECT id, v IS NULL AS is_null FROM csv_blank_rt ORDER BY id").await;
+        let rows = back["rows"].as_array().unwrap();
+        for r in rows { println!("  blank-marker: id={} is_null={:?}", r[0], r[1]); }
+        assert_eq!(rows[0][1].as_str(), Some("1"), "with no marker, a blank cell must import as NULL");
+        q("DROP TABLE IF EXISTS csv_blank_rt").await;
+        let _ = std::fs::remove_file(&file);
     }
 }
