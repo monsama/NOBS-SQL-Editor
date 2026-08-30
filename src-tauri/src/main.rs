@@ -132,6 +132,20 @@ fn cancelled_compares() -> &'static Mutex<std::collections::HashSet<String>> {
     static SET: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     SET.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
+// Request ids whose query was actually killed by a Cancel click. The PowerShell build keeps
+// this as a Cancelled flag on its RunningQueries entry; this port dropped it and inferred
+// cancellation from "a requestId was supplied", which is true of EVERY query the editor runs -
+// so every failure was reported as a cancel and the real error was thrown away.
+fn cancelled_queries() -> &'static Mutex<std::collections::HashSet<String>> {
+    static C: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+fn mark_query_cancelled(rid: &str) { if let Ok(mut s) = cancelled_queries().lock() { s.insert(rid.to_string()); } }
+// Consumes the marker: a later query reusing the id (ids are per-run uuids, so this is really
+// just hygiene) must not inherit it.
+fn take_query_cancelled(rid: &str) -> bool {
+    cancelled_queries().lock().map(|mut s| s.remove(rid)).unwrap_or(false)
+}
 fn is_compare_cancelled(rid: &str) -> bool { cancelled_compares().lock().unwrap().contains(rid) }
 fn clear_compare_cancel(rid: &str) { cancelled_compares().lock().unwrap().remove(rid); }
 
@@ -203,13 +217,23 @@ fn val_to_opt(v: &MyValue, binaryish: bool) -> Option<String> {
     }
 }
 
+// The mysql crate's Display for a server error is its Debug-ish wrapper,
+// "MySqlError { ERROR 1146 (42S02): Table 'x' doesn't exist }". Users see these now that real
+// errors are no longer masked as cancellations, and the wrapper is noise - the PowerShell build
+// shows the bare "ERROR 1146 (42S02): ..." line. Strip it, leaving anything unrecognised alone.
+fn db_err(e: impl std::string::ToString) -> String {
+    let s = e.to_string();
+    s.strip_prefix("MySqlError { ").and_then(|r| r.strip_suffix(" }"))
+        .map(|r| r.to_string()).unwrap_or(s)
+}
+
 fn run_select(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
-    let mut result = conn.query_iter(sql).map_err(|e| e.to_string())?;
+    let mut result = conn.query_iter(sql).map_err(db_err)?;
     let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
     let bin: Vec<bool> = result.columns().as_ref().iter().map(|c| is_binaryish(c)).collect();
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     for r in result.by_ref() {
-        let row = r.map_err(|e| e.to_string())?;
+        let row = r.map_err(db_err)?;
         let mut cells = Vec::with_capacity(cols.len());
         for i in 0..cols.len() {
             let v = row.as_ref(i).cloned().unwrap_or(MyValue::NULL);
@@ -638,13 +662,18 @@ async fn query(req: Value) -> R {
                 }
             }
             Err(e) => {
-                // A cancelled query surfaces here as a MySQL error (e.g. "Query execution was
-                // interrupted") - report it the same way the PS version does.
-                if request_id.is_some() { Ok(json!({"ok":false,"error":"Query cancelled.","cancelled":true})) }
+                // A cancelled query surfaces here as a MySQL error ("Query execution was
+                // interrupted"), so it has to be told apart from an ordinary failure. Ask
+                // whether THIS request was actually killed, rather than whether it merely had
+                // a requestId - the editor sends one with every run, so the old check turned
+                // every syntax error, missing table and permission failure into
+                // "Query cancelled." and discarded what really went wrong.
+                let was_cancelled = request_id.as_deref().map(take_query_cancelled).unwrap_or(false);
+                if was_cancelled { Ok(json!({"ok":false,"error":"Query cancelled.","cancelled":true})) }
                 else { Ok(json!({"ok":false,"error":e})) }
             }
         };
-        if let Some(rid) = &request_id { running_queries().lock().unwrap().remove(rid); }
+        if let Some(rid) = &request_id { running_queries().lock().unwrap().remove(rid); let _ = take_query_cancelled(rid); }
         result
     }).await.map_err(|e| e.to_string())?
 }
@@ -657,6 +686,9 @@ async fn cancel_query(req: Value) -> R {
     let rid = req["requestId"].as_str().unwrap_or("").to_string();
     let entry = running_queries().lock().unwrap().get(&rid).cloned();
     if let Some((cid, connj)) = entry {
+        // Marked before the KILL lands so the query thread, which may fail immediately after,
+        // can already see that its failure was a cancel rather than a real error.
+        mark_query_cancelled(&rid);
         tokio::task::spawn_blocking(move || {
             if let Ok(mut kc) = build_conn(&connj) {
                 let _ = kc.query_drop(format!("KILL QUERY {}", cid));
@@ -2519,5 +2551,65 @@ mod tests {
         assert_eq!(first_err("some echoed statement\nERROR 1064 (42000): You have an error"),
                    "ERROR 1064 (42000): You have an error");
         assert_eq!(first_err("plain failure text"), "plain failure text");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests that need a live server. They are ignored by default so an
+// ordinary `cargo test` stays offline; run them with a database available as:
+//
+//   NOBS_TEST_DSN='127.0.0.1:3399:nobs:nobs' cargo test -- --ignored --nocapture
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+
+    fn conn_json() -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some(json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"}))
+    }
+
+    // The bug this guards: `query` decided a failure was a cancellation by asking whether a
+    // requestId had been supplied. The editor supplies one on every run, so every genuine
+    // error - a missing table, a syntax error, no database selected - was reported to the user
+    // as "Query cancelled." with the real cause discarded.
+    #[tokio::test]
+    #[ignore]
+    async fn genuine_errors_are_not_reported_as_cancellations() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let cases = [
+            ("missing table",       "SELECT * FROM nobs_test.definitely_not_a_table"),
+            ("syntax error",        "SELEKT 1"),
+            ("no database selected","SELECT (SELECT COUNT(*) FROM ro_canary) AS n"),
+        ];
+        for (label, sql) in cases {
+            let req = json!({"sql": sql, "conn": conn, "requestId": format!("test-{}", label)});
+            let r = query(req).await.expect("command returned Err");
+            let err = r["error"].as_str().unwrap_or("");
+            println!("  {:<22} -> {}", label, err);
+            assert_eq!(r["ok"], false, "{label} should fail");
+            assert_ne!(err, "Query cancelled.",
+                       "{label}: the real error was masked as a cancellation");
+            assert!(r["cancelled"].is_null(), "{label}: should not be flagged as cancelled");
+        }
+    }
+
+    // ...while a query that really is cancelled still says so.
+    #[tokio::test]
+    #[ignore]
+    async fn a_cancelled_query_still_reports_as_cancelled() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let rid = "test-real-cancel".to_string();
+        let q = tokio::spawn(query(json!({"sql":"SELECT SLEEP(10)", "conn": conn.clone(), "requestId": rid})));
+        // let it register its CONNECTION_ID() before killing it
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        let c = cancel_query(json!({"requestId":"test-real-cancel", "conn": conn})).await.expect("cancel failed");
+        assert_eq!(c["ok"], true);
+        let r = q.await.expect("join failed").expect("command returned Err");
+        println!("  cancelled query        -> {}", r["error"].as_str().unwrap_or(""));
+        assert_eq!(r["error"], "Query cancelled.");
+        assert_eq!(r["cancelled"], true);
     }
 }
