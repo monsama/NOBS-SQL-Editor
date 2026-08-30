@@ -3037,3 +3037,110 @@ mod interop_tests {
         q("DROP TABLE IF EXISTS csv_interop").await;
     }
 }
+
+#[cfg(test)]
+mod compare_tests {
+    use super::*;
+
+    // Compare DB writes to a target database, so it carries the same risks as the grid's apply
+    // path. These drive it end to end against a live server: a saved connection file is written
+    // where the app keeps one, using a passwordless user so the keyring is not involved.
+    fn setup_conns() -> bool {
+        if std::env::var("NOBS_TEST_LIVE").is_err() { return false; }
+        let profiles = json!([
+            {"name":"cmp",   "host":"127.0.0.1","port":"3399","user":"nobsnp","ssl":"default","readonly":false},
+            {"name":"cmpro", "host":"127.0.0.1","port":"3399","user":"nobsnp","ssl":"default","readonly":true}
+        ]);
+        std::fs::write(conn_path(), serde_json::to_string_pretty(&profiles).unwrap()).unwrap();
+        true
+    }
+    fn raw(sql: &str) {
+        let c = json!({"host":"127.0.0.1","port":"3399","user":"nobsnp","password":"","ssl":"default"});
+        let mut conn = build_conn(&c).unwrap();
+        conn.query_drop(sql).unwrap();
+    }
+    fn scalar(sql: &str) -> String {
+        let c = json!({"host":"127.0.0.1","port":"3399","user":"nobsnp","password":"","ssl":"default"});
+        let mut conn = build_conn(&c).unwrap();
+        let (_c, r) = run_select(&mut conn, sql).unwrap();
+        r.get(0).and_then(|x| x.get(0)).cloned().flatten().unwrap_or_default()
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn compare_finds_schema_and_row_differences_and_can_apply_them() {
+        if !setup_conns() { eprintln!("NOBS_TEST_LIVE not set - skipping"); return }
+
+        raw("DROP DATABASE IF EXISTS cmp_src"); raw("CREATE DATABASE cmp_src");
+        raw("DROP DATABASE IF EXISTS cmp_tgt"); raw("CREATE DATABASE cmp_tgt");
+        raw("CREATE TABLE cmp_src.t (id INT PRIMARY KEY, v VARCHAR(32) NULL, extra INT NULL)");
+        raw("CREATE TABLE cmp_tgt.t (id INT PRIMARY KEY, v VARCHAR(32) NULL)");   // missing a column
+        raw("CREATE TABLE cmp_src.only_here (id INT PRIMARY KEY)");                // missing a table
+        raw("INSERT INTO cmp_src.t VALUES (1,'same',NULL),(2,'differs',NULL),(3,NULL,NULL),(4,'',NULL)");
+        raw("INSERT INTO cmp_tgt.t VALUES (1,'same'),(2,'OTHER'),(3,''),(5,'extra row')");
+
+        // --- structure
+        let r = compare_schemas(json!({"sourceConnName":"cmp","sourceDb":"cmp_src",
+                                       "targetConnName":"cmp","targetDb":"cmp_tgt"})).await.unwrap();
+        assert_eq!(r["ok"], true, "compare_schemas failed: {r}");
+        // the response groups statements per table, each with its own checked/kind flags
+        let mut stmts: Vec<String> = Vec::new();
+        for t in r["tables"].as_array().cloned().unwrap_or_default() {
+            for sq in t["sql"].as_array().cloned().unwrap_or_default() {
+                if let Some(st) = sq["stmt"].as_str() { stmts.push(st.to_string()); }
+            }
+        }
+        println!("  schema diff produced {} statement(s):", stmts.len());
+        for s in &stmts { println!("    {}", s.chars().take(100).collect::<String>()); }
+        assert!(stmts.iter().any(|s| s.contains("only_here")), "missing table not detected");
+        assert!(stmts.iter().any(|s| s.to_uppercase().contains("EXTRA")), "missing column not detected");
+
+        // --- a read-only target must refuse to apply
+        let ro = compare_apply(json!({"targetConnName":"cmpro","targetDb":"cmp_tgt",
+                                      "statements":["CREATE TABLE cmp_tgt.should_not_exist (id INT)"]})).await.unwrap();
+        println!("  read-only target -> ok={} error={:?}", ro["ok"], ro["error"].as_str().unwrap_or(""));
+        assert_eq!(ro["ok"], false, "a read-only target must refuse to apply");
+        assert_eq!(scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='cmp_tgt' AND table_name='should_not_exist'"), "0");
+
+        // --- applying the structure diff for real
+        let ap = compare_apply(json!({"targetConnName":"cmp","targetDb":"cmp_tgt","statements":stmts})).await.unwrap();
+        assert_eq!(ap["ok"], true, "apply failed: {ap}");
+        assert_eq!(scalar("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='cmp_tgt' AND table_name='t' AND column_name='extra'"), "1",
+                   "the missing column was not created");
+        assert_eq!(scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='cmp_tgt' AND table_name='only_here'"), "1",
+                   "the missing table was not created");
+        println!("  structure applied: column and table now present in the target");
+
+        // --- rows missing from the target, found by primary key
+        let mr = compare_rows(json!({"sourceConnName":"cmp","sourceDb":"cmp_src",
+                                     "targetConnName":"cmp","targetDb":"cmp_tgt","table":"t"})).await.unwrap();
+        assert_eq!(mr["ok"], true, "compare_rows failed: {mr}");
+        let missing: Vec<String> = mr["rows"].as_array().cloned().unwrap_or_default().iter()
+            .map(|r| r[0].as_str().unwrap_or("?").to_string()).collect();
+        println!("  rows missing in target: {:?}  (source has 4, target had 1,2,3,5)", missing);
+        assert_eq!(missing, vec!["4"], "row 4 exists only in the source and should be reported");
+
+        // --- rows present in both but differing, including NULL vs empty string
+        let dr = compare_rows_diff(json!({"sourceConnName":"cmp","sourceDb":"cmp_src",
+                                          "targetConnName":"cmp","targetDb":"cmp_tgt","table":"t"})).await.unwrap();
+        assert_eq!(dr["ok"], true, "compare_rows_diff failed: {dr}");
+        let mut found: Vec<(String,String,String,String)> = Vec::new();
+        for d in dr["diffs"].as_array().cloned().unwrap_or_default() {
+            let pk = d["pk"][0].as_str().unwrap_or("?").to_string();
+            for cd in d["colDiffs"].as_array().cloned().unwrap_or_default() {
+                found.push((pk.clone(), cd["col"].as_str().unwrap_or("?").to_string(),
+                            format!("{}", cd["src"]), format!("{}", cd["tgt"])));
+            }
+        }
+        for f in &found { println!("  differs: id={} col={} src={} tgt={}", f.0, f.1, f.2, f.3); }
+        assert!(found.iter().any(|f| f.0=="2" && f.1=="v"), "a plain value difference was missed");
+        assert!(found.iter().any(|f| f.0=="3" && f.1=="v" && f.2=="null" && f.3=="\"\""),
+                "NULL in the source vs empty string in the target was NOT reported: {found:?}");
+        assert!(!found.iter().any(|f| f.0=="1"), "row 1 is identical and must not be reported");
+        println!("  NULL vs empty string is detected as a difference");
+
+        // --- a row that exists only in the TARGET
+        println!("  note: id=5 exists only in the target -> reported: {}",
+                 found.iter().any(|f| f.0=="5") || missing.contains(&"5".to_string()));
+    }
+}
