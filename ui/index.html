@@ -1331,7 +1331,7 @@ async function openDdl(db,type,name){const r=await api('/api/ddl',{db,type,name}
 
 // ---- tabs & editor ----
 // --- Query tabs: each tab has its own editor + result grid + pending edits.
-function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqueTabTitle(title||'Query');const tab={id,title,db:db||null,table:table||null,ddl:ddl||null,pk:null,cols:null,rows:null,limit:1000,offset:0,pending:null,filter:null,hiddenCols:new Set()};
+function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqueTabTitle(title||'Query');const tab={id,title,db:db||null,table:table||null,ddl:ddl||null,genSql:sql||'',sqlEdited:false,pk:null,cols:null,rows:null,limit:1000,offset:0,pending:null,filter:null,hiddenCols:new Set()};
  tabs.push(tab);
  const tb=document.createElement('div');tb.className='tab';tb.id='tabbtn_'+id;tb.draggable=true;tb.innerHTML='<span class="tablabel">'+esc(tab.title)+'</span><span class="x">&times;</span>';
  tb.onclick=()=>activate(id);tb.querySelector('.x').onclick=e=>{e.stopPropagation();closeTabAsk(id);};tb.oncontextmenu=e=>{e.preventDefault();menu(e.clientX,e.clientY,[['Close',()=>closeTabAsk(id)],['Close others',()=>closeOthers(id)],['Close all',()=>closeAll()]]);};
@@ -1363,7 +1363,7 @@ function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqu
   const mv=ev=>{let h=sh+(ev.clientY-sy);h=Math.max(44,Math.min(h,Math.max(80,maxH)));ew.style.height=h+'px';syncHl(id);};
   const up=()=>{document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);document.body.style.userSelect='';};
   document.body.style.userSelect='none';document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});})();
- ta.addEventListener('input',()=>{syncHl(id);acUpdate(id);});ta.addEventListener('scroll',()=>{syncHl(id);acHide();});
+ ta.addEventListener('input',()=>{syncHl(id);acUpdate(id);markEdited(id);});ta.addEventListener('scroll',()=>{syncHl(id);acHide();});
  ta.addEventListener('blur',()=>{setTimeout(acHide,150);saveSession();});
  ta.addEventListener('keydown',e=>{
   if(acVisible()){
@@ -1615,7 +1615,18 @@ async function runSel(id){
 // Server errors already start with "ERROR 1146 (42S02): ...", so prefixing them produced
 // "ERROR: ERROR 1146 ...". Only add the prefix when the message does not carry one.
 function logErr(msg){ msg=String(msg==null?'':msg); return /^ERROR\b/.test(msg)?msg:('ERROR: '+msg); }
-function dbOf(t){ if(t&&(t.table||t.ddl))return t.db||curSchema||null; /* table-view + DDL tabs keep their own schema */ return curSchema||(t&&t.db)||null; /* plain query tabs follow the selected sidebar schema */ }
+// A table-view or DDL tab is pinned to the schema it was opened from, so browsing elsewhere
+// cannot silently retarget its generated query. Once the user replaces that query with their
+// own SQL, the reasoning no longer holds: it is an ordinary query now and should run against
+// the schema selected in the sidebar, like any other query tab. Reverting the text back to the
+// generated query pins it again.
+function markEdited(id){
+ const t=T(id), ta=$('ed_'+id);
+ if(!t||!ta||!(t.table||t.ddl))return;
+ const edited=(ta.value!==(t.genSql||''));
+ if(edited!==!!t.sqlEdited){ t.sqlEdited=edited; if(activeTab===id) updateSchemaBadge(id); }
+}
+function dbOf(t){ if(t&&(t.table||t.ddl)&&!t.sqlEdited)return t.db||curSchema||null; /* table-view + DDL tabs keep their own schema, until their SQL is edited - see markEdited() */ return curSchema||(t&&t.db)||null; /* plain query tabs follow the selected sidebar schema */ }
 // runSql(): send the editor SQL to the server and show the rows (or the error).
 async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sql!==t.curRun){t.prevRun=t.curRun;t.curRun=sql;}const st=$('st_'+id);st.className='status';st.textContent='Running\u2026';
  addHistory(sql);
