@@ -77,6 +77,32 @@ impl Drop for JobGuard {
 //     a blocking wait would make the cancelling thread wait for the process it wants to kill.
 // stderr is drained on its own thread for the reason output() does the same internally: a child
 // that fills the stderr pipe buffer blocks forever if nobody is reading it.
+// Stops a child export/import process.
+//
+// On Windows this delegates to taskkill instead of Child::kill(). Calling TerminateProcess on
+// our own child handle, while mysqldump was actively writing a large dump, took the entire
+// application down - no window, no process, and no Rust panic message, so an abort rather than
+// a panic. Confirmed by A/B: a build with the kill removed survives the same cancel, one with
+// it does not. Cancelling between tables was always fine, because no kill happens there; only
+// interrupting a dump in flight reaches this.
+//
+// taskkill runs the terminate in its own process, and /T takes any grandchildren with it.
+// CREATE_NO_WINDOW keeps a console from flashing over the app on every cancel.
+#[cfg(windows)]
+fn kill_child(c: &mut std::process::Child) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let pid = c.id();
+    let _ = Command::new("taskkill")
+        .args(["/F", "/T", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+#[cfg(not(windows))]
+fn kill_child(c: &mut std::process::Child) { let _ = c.kill(); }
+
 fn run_job_child(job: Option<&std::sync::Arc<Job>>, cmd: &mut Command) -> std::io::Result<std::process::Output> {
     let mut child = cmd.stderr(Stdio::piped()).spawn()?;
     let mut pipe = child.stderr.take();
@@ -93,7 +119,7 @@ fn run_job_child(job: Option<&std::sync::Arc<Job>>, cmd: &mut Command) -> std::i
                 let mut finished = None;
                 if let Ok(mut slot) = j.child.lock() {
                     if let Some(c) = slot.as_mut() {
-                        if j.cancelled.load(Ordering::SeqCst) { let _ = c.kill(); }
+                        if j.cancelled.load(Ordering::SeqCst) { kill_child(c); }
                         finished = c.try_wait()?;
                     } else {
                         // Nothing parked: treat as finished rather than spinning forever.
@@ -2163,7 +2189,7 @@ fn cancel_job(req: Value) -> R {
         Some(j) => {
             j.cancelled.store(true, Ordering::SeqCst);
             if let Ok(mut slot) = j.child.lock() {
-                if let Some(c) = slot.as_mut() { let _ = c.kill(); }
+                if let Some(c) = slot.as_mut() { kill_child(c); }
             }
             Ok(json!({"ok":true,"message":"Cancel requested."}))
         }
