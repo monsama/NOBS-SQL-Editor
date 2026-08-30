@@ -1702,7 +1702,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     if(r.aborted){if(T(id)){st.className='status';st.textContent='Query cancelled.';}return;}
     if(!T(id))return;
     if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));return;}
-    t.cols=r.columns;t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
+    t.cols=r.columns;t.binCols=r.binaryCols||[];t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
     if(!r.columns.length){st.textContent=r.message||'Query OK.';$('res_'+id).innerHTML='';updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';return;}
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
     if(t.table){const pk=await api('/api/pk',{db:t.db,table:t.table});if(pk.ok&&pk.pk.length){t.pk=pk.pk;t.pending={upd:{},del:new Set(),ins:[]};}
@@ -2106,6 +2106,33 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
    const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('UPDATE '+tbl+' SET '+sets.join(',')+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
  t.pending.del.forEach(ri=>{const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('DELETE FROM '+tbl+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
  t.pending.ins.forEach(row=>{const cols=Object.keys(row);if(!cols.length)return;S.push('INSERT INTO '+tbl+' ('+cols.map(qid).join(',')+') VALUES ('+cols.map(c=>lit(row[c])).join(',')+');');});
+ // A BIT or binary column round-trips as 0x..., and lit() passes that through unquoted. Anything
+ // else is quoted, and MySQL then stores the BYTES of the text: typing 8 into a BIT(8) cell
+ // stored 56 - the byte value of the character '8' - silently, with no error, because one byte
+ // fits in eight bits. Refuse the batch instead of corrupting the column.
+ const isHex=v=>/^0x[0-9A-Fa-f]*$/.test(String(v));
+ // Two ways to know a column is binary. binaryCols comes from the server, which reads the real
+ // column type - available in the Tauri build. Failing that, fall back to the value already in
+ // the cell: both builds render a binary/BIT value as 0x..., so replacing one with something
+ // else is the same mistake regardless of who reported the type.
+ const binAt=(ci,ri)=>(t.binCols&&t.binCols[ci])||(ri!=null&&t.rows[ri]&&t.rows[ri][ci]!=null&&isHex(t.rows[ri][ci]));
+ const badBin=[];
+ Object.keys(t.pending.upd).forEach(k=>{const [ri,ci]=k.split(':').map(Number);
+  if(!binAt(ci,ri))return;
+  const v=t.pending.upd[k];
+  if(v!==null&&!isHex(v)) badBin.push(t.cols[ci]+' = '+JSON.stringify(String(v)));
+ });
+ t.pending.ins.forEach(row=>{Object.keys(row).forEach(cn=>{const ci=t.cols.indexOf(cn);
+  if(ci<0||!binAt(ci,null))return;
+  const v=row[cn];
+  if(v!==null&&!isHex(v)) badBin.push(cn+' = '+JSON.stringify(String(v)));
+ });});
+ if(badBin.length){
+  alert('These are binary/BIT columns and only accept a 0x value:\n\n'+badBin.join('\n')
+    +'\n\nUse 0x01 for 1, 0x00 for zero. A plain number would be stored as the bytes of its text '
+    +'(8 becomes 56), which MySQL accepts without an error.');
+  return;
+ }
  if(!S.length)return;log('APPLY:\n'+S.join('\n'));
  // Runs as one transaction, so a failure part-way leaves the table exactly as it was.
  // Foreign keys are NOT disabled here: they were, which let an edit point a row at a
