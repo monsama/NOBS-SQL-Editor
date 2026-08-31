@@ -178,9 +178,54 @@ fn take_query_cancelled(rid: &str) -> bool {
 fn is_compare_cancelled(rid: &str) -> bool { cancelled_compares().lock().unwrap().contains(rid) }
 fn clear_compare_cancel(rid: &str) { cancelled_compares().lock().unwrap().remove(rid); }
 
+// Mirrors running_queries() above, but a compare step can have TWO connections (source + target)
+// live under the same requestId at once, so this holds a connection_id + conn-info pair PER
+// connection rather than one. Without this, Cancel only ever set the cooperative flag above,
+// which a single un-chunked SELECT (get_rows_by_pk's fetch, or either side's plain PK scan) can't
+// see until it finishes on its own - so Stop looked like it did nothing on any table big enough
+// for that one query to take a while, and closing the Compare Databases dialog mid-scan left it
+// running in the background for the same reason.
+fn running_compare_conns() -> &'static Mutex<std::collections::HashMap<String, Vec<(u64, Value)>>> {
+    static MAP: OnceLock<Mutex<std::collections::HashMap<String, Vec<(u64, Value)>>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+fn register_compare_conn(rid: &Option<String>, conn: &mut Conn, connj: &Value) {
+    let Some(r) = rid else { return };
+    if let Ok((_c, rows)) = run_select(conn, "SELECT CONNECTION_ID()") {
+        if let Some(cid) = rows.get(0).and_then(|row| row.get(0)).cloned().flatten().and_then(|s| s.parse::<u64>().ok()) {
+            running_compare_conns().lock().unwrap().entry(r.clone()).or_default().push((cid, connj.clone()));
+        }
+    }
+}
+fn unregister_compare_conns(rid: &Option<String>) {
+    if let Some(r) = rid { running_compare_conns().lock().unwrap().remove(r); }
+}
+// RAII guard so the registration above is always cleaned up - compare_rows/compare_rows_diff
+// have several early `?`/return paths, and leaving a stale entry behind would let a LATER,
+// unrelated request that happens to reuse this id inherit connections that no longer exist.
+struct CompareConnGuard(Option<String>);
+impl Drop for CompareConnGuard {
+    fn drop(&mut self) { unregister_compare_conns(&self.0); }
+}
+
 #[tauri::command]
 async fn compare_cancel(req: Value) -> R {
-    if let Some(rid) = req["requestId"].as_str() { if !rid.is_empty() { cancelled_compares().lock().unwrap().insert(rid.to_string()); } }
+    if let Some(rid) = req["requestId"].as_str() {
+        if !rid.is_empty() {
+            cancelled_compares().lock().unwrap().insert(rid.to_string());
+            // Set BEFORE the kill lands, same ordering as compare_rows/compare_rows_diff's own
+            // checkpoints, so a query that dies from the KILL below is seen as "cancelled" by
+            // whichever loop is waiting on it rather than surfacing as a real error.
+            let conns = running_compare_conns().lock().unwrap().get(rid).cloned();
+            if let Some(conns) = conns {
+                tokio::task::spawn_blocking(move || {
+                    for (cid, connj) in conns {
+                        if let Ok(mut kc) = build_conn(&connj) { let _ = kc.query_drop(format!("KILL QUERY {}", cid)); }
+                    }
+                }).await.ok();
+            }
+        }
+    }
     Ok(json!({"ok":true}))
 }
 
@@ -1774,11 +1819,28 @@ async fn compare_rows(req: Value) -> R {
         let (tgt_connj, tgt_ro) = resolve_saved_conn(&tgt_name)?;
         let mut src_conn = build_conn(&src_connj)?;
         let mut tgt_conn = build_conn(&tgt_connj)?;
+        // From here on, a Cancel click can KILL QUERY whichever of these two connections is
+        // actually blocked on a SELECT right now, instead of only being noticed once that query
+        // finishes on its own. _guard drops (and unregisters) on every return path below.
+        register_compare_conn(&rid, &mut src_conn, &src_connj);
+        register_compare_conn(&rid, &mut tgt_conn, &tgt_connj);
+        let _guard = CompareConnGuard(rid.clone());
         let pk = get_table_pk_cols(&mut src_conn, &src_db, &table)?;
         if pk.is_empty() { return Ok(json!({"ok":false,"error":"Table has no primary key - cannot compare rows."})); }
         let fk = get_table_fk_cols(&mut src_conn, &src_db, &table).unwrap_or_default();
         let pk_list = pk.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
-        let (_c1, src_pk_rows) = run_select(&mut src_conn, &format!("SELECT {} FROM {}.{}", pk_list, sql_id(&src_db), sql_id(&table)))?;
+        let (_c1, src_pk_rows) = match run_select(&mut src_conn, &format!("SELECT {} FROM {}.{}", pk_list, sql_id(&src_db), sql_id(&table))) {
+            Ok(v) => v,
+            // A KILL QUERY from Cancel surfaces here as an ordinary MySQL error, so check whether
+            // this request was actually cancelled before reporting it as a real failure.
+            Err(e) => {
+                if cancelled_now(&rid) {
+                    if let Some(r) = &rid { clear_compare_cancel(r); }
+                    return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"cancelled":true}));
+                }
+                return Ok(json!({"ok":false,"error":e}));
+            }
+        };
         if cancelled_now(&rid) {
             if let Some(r) = &rid { clear_compare_cancel(r); }
             return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"cancelled":true}));
@@ -1802,7 +1864,15 @@ async fn compare_rows(req: Value) -> R {
         if use_rows.is_empty() {
             return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"cancelled":false}));
         }
-        let (full_cols, full_rows) = get_rows_by_pk(&mut src_conn, &src_db, &table, &pk, &use_rows)?;
+        let (full_cols, full_rows) = match get_rows_by_pk(&mut src_conn, &src_db, &table, &pk, &use_rows) {
+            Ok(v) => v,
+            Err(e) => {
+                if cancelled_now(&rid) {
+                    return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing,"cancelled":true}));
+                }
+                return Ok(json!({"ok":false,"error":e}));
+            }
+        };
         // allMissingPks: the FULL (uncapped) list of missing primary-key values, sent to the
         // client alongside the first page - just id values, not full row data, so it's cheap
         // compared to what a full table re-scan would cost. The client uses it to load later
@@ -1826,19 +1896,36 @@ async fn compare_rows_diff(req: Value) -> R {
     let src_db = req["sourceDb"].as_str().unwrap_or("").to_string();
     let tgt_db = req["targetDb"].as_str().unwrap_or("").to_string();
     let table = req["table"].as_str().unwrap_or("").to_string();
+    let rid = req["requestId"].as_str().map(String::from);
     tokio::task::spawn_blocking(move || {
+        let cancelled_now = |rid: &Option<String>| rid.as_deref().map(is_compare_cancelled).unwrap_or(false);
         let (src_connj, _) = resolve_saved_conn(&src_name)?;
         let (tgt_connj, tgt_ro) = resolve_saved_conn(&tgt_name)?;
         let mut src_conn = build_conn(&src_connj)?;
         let mut tgt_conn = build_conn(&tgt_connj)?;
+        // See compare_rows above: lets Cancel actually KILL QUERY whichever of these is blocked,
+        // rather than only being noticed once the current SELECT finishes on its own.
+        register_compare_conn(&rid, &mut src_conn, &src_connj);
+        register_compare_conn(&rid, &mut tgt_conn, &tgt_connj);
+        let _guard = CompareConnGuard(rid.clone());
         let pk = get_table_pk_cols(&mut src_conn, &src_db, &table)?;
         if pk.is_empty() { return Ok(json!({"ok":false,"error":"Table has no primary key - cannot compare rows."})); }
         let fk = get_table_fk_cols(&mut src_conn, &src_db, &table).unwrap_or_default();
         let pk_list = pk.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
-        let (_c1, src_pk_rows) = run_select(&mut src_conn, &format!("SELECT {} FROM {}.{}", pk_list, sql_id(&src_db), sql_id(&table)))?;
+        let (_c1, src_pk_rows) = match run_select(&mut src_conn, &format!("SELECT {} FROM {}.{}", pk_list, sql_id(&src_db), sql_id(&table))) {
+            Ok(v) => v,
+            Err(e) => {
+                if cancelled_now(&rid) { return Ok(json!({"ok":true,"pkCols":pk,"fkCols":fk,"diffs":Vec::<Value>::new(),"commonTotal":0,"comparedCount":0,"truncated":false,"targetReadonly":tgt_ro,"cancelled":true})); }
+                return Ok(json!({"ok":false,"error":e}));
+            }
+        };
         let tgt_pk_rows: Vec<Vec<Option<String>>> = match run_select(&mut tgt_conn, &format!("SELECT {} FROM {}.{}", pk_list, sql_id(&tgt_db), sql_id(&table))) {
             Ok((_c, rows)) => rows,
-            Err(e) => { if e.contains("1146") || e.to_lowercase().contains("doesn't exist") { Vec::new() } else { return Ok(json!({"ok":false,"error":e})); } }
+            Err(e) => {
+                if e.contains("1146") || e.to_lowercase().contains("doesn't exist") { Vec::new() }
+                else if cancelled_now(&rid) { return Ok(json!({"ok":true,"pkCols":pk,"fkCols":fk,"diffs":Vec::<Value>::new(),"commonTotal":0,"comparedCount":0,"truncated":false,"targetReadonly":tgt_ro,"cancelled":true})); }
+                else { return Ok(json!({"ok":false,"error":e})); }
+            }
         };
         let tgt_pk_set: std::collections::HashSet<String> = tgt_pk_rows.iter().map(|r| row_key(r)).collect();
         let common: Vec<&Vec<Option<String>>> = src_pk_rows.iter().filter(|r| tgt_pk_set.contains(&row_key(*r))).collect();
@@ -1853,7 +1940,6 @@ async fn compare_rows_diff(req: Value) -> R {
         let mut full_cols: Option<Vec<String>> = None;
         let mut src_full: std::collections::HashMap<String, Vec<Option<String>>> = std::collections::HashMap::new();
         let mut tgt_full: std::collections::HashMap<String, Vec<Option<String>>> = std::collections::HashMap::new();
-        let rid = req["requestId"].as_str().map(String::from);
         let mut cancelled = false;
         for chunk in use_common.chunks(fetch_chunk) {
             if let Some(r) = &rid { if is_compare_cancelled(r) { cancelled = true; break; } }
