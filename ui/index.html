@@ -3162,7 +3162,11 @@ async function cmprTopUpAfterInsert(insertedRows){
  $('cmprNote').innerHTML=_cmprState.missingTotal+' row(s) missing on target'+(stillTruncated?(' (showing next '+_cmprState.rows.length+' for review - <a href="#" onclick="cmprInsertAll();return false" style="color:var(--accent)">insert all '+_cmprState.missingTotal+' without reviewing them</a>)'):'')+'. Rows are inserted with the SAME '+_cmprState.pkCols.join('/')+' value(s) as the source (insert-only - existing target rows are never changed).';
  cmprRender();
 }
-async function openImport(){$('impLog').textContent='';const dl=$('impDbList');dl.innerHTML='';const inp=$('impDb');inp.value=(typeof curSchema!=='undefined'&&curSchema)?curSchema:'';try{const r=await api('/api/schemas');if(r.ok)r.schemas.forEach(s=>{const o=document.createElement('option');o.value=s.name;dl.appendChild(o);});}catch(e){}show('mImport');}
+// Reset every field to its fresh-open default here rather than on Close - Escape closes the
+// topmost modal directly (see the plToggleAutoRefresh comment above for the same issue), which
+// would bypass a close-time reset entirely. Resetting on open works regardless of how it was
+// last closed.
+async function openImport(){$('impFiles').value='';$('impLog').textContent='';$('impCreate').checked=false;$('impFk').checked=true;$('impForce').checked=false;$('impBinary').checked=false;$('impMaxPacket').value='1G';const dl=$('impDbList');dl.innerHTML='';const inp=$('impDb');inp.value=(typeof curSchema!=='undefined'&&curSchema)?curSchema:'';try{const r=await api('/api/schemas');if(r.ok)r.schemas.forEach(s=>{const o=document.createElement('option');o.value=s.name;dl.appendChild(o);});}catch(e){}show('mImport');}
 async function runImport(){const files=$('impFiles').value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);if(!files.length){toast('Add at least one file path.',true);return;}
  $('impLog').textContent='';
  const jobId=(crypto.randomUUID?crypto.randomUUID():('j'+Date.now()+Math.random()));
