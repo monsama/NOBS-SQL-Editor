@@ -230,6 +230,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 <div id="cmpTablesBox" style="display:none;max-height:140px;overflow:auto;border:1px solid var(--bd2);border-radius:4px;padding:4px 8px;margin-bottom:6px"></div>
 <div class="row"><button class="go" onclick="runCompare()">Run comparison</button><span id="cmpRoNote" class="muted" style="font-size:11px;margin-left:8px;display:none;color:var(--del)">Target is read-only / safe mode - apply will be blocked.</span></div>
  <div class="row" id="cmpTallyRow" style="display:none"><span id="cmpTally" class="muted" style="font-size:11px"></span></div>
+ <div class="row" id="cmpRowScanRow" style="display:none"><button id="cmpRowScanBtn" onclick="cmpScanRowDiffs()" title="For every table marked structure identical, run the same missing-rows + content check that clicking rows… on it does - just automatically, one table at a time, so you know which ones are worth opening.">Check row differences</button><span id="cmpRowScanStatus" class="muted" style="font-size:11px;margin-left:8px"></span></div>
  <div class="row" id="cmpResultsSearchRow" style="display:none"><input id="cmpResultSearch" type="text" placeholder="filter results by table name…" oninput="cmpFilterResults()" style="width:100%;font-size:12px"></div>
  <div id="cmpResults" style="max-height:320px;overflow:auto;margin-top:6px"></div>
  <div class="row" style="display:flex;justify-content:space-between;align-items:center">
@@ -2932,12 +2933,24 @@ async function cmpLoadDbs(side){const connSel=$(side==='src'?'cmpSrcConn':'cmpTg
    if(srcDbVal&&r.databases.includes(srcDbVal))dbSel.value=srcDbVal;
    $('cmpRoNote').style.display=r.readonly?'inline':'none';
  }}
-async function openCompare(){$('cmpResults').innerHTML='';$('cmpLog').textContent='';$('cmpSummary').textContent='';const tr=$('cmpTallyRow');if(tr)tr.style.display='none';_cmpTables=null;cmpResetTablePicker();
+async function openCompare(){$('cmpResults').innerHTML='';$('cmpLog').textContent='';$('cmpSummary').textContent='';const tr=$('cmpTallyRow');if(tr)tr.style.display='none';const rsr=$('cmpRowScanRow');if(rsr)rsr.style.display='none';const rss=$('cmpRowScanStatus');if(rss)rss.textContent='';_cmpTables=null;cmpResetTablePicker();
  await cmpFillConnSelect($('cmpSrcConn'));await cmpFillConnSelect($('cmpTgtConn'));
  if(window._primaryConn){$('cmpSrcConn').value=window._primaryConn;}
  await cmpLoadDbs('src');await cmpLoadDbs('tgt');
  show('mCompare');}
 function cmpBadge(status){const map={missing_target:['missing on target','#4a2626','#f0997b'],missing_source:['missing on source','#4a2626','#f0997b'],diff:['differs','#4a4526','#facb75'],same:['structure identical','#1d3a2a','#5dcaa5']};const m=map[status]||['?','#333','#ccc'];return '<span style="background:'+m[1]+';color:'+m[2]+';border-radius:10px;padding:2px 8px;font-size:11px;white-space:nowrap">'+m[0]+'</span>';}
+// Row-level result of cmpScanRowDiffs(), separate from cmpBadge()'s structure-only status -
+// a table can be "structure identical" and still have missing or changed rows, which is exactly
+// what this column exists to surface instead of making you click "rows…" on every single one.
+function cmpRowBadge(t){const rs=t.rowStatus;
+ if(!rs||rs==='pending')return '<span class="muted" style="font-size:11px">—</span>';
+ if(rs==='checking')return '<span class="muted" style="font-size:11px">checking…</span>';
+ if(rs==='no_pk')return '<span class="muted" style="font-size:11px" title="No primary key - row comparison needs one to match rows up.">no primary key</span>';
+ if(rs==='error')return '<span style="color:var(--del);font-size:11px" title="'+esc(t.rowError||'')+'">error</span>';
+ if(rs==='match')return '<span style="background:#1d3a2a;color:#5dcaa5;border-radius:10px;padding:2px 8px;font-size:11px;white-space:nowrap">rows match</span>';
+ const bits=[];if(t.rowMissing)bits.push(t.rowMissing+' missing');if(t.rowDiffer)bits.push(t.rowDiffer+' differ'+(t.rowDiffer===1?'s':''));
+ const title=t.rowTruncated?'Content check only covered the first 500 matching rows - more may differ beyond that.':'';
+ return '<span style="background:#4a4526;color:#facb75;border-radius:10px;padding:2px 8px;font-size:11px;white-space:nowrap" title="'+esc(title)+'">'+esc(bits.join(', ')||'differs')+'</span>';}
 function cmpTally(){const tr=$('cmpTallyRow'),t=$('cmpTally');if(!tr||!t)return;
  if(!_cmpTables||!_cmpTables.length){tr.style.display='none';return;}
  const c={same:0,diff:0,missing_target:0,missing_source:0};
@@ -2949,13 +2962,15 @@ function cmpTally(){const tr=$('cmpTallyRow'),t=$('cmpTally');if(!tr||!t)return;
  if(c.missing_source)parts.push(c.missing_source+' missing on source');
  t.textContent=parts.join(' — ')+(differing?'':' (structure identical)');
  tr.style.display='block';}
-function cmpRenderResults(){const box=$('cmpResults');const sr=$('cmpResultsSearchRow');if(!_cmpTables||!_cmpTables.length){box.innerHTML='<div class="muted">No tables found on either side.</div>';if(sr)sr.style.display='none';cmpTally();return;}
+function cmpRenderResults(){const box=$('cmpResults');const sr=$('cmpResultsSearchRow');const rsr=$('cmpRowScanRow');
+ if(!_cmpTables||!_cmpTables.length){box.innerHTML='<div class="muted">No tables found on either side.</div>';if(sr)sr.style.display='none';if(rsr)rsr.style.display='none';cmpTally();return;}
  if(sr)sr.style.display=_cmpTables.length>8?'block':'none';
+ if(rsr)rsr.style.display=_cmpTables.some(t=>t.status==='same')?'block':'none';
  cmpTally();
- let h='<table style="width:100%;border-collapse:collapse;font-size:12px"><tr class="muted" style="text-align:left;font-size:11px"><th style="padding:4px 6px"></th><th style="padding:4px 6px">Table</th><th style="padding:4px 6px">Status</th></tr>';
+ let h='<table style="width:100%;border-collapse:collapse;font-size:12px"><tr class="muted" style="text-align:left;font-size:11px"><th style="padding:4px 6px"></th><th style="padding:4px 6px">Table</th><th style="padding:4px 6px">Status</th><th style="padding:4px 6px">Rows</th></tr>';
  _cmpTables.forEach((t,ti)=>{const hasSql=t.sql&&t.sql.length;
-  h+='<tr class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="border-top:1px solid var(--bd2)"><td style="padding:6px">'+(hasSql?('<input type="checkbox" '+(t.sql.some(s=>s.checked)?'checked':'')+' onclick="cmpToggleAllForTable('+ti+',this.checked)">'):'')+'</td><td style="padding:6px">'+esc(t.name)+(hasSql?' <a href="#" onclick="cmpToggleDetail('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">details</a>':'')+' <a href="#" onclick="cmpCompareRows('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">rows\u2026</a></td><td style="padding:6px">'+cmpBadge(t.status)+'</td></tr>';
-  h+='<tr id="cmpDetail_'+ti+'" class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="display:none"><td colspan="3" style="padding:0 6px 8px 20px">';
+  h+='<tr class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="border-top:1px solid var(--bd2)"><td style="padding:6px">'+(hasSql?('<input type="checkbox" '+(t.sql.some(s=>s.checked)?'checked':'')+' onclick="cmpToggleAllForTable('+ti+',this.checked)">'):'')+'</td><td style="padding:6px">'+esc(t.name)+(hasSql?' <a href="#" onclick="cmpToggleDetail('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">details</a>':'')+' <a href="#" onclick="cmpCompareRows('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">rows\u2026</a></td><td style="padding:6px">'+cmpBadge(t.status)+'</td><td id="cmpRowCell_'+ti+'" style="padding:6px">'+cmpRowBadge(t)+'</td></tr>';
+  h+='<tr id="cmpDetail_'+ti+'" class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="display:none"><td colspan="4" style="padding:0 6px 8px 20px">';
   t.sql.forEach((st,si)=>{h+='<div style="font-family:\'Cascadia Code\',Consolas,monospace;font-size:11px;margin:2px 0"><label><input type="checkbox" '+(st.checked?'checked':'')+' onclick="_cmpTables['+ti+'].sql['+si+'].checked=this.checked;cmpUpdateSummary()"> '+esc(st.stmt)+'</label></div>';});
   h+='</td></tr>';});
  h+='</table>';box.innerHTML=h;cmpUpdateSummary();cmpFilterResults();}
@@ -3021,8 +3036,59 @@ async function cmprCancelCurrent(){
  try{await api('/api/compare-cancel',{requestId:_cmprRequestId});}catch(e){}
 }
 async function cmprCloseAndCancel(){await cmprCancelCurrent();hide('mCompareRows');}
+// Bulk row-differences scan: for every "structure identical" table, runs exactly the same two
+// calls cmpCompareRows() makes for one table (missing rows, then content diffs on the rest) -
+// just automatically, table by table, so you don't have to click "rows…" on each one to find out
+// which are worth opening. Shares _cmprRequestId/_cmprAbortCtrl with the single-table flow so
+// the two can never run concurrently (that guard already existed; this just also checks it).
+let _cmpRowScanRunning=false;
+let _cmpRowScanCancelled=false;
+function cmpRowScanSetStatus(checked,total,differ,done){
+ const el=$('cmpRowScanStatus');if(!el)return;
+ if(done){el.textContent=(_cmpRowScanCancelled?'Stopped after ':'Checked ')+checked+' of '+total+' table(s) — '+differ+' have row differences.';return;}
+ el.innerHTML='Checking table '+checked+' of '+total+'… '+differ+' so far have row differences. <a href="#" onclick="cmpRowScanCancel();return false" style="color:var(--accent)">Stop</a>';
+}
+function cmpRowScanCancel(){_cmpRowScanCancelled=true;cmprCancelCurrent();}
+async function cmpScanRowDiffs(){
+ if(_cmprRequestId||_cmpRowScanRunning){toast('An operation is already running - wait for it to finish or stop it first.',true);return;}
+ if(!_cmpTables)return;
+ const scanTables=_cmpTables; // if re-running the comparison swaps this out mid-scan, stop rather than write into stale/renumbered rows
+ const targets=_cmpTables.map((t,ti)=>({t,ti})).filter(x=>x.t.status==='same');
+ if(!targets.length){toast('No structure-identical tables to check.',true);return;}
+ const sc=$('cmpSrcConn').value,tc=$('cmpTgtConn').value,sd=$('cmpSrcDb').value,td=$('cmpTgtDb').value;
+ _cmpRowScanRunning=true;_cmpRowScanCancelled=false;
+ const btn=$('cmpRowScanBtn');if(btn)btn.disabled=true;
+ let checked=0,differ=0;
+ cmpRowScanSetStatus(checked,targets.length,differ,false);
+ for(const {t,ti} of targets){
+  if(_cmpRowScanCancelled||_cmpTables!==scanTables)break;
+  t.rowStatus='checking';
+  const cell=document.getElementById('cmpRowCell_'+ti);if(cell)cell.innerHTML=cmpRowBadge(t);
+  const rid1=_cmpNewRequestId();_cmprRequestId=rid1;_cmprAbortCtrl=new AbortController();
+  const r=await api('/api/compare-rows',{sourceConnName:sc,sourceDb:sd,targetConnName:tc,targetDb:td,table:t.name,requestId:rid1},_cmprAbortCtrl.signal);
+  _cmprRequestId=null;_cmprAbortCtrl=null;
+  if(r.aborted||_cmpRowScanCancelled||_cmpTables!==scanTables)break;
+  if(!r.ok){
+   t.rowStatus=(r.error||'').toLowerCase().includes('no primary key')?'no_pk':'error';t.rowError=r.error;
+  } else {
+   t.rowMissing=r.missingTotal;
+   const rid2=_cmpNewRequestId();_cmprRequestId=rid2;_cmprAbortCtrl=new AbortController();
+   const rd=await api('/api/compare-rows-diff',{sourceConnName:sc,sourceDb:sd,targetConnName:tc,targetDb:td,table:t.name,requestId:rid2},_cmprAbortCtrl.signal);
+   _cmprRequestId=null;_cmprAbortCtrl=null;
+   if(rd.aborted||_cmpRowScanCancelled||_cmpTables!==scanTables)break;
+   if(!rd.ok){t.rowStatus='error';t.rowError=rd.error;}
+   else{t.rowDiffer=rd.diffs.length;t.rowTruncated=!!rd.truncated;t.rowStatus=(t.rowMissing>0||t.rowDiffer>0)?'differ':'match';}
+  }
+  if(t.rowStatus==='differ')differ++;
+  checked++;
+  const cell2=document.getElementById('cmpRowCell_'+ti);if(cell2)cell2.innerHTML=cmpRowBadge(t);
+  cmpRowScanSetStatus(checked,targets.length,differ,false);
+ }
+ _cmpRowScanRunning=false;if(btn)btn.disabled=false;
+ cmpRowScanSetStatus(checked,targets.length,differ,true);
+}
 async function cmpCompareRows(ti){
- if(_cmprRequestId){toast('A row comparison is already running - wait for it to finish or click Cancel first.',true);return;}
+ if(_cmprRequestId||_cmpRowScanRunning){toast('A row comparison is already running - wait for it to finish or click Cancel/Stop first.',true);return;}
  const t=_cmpTables[ti];
  const sc=$('cmpSrcConn').value,tc=$('cmpTgtConn').value,sd=$('cmpSrcDb').value,td=$('cmpTgtDb').value;
  if(sc===tc&&sd===td){if(!(await ask('Source and target are the SAME connection and database ('+sc+' / '+sd+').\n\nComparing them will always show no differences. Continue anyway?')))return;}
