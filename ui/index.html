@@ -1370,7 +1370,7 @@ function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqu
   '<label title="If a statement fails, keep running the rest of the script instead of stopping at the first error - useful for bulk, mostly-independent statements like seed data or batch table creation. Every failure is reported, not just the first. Only applies to a script that does NOT end in a SELECT." style="display:inline-flex;align-items:center;gap:5px;margin-left:10px;font-size:12px;color:var(--muted)"><input type="checkbox" id="coe_'+id+'"> Continue on error</label>'+
   '<span class="tbsep"></span>'+
   '<span id="resultActions_'+id+'" style="display:none;gap:9px;align-items:center" class="tbgroup">'+
-  '<button title="Copy the grid to the clipboard, as CSV or Markdown, all rows or just the selected (checked) ones (binary/control-character values are copied as 0x... hex text, not the literal bytes)" onclick="event.stopPropagation();openCopyMenu(\''+id+'\',this)">Copy \u25BE</button>'+'<button class="sm" id="wrapbtn_'+id+'" title="Toggle text wrapping in the grid" onclick="toggleWrap(\''+id+'\')">Wrap: Off</button>'+'<button class="sm" id="colsbtn_'+id+'" title="Show or hide columns" onclick="event.stopPropagation();toggleColPicker(\''+id+'\',this)">Columns</button>'+
+  '<button title="Copy the grid to the clipboard, as CSV or Markdown, all rows or just the selected (checked) ones (binary/control-character values are copied as 0x... hex text, not the literal bytes)" onclick="event.stopPropagation();toggleCopyMenu(\''+id+'\',this)">Copy \u25BE</button>'+'<button class="sm" id="wrapbtn_'+id+'" title="Toggle text wrapping in the grid" onclick="toggleWrap(\''+id+'\')">Wrap: Off</button>'+'<button class="sm" id="colsbtn_'+id+'" title="Show or hide columns" onclick="event.stopPropagation();toggleColPicker(\''+id+'\',this)">Columns</button>'+
   '<span class="tbsep"></span></span>'+
   '<span style="flex:1 1 auto"></span>'+
   '<span id="edit_'+id+'" style="display:inline-flex;align-items:center;gap:6px"></span>'+pager+'</div>'+
@@ -1859,8 +1859,13 @@ function openColPicker(id,btn){const t=T(id);if(!t||!t.cols)return;if(!t.hiddenC
 // / Copy Markdown / Copy selected Markdown) into one dropdown - same underlying actions, same
 // behavior when nothing's selected, just not eating four button-widths of toolbar space for a
 // 2-format-by-2-scope combination. Mirrors openColPicker()'s exact positioning logic above.
+// Same toggle-close fix as toggleColPicker() above - a second click on the SAME Copy button
+// while its menu is already open closes it, instead of only closing via the document-level
+// "click outside" listener (which never sees this click, since the button's own onclick calls
+// stopPropagation() first).
+function toggleCopyMenu(id,btn){const p=$('copyMenu');if(p&&p.style.display==='block'&&p.dataset.forId===id){p.style.display='none';return;}openCopyMenu(id,btn);}
 function openCopyMenu(id,btn){
- const p=$('copyMenu');
+ const p=$('copyMenu');p.dataset.forId=id;
  let h='<div class="cphdr"><span>Copy grid as...</span></div>';
  h+='<div class="cpitem" onclick="copyCsv(\''+id+'\');closeCopyMenu();">CSV (all rows)</div>';
  h+='<div class="cpitem" onclick="copySelCsv(\''+id+'\');closeCopyMenu();">CSV (selected rows)</div>';
