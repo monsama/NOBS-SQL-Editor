@@ -2526,6 +2526,24 @@ fn quit_app(app: tauri::AppHandle) { app.exit(0); }
 #[tauri::command]
 fn quit(app: tauri::AppHandle) { app.exit(0); }
 
+// Opens the Buy Me a Coffee link in the OS's default browser, not this app's own webview -
+// deliberately takes no argument and hardcodes the exact URL rather than accepting one from the
+// frontend, so this can never become a way to launch an arbitrary command/URL. No existing
+// shell/opener plugin is set up in this project, and adding one is a bigger dependency change
+// than one static link needs - a plain OS-specific spawn is simpler and has no new attack surface
+// beyond "open this one fixed https URL", the same thing every platform's own browser already does.
+#[tauri::command]
+fn open_support_link(_req: Value) -> Result<(), String> {
+    const URL: &str = "https://buymeacoffee.com/monsama";
+    #[cfg(target_os = "windows")]
+    { std::process::Command::new("cmd").args(["/C", "start", "", URL]).spawn().map_err(|e| e.to_string())?; }
+    #[cfg(target_os = "macos")]
+    { std::process::Command::new("open").arg(URL).spawn().map_err(|e| e.to_string())?; }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    { std::process::Command::new("xdg-open").arg(URL).spawn().map_err(|e| e.to_string())?; }
+    Ok(())
+}
+
 #[tauri::command]
 // Companion to save_text for binary content (currently just PNG diagram exports). Sent as a
 // plain JSON array of byte values rather than base64 - decoding base64 correctly would need a
@@ -2565,7 +2583,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             connect, schemas, objects, ddl, pk, query, exec, rowop, script,
-            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, tools_status, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd
+            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, tools_status, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd, open_support_link
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
