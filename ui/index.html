@@ -191,9 +191,10 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div id="expDbs" style="max-height:150px;overflow:auto;border:1px solid var(--bd2);padding:6px"></div>
  <div class="row"><b>Options</b></div><div class="grid2" id="expOpts"></div>
  <div class="row"><label title="How a NULL is written to CSV. \N is what LOAD DATA reads back; blank makes NULL and an empty string indistinguishable in the file.">NULL value <input id="expNullVal" value="\N" style="width:52px;font-family:Consolas,monospace"></label> Charset <select id="expCharset"><option>utf8mb4</option><option>utf8</option><option>latin1</option><option>binary</option></select>
-  <label title="One .sql file per table - lets you restore a single table. Slower, more files (like Workbench Dump Project Folder)."><input type="radio" name="expmode" id="expTable" checked> per table</label><label title="One .sql file per database."><input type="radio" name="expmode" id="expPer"> per DB</label><label title="Everything in one combined .sql file."><input type="radio" name="expmode" id="expSingle"> single file</label>
+  <label title="One .sql file per table - lets you restore a single table. Slower, more files (like Workbench Dump Project Folder)."><input type="radio" name="expmode" id="expTable" checked onchange="expSyncFilenameField()"> per table</label><label title="One .sql file per database."><input type="radio" name="expmode" id="expPer" onchange="expSyncFilenameField()"> per DB</label><label title="Everything in one combined .sql file."><input type="radio" name="expmode" id="expSingle" onchange="expSyncFilenameField()"> single file</label>
   <label title="Append a date-time stamp to each file name."><input type="checkbox" id="expStamp" checked> timestamp</label>
-  <label title="mysqldump --max-allowed-packet. Raise this for very large rows or BLOBs (e.g. 1G).">max packet <input id="expMaxPacket" value="1G" style="width:56px"></label></div>
+  <label title="mysqldump --max-allowed-packet. Raise this for very large rows or BLOBs (e.g. 1G).">max packet <input id="expMaxPacket" value="1G" style="width:56px"></label>
+  <label id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none">filename <input id="expFilename" placeholder="all_selected" style="width:120px"></label></div>
  <div class="row">Folder <input id="expFolder" style="flex:1" value="C:\temp"><button onclick="browse({title:'Select export folder',mode:'folder',start:$('expFolder').value,onPick:pp=>$('expFolder').value=pp})">Browse...</button></div>
  <div class="row"><button class="go" id="expGoBtn" onclick="runExport()">Start Export</button><button class="warn" id="expCancelBtn" disabled onclick="cancelJob('exp')">Cancel</button><button onclick="hide('mExport')">Close</button></div>
  <div id="expProgress" style="display:none;margin-top:8px">
@@ -2820,6 +2821,8 @@ const grouped={};EXPOPTS.forEach(o=>{const g=o[4]||'Other';(grouped[g]=grouped[g
   grouped[g].forEach(([k,l,d,t])=>{ob.innerHTML+='<label class="ck" title="'+esc(t||'')+'"><input type="checkbox" id="eo_'+k+'" '+(d?'checked':'')+'> '+l+'</label>';});
 });
 expOptsRestore();
+expSyncFilenameField();
+expApplyDumpFlavor();
 if(preselect&&preselect.db){
   document.querySelectorAll('.expdb').forEach(cb=>{cb.checked=(cb.value===preselect.db);});
   if(preselect.table){
@@ -2832,6 +2835,35 @@ if(preselect&&preselect.db){
 }
 show('mExport');}
 function expAll(v){[...document.querySelectorAll('.expdb')].forEach(c=>c.checked=v);}
+function expSyncFilenameField(){const row=$('expFilenameRow');if(row)row.style.display=$('expSingle').checked?'inline-flex':'none';}
+// A few export options only exist on one mysqldump flavor: --set-gtid-purged is MySQL 5.6+
+// only, --column-statistics is MySQL 8+ only - MariaDB's mysqldump has neither, and checking
+// either against it aborts the WHOLE export with "unknown variable". Grey them out up front
+// (based on tools_status's one-time `--version` check) instead of letting that be a surprise
+// mid-export - the backend also has a friendlier error message as a fallback for anything this
+// doesn't catch (an unusual custom mysqldump path, a version too old for a flag, etc).
+const MYSQL_ONLY_EXPOPTS={
+ gtid:'set-gtid-purged is MySQL 5.6+ only - not supported by MariaDB’s mysqldump.',
+ colstats:'column-statistics is MySQL 8+ only - not supported by MariaDB’s mysqldump.'
+};
+async function expApplyDumpFlavor(){
+ let r; try{ r=await api('/api/tools-status'); }catch(e){ return; }
+ const isMariaDb=!!(r&&r.ok&&r.mysqldump_is_mariadb===true);
+ Object.keys(MYSQL_ONLY_EXPOPTS).forEach(k=>{
+  const el=$('eo_'+k); if(!el)return;
+  const lbl=el.closest('label');
+  let note=lbl&&lbl.querySelector('.expoptsdis');
+  if(isMariaDb){
+   el.disabled=true; el.checked=false;
+   if(lbl){ lbl.title='Not supported: '+MYSQL_ONLY_EXPOPTS[k]; lbl.style.opacity='.55';
+    if(!note){ note=document.createElement('span'); note.className='expoptsdis'; note.style.cssText='font-size:10px;color:var(--del);margin-left:4px'; note.textContent='(unsupported by this mysqldump)'; lbl.appendChild(note); } }
+  } else {
+   el.disabled=false;
+   if(lbl)lbl.style.opacity='';
+   if(note)note.remove();
+  }
+ });
+}
 async function expTables(db,safe){const c=$('expt_'+safe);if(!c)return;const cx=$('expx_'+safe);if(c.style.display==='none'){c.style.display='block';if(cx)cx.textContent='\u25BE';if(!c.dataset.loaded){c.innerHTML='<span class="muted" style="font-size:11px">Loading\u2026</span>';const q=await api('/api/query',{sql:'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='+lit(db)+' ORDER BY TABLE_NAME'});if(!q.ok){c.innerHTML='<span class="muted" style="font-size:11px">'+esc(q.error||'Could not list tables')+'</span>';return;}if(!q.rows.length){c.innerHTML='<span class="muted" style="font-size:11px">(no tables)</span>';c.dataset.loaded='1';return;}const dbCk=document.querySelector('.expdb[value="'+db.replace(/"/g,'&quot;')+'"]');const on=dbCk?dbCk.checked:true;let h='<div class="muted" style="font-size:11px;margin:1px 0 3px">Untick a table to exclude it from the export:</div>';q.rows.forEach(r=>{const tn=r[0];h+='<label class="ck" style="font-size:12px"><input type="checkbox" class="exptbl" data-db="'+esc(db)+'" value="'+esc(tn)+'" '+(on?'checked':'')+'> '+esc(tn)+'</label>';});c.innerHTML=h;c.dataset.loaded='1';}}else{c.style.display='none';if(cx)cx.textContent='\u25B8';}}
 function expDbToggle(safe,on){document.querySelectorAll('#expt_'+safe+' .exptbl').forEach(c=>{c.checked=on;});}
 async function runExport(){const dbs=[...document.querySelectorAll('.expdb:checked')].map(c=>c.value);
@@ -2860,7 +2892,7 @@ if(!dbs.length && tables.length){
  if(mode==='table'){try{const cq=await api('/api/query',{sql:"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_TYPE='BASE TABLE' AND TABLE_SCHEMA IN ("+dbs.map(lit).join(',')+")"});if(cq.ok&&cq.rows.length){label+=' (~'+fmtCount(cq.rows[0][0])+' tables)';}}catch(e){}}
  const jobId=(crypto.randomUUID?crypto.randomUUID():('j'+Date.now()+Math.random()));
  progStart('exp',label,jobId);
- const r=await api('/api/export',{dbs,options:o,folder:$('expFolder').value,mode:mode,stamp:$('expStamp').checked,excludes:excludes,jobId:jobId});
+ const r=await api('/api/export',{dbs,options:o,folder:$('expFolder').value,mode:mode,filename:$('expFilename').value.trim(),stamp:$('expStamp').checked,excludes:excludes,jobId:jobId});
  progStop('exp');
  if(r.cancelled){log('Export cancelled.');}
  if(!r.ok){showToolError('expLog','mExport',r.error);log('Export error: '+r.error);return;}

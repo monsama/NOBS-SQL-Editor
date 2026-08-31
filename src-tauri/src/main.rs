@@ -449,6 +449,19 @@ fn first_err(s: &str) -> String {
         .unwrap_or("").to_string()
 }
 
+// mysqldump/mysql print exactly this wording (no "ERROR NNNN" prefix, so first_err() returns it
+// verbatim) when a flag the binary doesn't recognise is passed - which happens whenever an
+// export/import option only supported by one dump-tool flavor (MySQL vs MariaDB, or an older
+// version of either) is used against the other. Name the likely cause instead of leaving a bare
+// "unknown variable" for the user to puzzle over.
+fn friendly_dump_err(raw: &str) -> String {
+    if let Some(opt) = raw.split("unknown variable '").nth(1).and_then(|s| s.split('\'').next()) {
+        format!("{} - '{}' isn't supported by this build of the tool (MySQL and MariaDB's client tools, and different versions of each, support different flag sets). Uncheck the matching export/import option, or point Settings at the other flavor's .exe.", raw, opt)
+    } else {
+        raw.to_string()
+    }
+}
+
 // ---------- commands ----------
 #[tauri::command]
 async fn connect(req: Value) -> R {
@@ -1074,6 +1087,10 @@ async fn import_run(req: Value, mbin: String) -> R {
             let mut args = vec![format!("--defaults-extra-file={}", cnf)];
             if req["force"].as_bool().unwrap_or(false) { args.push("--force".into()); }
             if req["fkOff"].as_bool().unwrap_or(false) { args.push("--init-command=SET FOREIGN_KEY_CHECKS=0; SET UNIQUE_CHECKS=0".into()); }
+            // The "binary-mode" checkbox sends this, but nothing ever read it - checking it in
+            // the UI silently did nothing, so the exact NUL-byte error its tooltip promises to
+            // fix ("ASCII '\0' appeared in the statement") kept recurring with the box checked.
+            if req["binaryMode"].as_bool().unwrap_or(false) { args.push("--binary-mode".into()); }
             if !target.is_empty() { args.push(target.clone()); }
             let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
             let mut cmd = Command::new(&mbin);
@@ -1102,7 +1119,7 @@ async fn import_run(req: Value, mbin: String) -> R {
                 // import rather than the cancel the user just asked for.
                 Ok(_) if job_is_cancelled(&job) => { log.push(format!("CANCELLED {}", short())); cancelled = true; break; }
                 Ok(o) => {
-                    let e = first_err(&String::from_utf8_lossy(&o.stderr));
+                    let e = friendly_dump_err(&first_err(&String::from_utf8_lossy(&o.stderr)));
                     // A per-table dump carries no CREATE DATABASE or USE, so it has nowhere to go
                     // unless a target is chosen. "No database selected" is accurate and useless.
                     let hint = if e.contains("1046") || e.contains("No database selected") {
@@ -1154,6 +1171,13 @@ async fn export_run(req: Value, dbin: String) -> R {
             .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         let safe_name = |n: &str| -> String { n.chars().map(|c| if c.is_alphanumeric() || c=='_' || c=='.' || c=='-' { c } else { '_' }).collect() };
         let mkfile = |base: &str| format!("{}/{}{}.sql", folder.trim_end_matches(['/', '\\']), safe_name(base), stamp);
+        // Only meaningful in "single" mode - db/table mode each produce one file per object, so
+        // a single manual name has nowhere to go. A trailing .sql the user typed themselves is
+        // stripped so it doesn't end up doubled ("backup.sql" + mkfile's own ".sql" suffix).
+        let custom_name = req["filename"].as_str().unwrap_or("").trim().to_string();
+        let single_base = if custom_name.is_empty() { "all_selected".to_string() } else {
+            custom_name.strip_suffix(".sql").or_else(|| custom_name.strip_suffix(".SQL")).unwrap_or(&custom_name).to_string()
+        };
 
         // Flags shared by every mysqldump call in this run (no database-level flags here -
         // those differ between "table" mode, which dumps table-by-table, and db/single modes).
@@ -1202,7 +1226,7 @@ async fn export_run(req: Value, dbin: String) -> R {
                     // with nothing after the colon. Name the real reason instead, and never
                     // report an empty one.
                     let e = first_err(&String::from_utf8_lossy(&o2.stderr));
-                    if !e.trim().is_empty() { Ok((false, e)) }
+                    if !e.trim().is_empty() { Ok((false, friendly_dump_err(&e))) }
                     else if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { Ok((false, RUN_CANCELLED.into())) }
                     else { Ok((false, format!("mysqldump exited with {} and no error output", o2.status))) }
                 }
@@ -1214,7 +1238,7 @@ async fn export_run(req: Value, dbin: String) -> R {
         let mut cancelled = false;
 
         if mode == "single" {
-            let file = mkfile("all_selected");
+            let file = mkfile(&single_base);
             let mut a = common.clone();
             a.push("--databases".into());
             if flag("routines") { a.push("--routines".into()); }
@@ -1227,8 +1251,8 @@ async fn export_run(req: Value, dbin: String) -> R {
             a.push(format!("--result-file={}", file));
             match run(&dbin, &a, &file) {
                 Ok((true, msg)) => log.push(msg),
-                Ok((false, err)) => { if err == RUN_CANCELLED { log.push("CANCELLED all_selected".into()); cancelled = true; } else { log.push(format!("FAILED all_selected : {}", err)); } }
-                Err(e) => log.push(format!("FAILED all_selected : {}", e)),
+                Ok((false, err)) => { if err == RUN_CANCELLED { log.push(format!("CANCELLED {}", single_base)); cancelled = true; } else { log.push(format!("FAILED {} : {}", single_base, err)); } }
+                Err(e) => log.push(format!("FAILED {} : {}", single_base, e)),
             }
         } else if mode == "db" {
             for d in &dbs {
@@ -2359,10 +2383,20 @@ fn tools_status(app: tauri::AppHandle) -> R {
     }
     let (m, ms) = describe(&app, "mysql", &["mysql", "mariadb"], "MYSQL_BIN");
     let (d, ds) = describe(&app, "mysqldump", &["mysqldump", "mariadb-dump"], "MYSQLDUMP_BIN");
+    // A handful of export options only exist on one dump-tool flavor: --set-gtid-purged is
+    // MySQL 5.6+ only, --column-statistics is MySQL 8+ only - MariaDB's mysqldump has neither,
+    // and checking either against it aborts the whole export with "unknown variable". Running
+    // `--version` once here lets the export dialog grey those options out up front instead of
+    // letting the user discover it mid-export.
+    let dump_is_mariadb = if d != "(not found)" {
+        Command::new(&d).arg("--version").output().ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("mariadb"))
+    } else { None };
     Ok(json!({
         "ok": true,
         "mysql": m, "mysql_source": ms,
         "mysqldump": d, "mysqldump_source": ds,
+        "mysqldump_is_mariadb": dump_is_mariadb,
         "download_dir": tools_dir().to_string_lossy(),
         "config_file": config_file().to_string_lossy()
     }))
