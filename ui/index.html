@@ -494,7 +494,7 @@ function floatRenderTray(){
  tray.innerHTML=ids.map(id=>
   '<span class="chip" style="background:var(--panel);border-color:var(--bd2);color:var(--fg);gap:8px;cursor:default">'
   +'<span onclick="floatRestore(\''+id+'\')" style="cursor:pointer" title="Restore">'+esc(floatTrayLabel(id))+'</span>'
-  +'<span onclick="hide(\''+id+'\')" style="cursor:pointer;font-weight:700;padding:0 1px" title="Close">&times;</span>'
+  +'<span onclick="modalClose(\''+id+'\')" style="cursor:pointer;font-weight:700;padding:0 1px" title="Close">&times;</span>'
   +'</span>'
  ).join('');
 }
@@ -1525,8 +1525,15 @@ document.addEventListener('keydown',e=>{const mod=e.ctrlKey||e.metaKey;if(!mod)r
 // the scan keeps going in the background against a now-hidden dialog. Escape used to call hide()
 // directly and skip all of that, so it behaved differently from clicking Close on the exact same
 // window - this map lets Escape reuse each modal's own close function where one exists.
-const MODAL_ESCAPE_CLOSE={mCompare:cmpCloseAndCancel,mCompareRows:cmprCloseAndCancel,mBrowse:brClose};
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){const open=[...document.querySelectorAll('.modal.show')].filter(m=>!window._floatingMinimized[m.id]);if(open.length){const id=open[open.length-1].id;const closeFn=MODAL_ESCAPE_CLOSE[id];if(closeFn)closeFn();else hide(id);}}});
+const MODAL_CLOSE_OVERRIDES={mCompare:cmpCloseAndCancel,mCompareRows:cmprCloseAndCancel,mBrowse:brClose,mInput:inpCancel};
+// Shared by the Escape handler below AND the minimized-window tray's own × (floatRenderTray) -
+// both are ways to close a modal that DON'T go through its own Close button, so both need the
+// same override lookup. Missing this on the tray's × specifically would have been a real
+// regression from making Compare Databases minimizable: minimize it mid-scan, then close it from
+// the tray, and a plain hide() would leave the scan running in the background uncancelled -
+// exactly the bug Escape already had before this existed.
+function modalClose(id){const fn=MODAL_CLOSE_OVERRIDES[id];if(fn)fn();else hide(id);}
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){const open=[...document.querySelectorAll('.modal.show')].filter(m=>!window._floatingMinimized[m.id]);if(open.length){modalClose(open[open.length-1].id);}}});
 function closeTab(id){const t=T(id);if(t&&t.runningReqId){cancelQuery(id);}const i=tabs.findIndex(t=>t.id===id);if(i<0)return;tabs.splice(i,1);$('tabbtn_'+id).remove();$('pane_'+id).remove();if(activeTab===id&&tabs.length)activate(tabs[tabs.length-1].id);if(tabs.length===0){activeTab=null;}saveSession();toggleOverview();}
 // Each saved connection remembers its own open tabs (keyed by connection name; ad-hoc/unsaved
 // connections are keyed by host+user+port so different credentials don't collide).
