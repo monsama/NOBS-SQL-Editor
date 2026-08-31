@@ -1761,7 +1761,15 @@ async fn compare_rows(req: Value) -> R {
     let src_db = req["sourceDb"].as_str().unwrap_or("").to_string();
     let tgt_db = req["targetDb"].as_str().unwrap_or("").to_string();
     let table = req["table"].as_str().unwrap_or("").to_string();
+    let rid = req["requestId"].as_str().map(String::from);
     tokio::task::spawn_blocking(move || {
+        // A single SELECT can't be interrupted mid-flight once the driver call has started (no
+        // chunking here, unlike compare_rows_diff below), so this can only bail out BETWEEN the
+        // blocking steps - still meaningful for cmpScanRowDiffs' bulk scan, which calls this once
+        // per table: it skips the (often equally expensive) target-side query and the display-row
+        // fetch entirely once Stop has been clicked, rather than doing that work for nothing.
+        let cancelled_now = |rid: &Option<String>| rid.as_deref().map(is_compare_cancelled).unwrap_or(false);
+        if cancelled_now(&rid) { return Ok(json!({"ok":true,"pkCols":Vec::<String>::new(),"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":false,"allMissingPks":Vec::<Value>::new(),"cancelled":true})); }
         let (src_connj, _) = resolve_saved_conn(&src_name)?;
         let (tgt_connj, tgt_ro) = resolve_saved_conn(&tgt_name)?;
         let mut src_conn = build_conn(&src_connj)?;
@@ -1771,6 +1779,10 @@ async fn compare_rows(req: Value) -> R {
         let fk = get_table_fk_cols(&mut src_conn, &src_db, &table).unwrap_or_default();
         let pk_list = pk.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
         let (_c1, src_pk_rows) = run_select(&mut src_conn, &format!("SELECT {} FROM {}.{}", pk_list, sql_id(&src_db), sql_id(&table)))?;
+        if cancelled_now(&rid) {
+            if let Some(r) = &rid { clear_compare_cancel(r); }
+            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"cancelled":true}));
+        }
         let tgt_pk_rows: Vec<Vec<Option<String>>> = match run_select(&mut tgt_conn, &format!("SELECT {} FROM {}.{}", pk_list, sql_id(&tgt_db), sql_id(&table))) {
             Ok((_c, rows)) => rows,
             // Target table hasn't been created yet - treat it as new/empty rather than failing,
@@ -1783,8 +1795,12 @@ async fn compare_rows(req: Value) -> R {
         const CAP: usize = 2000;
         let truncated = missing_total > CAP;
         let use_rows: Vec<Vec<Option<String>>> = missing.iter().take(CAP).cloned().collect();
+        if cancelled_now(&rid) {
+            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing,"cancelled":true}));
+        }
+        if let Some(r) = &rid { clear_compare_cancel(r); }
         if use_rows.is_empty() {
-            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new()}));
+            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"cancelled":false}));
         }
         let (full_cols, full_rows) = get_rows_by_pk(&mut src_conn, &src_db, &table, &pk, &use_rows)?;
         // allMissingPks: the FULL (uncapped) list of missing primary-key values, sent to the
@@ -1792,7 +1808,7 @@ async fn compare_rows(req: Value) -> R {
         // compared to what a full table re-scan would cost. The client uses it to load later
         // pages, or to remove just-inserted rows and pull the next batch, WITHOUT ever
         // re-scanning the table again.
-        Ok(json!({"ok":true,"pkCols":pk,"columns":full_cols,"rows":full_rows,"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing}))
+        Ok(json!({"ok":true,"pkCols":pk,"columns":full_cols,"rows":full_rows,"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing,"cancelled":false}))
     }).await.map_err(|e| e.to_string())?
 }
 
