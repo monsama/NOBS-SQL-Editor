@@ -216,6 +216,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 
 <div class="modal" id="mCompare"><div class="box" style="width:820px;max-width:94vw">
  <h3>Compare Databases</h3>
+ <div class="muted" style="font-size:11px;margin-bottom:6px">Connects to both sides independently of whatever's currently active, using each saved connection's stored password - so both the source and target connection need "Save password" checked (Edit&hellip; on the connection) or this will fail to log in.</div>
  <div class="row" style="display:flex;gap:10px">
    <div style="flex:1"><div class="muted" style="font-size:11px;margin-bottom:3px">Source</div>
      <select id="cmpSrcConn" style="width:100%" onchange="cmpLoadDbs('src')"></select>
