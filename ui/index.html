@@ -3012,7 +3012,15 @@ async function cmpCancelCurrent(){
  if(!_cmpRequestId)return;
  try{await api('/api/compare-cancel',{requestId:_cmpRequestId});}catch(e){}
 }
-async function cmpCloseAndCancel(){await cmpCancelCurrent();hide('mCompare');}
+async function cmpCloseAndCancel(){
+ // cmpCancelCurrent() only knows about runCompare()'s own single request (_cmpRequestId) - it
+ // has no idea a "Check row differences" scan might be mid-flight, using its own separate
+ // _cmprRequestId/_cmpRowScanRunning state. Without also stopping that here, closing this dialog
+ // while a scan was running left it going in the background against a now-hidden UI.
+ if(_cmpRowScanRunning){_cmpRowScanCancelled=true;await cmprCancelCurrent();}
+ await cmpCancelCurrent();
+ hide('mCompare');
+}
 async function runCompare(){
  if(_cmpRequestId){toast('A comparison is already running - wait for it to finish or click Cancel first.',true);return;}
  const sc=$('cmpSrcConn').value,tc=$('cmpTgtConn').value,sd=$('cmpSrcDb').value,td=$('cmpTgtDb').value;
