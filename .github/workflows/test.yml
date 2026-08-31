@@ -1,0 +1,34 @@
+name: test
+
+# Runs the existing Rust unit/integration test suite (src-tauri/src/main.rs's #[test]s) on every
+# push to main and every PR against it, so a regression fails the check instead of only being
+# caught by hand-testing later. Tests marked #[ignore] need a live NOBS_TEST_DSN database and are
+# skipped here (cargo test's default behavior) - everything else (SQL statement splitting, CSV
+# import edge cases, read-only mode enforcement, SQL-literal escaping, etc.) still runs.
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+jobs:
+  test:
+    # windows-latest, same as build.yml: this is a Tauri app, so compiling it (even just to run
+    # tests) needs the platform's webview stack. Windows ships WebView2 already; avoiding a
+    # separate Linux job here means no extra libgtk/libwebkit apt setup to install and maintain.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Cargo.toml lives in src-tauri/, not the repo root - see build.yml's comment on why
+          # this needs to be set explicitly.
+          workspaces: src-tauri
+
+      - name: Run tests
+        working-directory: src-tauri
+        run: cargo test

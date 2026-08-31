@@ -363,11 +363,17 @@ fn sql_is_readonly(sql: &str) -> bool {
     }
     true
 }
+// The actual escaping: backslash first (so a literal backslash never combines with the quote
+// doubling below to re-open the string), then the quote itself. Used directly wherever a plain
+// string literal is needed (schema/table names from information_schema, usernames, ...) - unlike
+// sql_lit() below, this has no hex-literal special case, so it's the right one for a NAME, which
+// should never be reinterpreted as a raw hex value just because it happens to look like one.
+fn sql_str_lit(s: &str) -> String { format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''")) }
 fn sql_lit(s: &str) -> String {
     if !s.is_empty() && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit()) && s.len() > 2 {
         return s.to_string(); // hex literal (bit/binary)
     }
-    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
+    sql_str_lit(s)
 }
 // Mirrors the PowerShell version's SqlValLit: a "0x.." hex-encoded string produced by
 // val_to_opt() for binary/bit values is our OWN display encoding, not a real string value.
@@ -549,14 +555,14 @@ async fn schemas(req: Value) -> R {
 #[tauri::command]
 async fn objects(req: Value) -> R {
     tokio::task::spawn_blocking(move || {
-        let db = req["db"].as_str().unwrap_or("").replace('\'', "''");
+        let db = sql_str_lit(req["db"].as_str().unwrap_or(""));
         let mut c = build_conn(&req["conn"])?;
         let sql = format!(
-            "SELECT 'table' t,TABLE_NAME n FROM information_schema.TABLES WHERE TABLE_SCHEMA='{d}' AND TABLE_TYPE='BASE TABLE' \
-             UNION ALL SELECT 'view',TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='{d}' AND TABLE_TYPE='VIEW' \
-             UNION ALL SELECT IF(ROUTINE_TYPE='PROCEDURE','procedure','function'),ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA='{d}' \
-             UNION ALL SELECT 'trigger',TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='{d}' \
-             UNION ALL SELECT 'event',EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA='{d}' ORDER BY 1,2", d = db);
+            "SELECT 'table' t,TABLE_NAME n FROM information_schema.TABLES WHERE TABLE_SCHEMA={d} AND TABLE_TYPE='BASE TABLE' \
+             UNION ALL SELECT 'view',TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA={d} AND TABLE_TYPE='VIEW' \
+             UNION ALL SELECT IF(ROUTINE_TYPE='PROCEDURE','procedure','function'),ROUTINE_NAME FROM information_schema.ROUTINES WHERE ROUTINE_SCHEMA={d} \
+             UNION ALL SELECT 'trigger',TRIGGER_NAME FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA={d} \
+             UNION ALL SELECT 'event',EVENT_NAME FROM information_schema.EVENTS WHERE EVENT_SCHEMA={d} ORDER BY 1,2", d = db);
         let (_c, rows) = run_select(&mut c, &sql)?;
         let (mut tables, mut views, mut procedures, mut functions, mut triggers, mut events) =
             (vec![], vec![], vec![], vec![], vec![], vec![]);
@@ -575,7 +581,7 @@ async fn objects(req: Value) -> R {
         // the existing flat trigger-name array - which other code already relies on - never changes.
         let mut trigger_tables: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         if !triggers.is_empty() {
-            if let Ok((_tc, trows)) = run_select(&mut c, &format!("SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA='{}'", db)) {
+            if let Ok((_tc, trows)) = run_select(&mut c, &format!("SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA={}", db)) {
                 for tr in trows {
                     let tname = tr.get(0).cloned().flatten().unwrap_or_default();
                     let ttable = tr.get(1).cloned().flatten().unwrap_or_default();
@@ -613,10 +619,10 @@ async fn ddl(req: Value) -> R {
 #[tauri::command]
 async fn pk(req: Value) -> R {
     tokio::task::spawn_blocking(move || {
-        let db = req["db"].as_str().unwrap_or("").replace('\'', "''");
-        let table = req["table"].as_str().unwrap_or("").replace('\'', "''");
+        let db = sql_str_lit(req["db"].as_str().unwrap_or(""));
+        let table = sql_str_lit(req["table"].as_str().unwrap_or(""));
         let mut c = build_conn(&req["conn"])?;
-        let sql = format!("SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='{}' AND TABLE_NAME='{}' AND CONSTRAINT_NAME='PRIMARY' ORDER BY ORDINAL_POSITION", db, table);
+        let sql = format!("SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA={} AND TABLE_NAME={} AND CONSTRAINT_NAME='PRIMARY' ORDER BY ORDINAL_POSITION", db, table);
         let (_c, rows) = run_select(&mut c, &sql)?;
         let list: Vec<String> = rows.into_iter().filter_map(|r| r.into_iter().next().flatten()).collect();
         Ok(json!({"ok":true,"pk":list}))
@@ -628,16 +634,16 @@ async fn pk(req: Value) -> R {
 #[tauri::command]
 async fn fk(req: Value) -> R {
     tokio::task::spawn_blocking(move || {
-        let db = req["db"].as_str().unwrap_or("").replace('\'', "''");
-        let table = req["table"].as_str().unwrap_or("").replace('\'', "''");
+        let db = sql_str_lit(req["db"].as_str().unwrap_or(""));
+        let table = sql_str_lit(req["table"].as_str().unwrap_or(""));
         let mut c = build_conn(&req["conn"])?;
-        let sql = format!("SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='{}' AND TABLE_NAME='{}' AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY ORDINAL_POSITION", db, table);
+        let sql = format!("SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA={} AND TABLE_NAME={} AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY ORDINAL_POSITION", db, table);
         let (_c, rows) = run_select(&mut c, &sql)?;
         let list: Vec<String> = rows.into_iter().filter_map(|r| r.into_iter().next().flatten()).collect();
         // Full FK detail (which table/column each FK column actually references) - a SEPARATE
         // field from "fk" above, which stays just the local column-name list other callers
         // (PK/FK badge display) already rely on. This powers "go to referenced row" navigation.
-        let detail_sql = format!("SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='{}' AND TABLE_NAME='{}' AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY ORDINAL_POSITION", db, table);
+        let detail_sql = format!("SELECT COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA={} AND TABLE_NAME={} AND REFERENCED_TABLE_NAME IS NOT NULL ORDER BY ORDINAL_POSITION", db, table);
         let fk_details: Vec<Vec<Option<String>>> = run_select(&mut c, &detail_sql).map(|(_c, r)| r).unwrap_or_default();
         Ok(json!({"ok":true,"fk":list,"fkDetails":fk_details}))
     }).await.map_err(|e| e.to_string())?
@@ -676,17 +682,17 @@ async fn kill_process(req: Value) -> R {
 #[tauri::command]
 async fn schema_erd(req: Value) -> R {
     tokio::task::spawn_blocking(move || {
-        let db = req["db"].as_str().unwrap_or("").replace('\'', "''");
+        let db = sql_str_lit(req["db"].as_str().unwrap_or(""));
         let mut c = build_conn(&req["conn"])?;
-        let (_c1, columns) = run_select(&mut c, &format!("SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='{}' ORDER BY TABLE_NAME, ORDINAL_POSITION", db))?;
+        let (_c1, columns) = run_select(&mut c, &format!("SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} ORDER BY TABLE_NAME, ORDINAL_POSITION", db))?;
         // PK detection deliberately matches get_table_pk_cols's approach (CONSTRAINT_NAME='PRIMARY'),
         // NOT information_schema.COLUMNS.COLUMN_KEY='PRI'. COLUMN_KEY has a documented MySQL edge
         // case: a table with NO actual primary key but a UNIQUE NOT NULL index will still show that
         // index's column as 'PRI', since it behaves like one. Using the same precise method as the
         // grid means the ER diagram can never highlight a column as PK that the grid itself
         // disagrees is one.
-        let (_c2, pks) = run_select(&mut c, &format!("SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='{}' AND CONSTRAINT_NAME='PRIMARY'", db))?;
-        let (_c3, fks) = run_select(&mut c, &format!("SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA='{}' AND REFERENCED_TABLE_NAME IS NOT NULL", db))?;
+        let (_c2, pks) = run_select(&mut c, &format!("SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA={} AND CONSTRAINT_NAME='PRIMARY'", db))?;
+        let (_c3, fks) = run_select(&mut c, &format!("SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA={} AND REFERENCED_TABLE_NAME IS NOT NULL", db))?;
         Ok(json!({"ok":true,"columns":columns,"pks":pks,"fks":fks}))
     }).await.map_err(|e| e.to_string())?
 }
@@ -855,7 +861,11 @@ fn cnf_file(connj: &Value) -> Result<(tempfile::NamedTempFile, String), String> 
     let mut s = String::from("[client]\n");
     s += &format!("host={}\nport={}\nuser={}\n", connj["host"].as_str().unwrap_or("127.0.0.1"),
         connj["port"].as_str().unwrap_or("3306"), connj["user"].as_str().unwrap_or("root"));
-    if let Some(p) = connj["password"].as_str() { if !p.is_empty() { s += &format!("password={}\n", p.replace('\\', "\\")); } }
+    // MySQL option files treat backslash as an escape character in values (\t, \n, \\, ...), so a
+    // password containing a literal backslash has to be doubled here or the .cnf parser would
+    // silently consume it as (the start of) an escape sequence instead of a literal character -
+    // corrupting the password and breaking auth for anyone whose password happens to contain one.
+    if let Some(p) = connj["password"].as_str() { if !p.is_empty() { s += &format!("password={}\n", p.replace('\\', "\\\\")); } }
     f.write_all(s.as_bytes()).map_err(|e| e.to_string())?;
     let path = f.path().to_string_lossy().to_string();
     Ok((f, path))
@@ -1382,7 +1392,7 @@ async fn importcsv(req: Value) -> R {
         let db = req["db"].as_str().unwrap_or("").to_string();
         let table = req["table"].as_str().unwrap_or("").to_string();
         let mut c = build_conn(&req["conn"])?;
-        let colsql = format!("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='{}' AND TABLE_NAME='{}' ORDER BY ORDINAL_POSITION", db.replace('\'', "''"), table.replace('\'', "''"));
+        let colsql = format!("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION", sql_str_lit(&db), sql_str_lit(&table));
         let (_c, crows) = run_select(&mut c, &colsql)?;
         let table_cols: Vec<String> = crows.into_iter().filter_map(|r| r.into_iter().next().flatten()).collect();
         if table_cols.is_empty() { return Ok(json!({"ok":false,"error":"Table not found or has no columns."})); }
@@ -1758,9 +1768,9 @@ async fn gen_user_transfer(req: Value) -> R {
         for row in &user_rows {
             let u = row.get(0).cloned().flatten().unwrap_or_default();
             let h = row.get(1).cloned().flatten().unwrap_or_default();
-            let uq = u.replace('\'', "''");
-            let hq = h.replace('\'', "''");
-            match run_select(&mut conn, &format!("SHOW CREATE USER '{}'@'{}'", uq, hq)) {
+            let uq = sql_str_lit(&u);
+            let hq = sql_str_lit(&h);
+            match run_select(&mut conn, &format!("SHOW CREATE USER {}@{}", uq, hq)) {
                 Ok((_c, rows)) => {
                     if let Some(first) = rows.get(0).and_then(|r| r.get(0)).cloned().flatten() {
                         create_lines.push(format!("{};", first));
@@ -1770,7 +1780,7 @@ async fn gen_user_transfer(req: Value) -> R {
                 }
                 Err(e) => errors.push(format!("SHOW CREATE USER for '{}'@'{}': {}", u, h, e)),
             }
-            match run_select(&mut conn, &format!("SHOW GRANTS FOR '{}'@'{}'", uq, hq)) {
+            match run_select(&mut conn, &format!("SHOW GRANTS FOR {}@{}", uq, hq)) {
                 Ok((_c, rows)) => {
                     for r in rows {
                         if let Some(v) = r.get(0).cloned().flatten() { grant_lines.push(format!("{};", v)); }
@@ -2716,6 +2726,19 @@ mod tests {
         assert_eq!(sql_lit("O'Brien"), "'O''Brien'");
         assert_eq!(sql_lit("back\\slash"), "'back\\\\slash'");
         assert_eq!(sql_lit("'; DROP TABLE x; --"), "'''; DROP TABLE x; --'");
+    }
+
+    // A trailing backslash right before the string's closing quote is the classic bypass for a
+    // quote-only escaper (```'{}'``, s.replace("'","''")``` alone): the backslash would combine
+    // with the literal `'` MySQL emits right after it to produce an escaped quote, closing the
+    // string one character early and leaving whatever follows to execute as SQL. sql_str_lit
+    // (and sql_lit, which delegates to it) escape the backslash FIRST so this can't happen -
+    // objects()/pk()/fk()/schema_erd() and friends now go through this instead of an ad-hoc
+    // single-quote-only replace() that didn't have this protection.
+    #[test]
+    fn sql_str_lit_neutralizes_trailing_backslash_quote_bypass() {
+        assert_eq!(sql_str_lit("x\\"), "'x\\\\'");
+        assert_eq!(sql_lit("x\\"), "'x\\\\'");
     }
 
     #[test]
