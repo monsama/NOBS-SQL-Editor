@@ -3070,6 +3070,12 @@ let _cmpRowScanCancelled=false;
 function cmpRowScanSetStatus(checked,total,differ,done){
  const el=$('cmpRowScanStatus');if(!el)return;
  if(done){el.textContent=(_cmpRowScanCancelled?'Stopped after ':'Checked ')+checked+' of '+total+' table(s) — '+differ+' have row differences.';return;}
+ // On fast tables, the loop can finish the table currently in flight and re-render this same
+ // status (for the NEXT table) within milliseconds of Stop being clicked - overwriting the
+ // "Stopping…" message before it's even visible, so Stop looked like it silently did nothing
+ // most of the time. Once cancellation has been requested, leave that message alone; the loop's
+ // own done=true call right after will show the real "Stopped after N of M" result.
+ if(_cmpRowScanCancelled)return;
  el.innerHTML='Checking table '+checked+' of '+total+'… '+differ+' so far have row differences. <a href="#" onclick="cmpRowScanCancel();return false" style="color:var(--accent)">Stop</a>';
 }
 function cmpRowScanCancel(){
