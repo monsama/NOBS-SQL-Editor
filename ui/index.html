@@ -397,7 +397,11 @@ function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;'
 function connMeta(){return window._connMeta||{};}
 function connMetaSet(n,m){window._connMeta=window._connMeta||{};if(m){const cur=window._connMeta[n]||{};window._connMeta[n]={accent:cur.accent||'',env:m.env||'',readonly:!!m.readonly};}else{delete window._connMeta[n];}}
 window.readOnly=false;window.curEnv='';
-function applyEnv(name){const m=connMeta()[name]||{};window.readOnly=!!m.readonly;window.curEnv=m.env||'';const el=$('envChip');const acc=window.curAccent||accMap()[name]||'';if(el){if(window.curEnv||window.readOnly){el.style.display='inline-flex';el.textContent=(window.curEnv||'')+(window.readOnly?(window.curEnv?' - ':'')+'READ-ONLY':'');if(acc){el.className='chip';el.style.background=acc;el.style.color='#fff';el.style.borderColor='transparent';}else{el.className='chip '+(window.readOnly?'bad':'ok');el.style.background='';el.style.color='';el.style.borderColor='';}}else{el.style.display='none';}}document.body.classList.toggle('ro',window.readOnly);}
+// Pure DOM rendering for the env chip - no side effects on window.readOnly/curEnv, so it's
+// safe to call for a merely-selected (not yet connected) connection as a preview, same as the
+// password lock icon already does. Only applyEnv() (below) touches the real enforcement state.
+function renderEnvChip(env,ro,acc){const el=$('envChip');if(!el)return;if(env||ro){el.style.display='inline-flex';el.textContent=(env||'')+(ro?(env?' - ':'')+'READ-ONLY':'');if(acc){el.className='chip';el.style.background=acc;el.style.color='#fff';el.style.borderColor='transparent';}else{el.className='chip '+(ro?'bad':'ok');el.style.background='';el.style.color='';el.style.borderColor='';}}else{el.style.display='none';}}
+function applyEnv(name){const m=connMeta()[name]||{};window.readOnly=!!m.readonly;window.curEnv=m.env||'';const acc=window.curAccent||accMap()[name]||'';renderEnvChip(window.curEnv,window.readOnly,acc);document.body.classList.toggle('ro',window.readOnly);}
 function roBlock(){if(window.readOnly){alert('This connection is marked READ-ONLY (safe mode). Writes are disabled.\n\nUncheck "Read-only" in the saved connection to allow changes.');return true;}return false;}
 function accMap(){const m=window._connMeta||{};const o={};for(const k in m){if(m[k]&&m[k].accent)o[k]=m[k].accent;}return o;}
 function accSet(n,c){window._connMeta=window._connMeta||{};const cur=window._connMeta[n]||{};window._connMeta[n]={accent:c||'',env:cur.env||'',readonly:!!cur.readonly};}
@@ -693,6 +697,11 @@ async function pickConn() {
         // type a password). Simple icon rather than a text chip, so it doesn't compete for
         // width with the dropdown itself or wrap awkwardly at narrower window sizes.
         const pwc=$('pwChip');if(pwc)pwc.style.display=_pw?'inline':'none';
+        // Env label / read-only chip: same "preview the selected connection, not the active
+        // one" treatment as the password icon above. Uses renderEnvChip() only (not applyEnv())
+        // so it's purely cosmetic here - window.readOnly/curEnv, and therefore actual write
+        // blocking, still only flip once connect() itself succeeds.
+        renderEnvChip(r.env||'', !!r.readonly, r.accent||accMap()[n]||'');
         // Force #connFormRow visible: if already connected and switching to a DIFFERENT saved
         // connection, the Connect button itself lives inside that row - if it stayed collapsed
         // there'd be no way to actually click it. connect()'s own success path resets this
@@ -825,7 +834,12 @@ async function connect() {
 
 }
 function clearObjectsPanel(){$('objects').innerHTML='';$('objdb').textContent='';if($('objFilter'))$('objFilter').value='';curSchema=null;objData=null;}
-function disconnect(){window.mariadb=false;document.body.classList.add('disconnected');window._activeConn=null;window._activeReadOnly=false;$('schemas').innerHTML='';clearObjectsPanel();applyAccent('');const _cs=$('connStatus');if(_cs){_cs.textContent='Not connected';_cs.className='chip bad';}window.curAccent='';window.readOnly=false;window.curEnv='';const _ec=$('envChip');if(_ec)_ec.style.display='none';const _sb=$('schemaBadge');if(_sb){_sb.style.display='none';_sb.textContent='';}
+function disconnect(){window.mariadb=false;document.body.classList.add('disconnected');window._activeConn=null;window._activeReadOnly=false;$('schemas').innerHTML='';clearObjectsPanel();applyAccent('');const _cs=$('connStatus');if(_cs){_cs.textContent='Not connected';_cs.className='chip bad';}window.curAccent='';window.readOnly=false;window.curEnv='';
+ // Re-preview the still-selected connection's env chip rather than hard-hiding it, same as the
+ // password icon (never touched here) already does - "Not connected" shouldn't also erase what
+ // you were just looking at in the dropdown.
+ const _n=$('connlist')&&$('connlist').value;const _m=_n?(connMeta()[_n]||{}):{};renderEnvChip(_m.env||'', !!_m.readonly, _m.accent||(_n?accMap()[_n]:'')||'');
+ const _sb=$('schemaBadge');if(_sb){_sb.style.display='none';_sb.textContent='';}
  document.body.classList.remove('ro');log('Disconnected.');}
 async function refreshSchemasAndTables(){await loadSchemas();if(typeof curSchema!=='undefined'&&curSchema){await loadObjects(curSchema);}}
 async function loadSchemas() {
