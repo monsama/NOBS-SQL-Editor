@@ -1524,7 +1524,13 @@ document.addEventListener('keydown',e=>{const mod=e.ctrlKey||e.metaKey;if(!mod)r
 // whichever modal Escape does close gets its own minimize-tracking and tray chip cleaned up
 // correctly, instead of the same kind of stale, non-functional leftover state browse() could
 // previously cause.
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){const open=[...document.querySelectorAll('.modal.show')].filter(m=>!window._floatingMinimized[m.id]);if(open.length){hide(open[open.length-1].id);}}});
+// A handful of modals need more than a plain hide() to close cleanly - e.g. Compare Databases
+// (mCompare) has to stop a running row-diff scan first, same as its own Close button does, or
+// the scan keeps going in the background against a now-hidden dialog. Escape used to call hide()
+// directly and skip all of that, so it behaved differently from clicking Close on the exact same
+// window - this map lets Escape reuse each modal's own close function where one exists.
+const MODAL_ESCAPE_CLOSE={mCompare:cmpCloseAndCancel,mCompareRows:cmprCloseAndCancel,mBrowse:brClose};
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){const open=[...document.querySelectorAll('.modal.show')].filter(m=>!window._floatingMinimized[m.id]);if(open.length){const id=open[open.length-1].id;const closeFn=MODAL_ESCAPE_CLOSE[id];if(closeFn)closeFn();else hide(id);}}});
 function closeTab(id){const t=T(id);if(t&&t.runningReqId){cancelQuery(id);}const i=tabs.findIndex(t=>t.id===id);if(i<0)return;tabs.splice(i,1);$('tabbtn_'+id).remove();$('pane_'+id).remove();if(activeTab===id&&tabs.length)activate(tabs[tabs.length-1].id);if(tabs.length===0){activeTab=null;}saveSession();toggleOverview();}
 // Each saved connection remembers its own open tabs (keyed by connection name; ad-hoc/unsaved
 // connections are keyed by host+user+port so different credentials don't collide).
