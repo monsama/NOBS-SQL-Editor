@@ -2794,7 +2794,8 @@ const EXPOPTS=[
  ['quick','quick',1,'Stream rows instead of buffering the whole table: needed for very large tables.','Performance'],
  ['compress','compress',0,'Compress the client/server connection during the dump (more CPU, less network).','Performance'],
  ['gtid','set-gtid-purged=OFF',0,'Do not write GTID replication info: avoids import errors on non-GTID servers.','Compatibility'],
- ['colstats','column-statistics=0',0,'Disable column statistics: fixes an error when a MySQL 8 client dumps MariaDB.','Compatibility']
+ ['colstats','column-statistics=0',0,'Disable column statistics: fixes an error when a MySQL 8 client dumps MariaDB.','Compatibility'],
+ ['nodefiner','remove DEFINER clauses',1,'Strip DEFINER=`user`@`host` from views/triggers/procedures/events: without this, restoring on a server where that exact account does not exist fails or warns on every one of them.','Compatibility']
 ];
 // openExport() rebuilds the option checkboxes every time it runs, so each one came back at
 // its EXPOPTS default and any choice the user had made was silently discarded the next time

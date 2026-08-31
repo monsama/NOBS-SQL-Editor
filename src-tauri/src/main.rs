@@ -1172,12 +1172,26 @@ async fn export_run(req: Value, dbin: String) -> R {
         if flag("tzutc") { common.push("--tz-utc".into()); } else { common.push("--skip-tz-utc".into()); }
         if let Some(mp) = o["maxpacket"].as_str() { if !mp.is_empty() { common.push(format!("--max-allowed-packet={}", mp)); } }
 
+        // mysqldump has no flag for this (unlike HeidiSQL's exporter) - DEFINER=`user`@`host`
+        // hardcodes whichever MySQL account happened to create each view/trigger/procedure/event
+        // into the dump. Restoring on a server where that exact account doesn't exist (a
+        // different host, a managed DB service, a teammate's machine, CI) then fails or warns on
+        // every one of those objects. Stripping it leaves `SQL SECURITY DEFINER/INVOKER` intact
+        // and just falls back to CURRENT_USER at creation time - safe on the same server too.
+        let definer_re = if flag("nodefiner") { Some(regex::Regex::new(r"DEFINER=`(?:[^`]|``)*`@`(?:[^`]|``)*`\s*").unwrap()) } else { None };
+
         let run = |bin: &str, args: &[String], file: &str| -> Result<(bool, String), String> {
             let mut cmd = Command::new(bin);
             cmd.args(args);
             let out = run_job_child(job.as_ref(), &mut cmd);
             match out {
                 Ok(o2) if o2.status.success() => {
+                    if let Some(re) = &definer_re {
+                        if let Ok(content) = std::fs::read_to_string(file) {
+                            let stripped = re.replace_all(&content, "");
+                            let _ = std::fs::write(file, stripped.as_ref());
+                        }
+                    }
                     let sz = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
                     Ok((true, format!("OK  {} ({:.2} MB)", file, sz as f64 / 1048576.0)))
                 }
