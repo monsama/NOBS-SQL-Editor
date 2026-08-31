@@ -3076,10 +3076,25 @@ function cmpRowScanSetStatus(checked,total,differ,done){
  // most of the time. Once cancellation has been requested, leave that message alone; the loop's
  // own done=true call right after will show the real "Stopped after N of M" result.
  if(_cmpRowScanCancelled)return;
- // A real <button>, not a small inline text link: at 11px, a 4-character "Stop" link was an
- // easy miss - a slightly-off click just selected the surrounding text instead of firing the
- // handler (which looks EXACTLY like "clicking Stop does nothing", with no error to go on).
- el.innerHTML='Checking table '+checked+' of '+total+'… '+differ+' so far have row differences. <button type="button" class="sm" onclick="cmpRowScanCancel()" style="margin-left:4px">Stop</button>';
+ // Reuse the SAME <button> element across re-renders instead of rebuilding it via innerHTML on
+ // every table (up to hundreds of times, often milliseconds apart). A click needs its mousedown
+ // AND mouseup to land on the same DOM node - replacing that node mid-click (very possible given
+ // how often this fires) makes the browser silently drop the click: no handler call, no error,
+ // nothing. That's indistinguishable from "the button just doesn't work", which is exactly what
+ // it looked like. querySelector (not a cached reference) so this self-heals if something else
+ // ever wipes this element's content (openCompare/cmpResetResults/cmpRowScanCancel's own message).
+ let btn=el.querySelector('button'),txt;
+ if(!btn){
+  el.innerHTML='';
+  txt=document.createTextNode('');
+  btn=document.createElement('button');
+  btn.type='button';btn.className='sm';btn.style.marginLeft='4px';btn.textContent='Stop';
+  btn.onclick=cmpRowScanCancel;
+  el.appendChild(txt);el.appendChild(btn);
+ } else {
+  txt=el.firstChild;
+ }
+ txt.textContent='Checking table '+checked+' of '+total+'… '+differ+' so far have row differences. ';
 }
 function cmpRowScanCancel(){
  _cmpRowScanCancelled=true;
