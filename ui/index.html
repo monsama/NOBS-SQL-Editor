@@ -3083,9 +3083,11 @@ function cmpRowScanSetStatus(checked,total,differ,done){
 }
 function cmpRowScanCancel(){
  _cmpRowScanCancelled=true;
- // Give instant feedback that the click registered - the loop itself can only actually stop
- // once the table currently in flight finishes (its query can't be interrupted mid-request),
- // which without this looked exactly like the button doing nothing for however long that took.
+ // A toast, not just the status-line text: it's a completely separate floating element that
+ // doesn't depend on cmpRowScanStatus's current state or position, so it's a clean, unmissable
+ // signal that the click itself was received - useful for telling "the click never reached this
+ // handler" apart from "it reached the handler but the scan didn't actually stop".
+ toast('Stopping the row-diff scan…');
  const el=$('cmpRowScanStatus');if(el)el.textContent='Stopping… (finishing the table currently being checked)';
  cmprCancelCurrent();
 }
