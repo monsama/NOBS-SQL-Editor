@@ -685,7 +685,7 @@ async function pickConn() {
         const _pw = r.conn.password || '';
         setPass(_pw);
         window._connMeta = window._connMeta || {};
-        window._connMeta[n] = {accent:r.conn.accent||'', env:r.conn.env||'', readonly:!!r.conn.readonly};
+        window._connMeta[n] = {accent:r.accent||'', env:r.env||'', readonly:!!r.readonly};
         // Persistent, tied only to which connection is currently selected - not to whether
         // you're actually connected. Deliberately does NOT defer to connStatus the way an
         // earlier version did: that meant the indicator only ever showed AFTER connecting,

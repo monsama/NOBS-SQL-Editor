@@ -1,6 +1,6 @@
 [package]
 name = "nobs-sql-editor"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 description = "NOBS SQL Editor - a cross-platform MySQL/MariaDB client"
 default-run = "nobs-sql-editor"
