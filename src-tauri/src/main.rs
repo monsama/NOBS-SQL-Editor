@@ -1091,6 +1091,11 @@ async fn import_run(req: Value, mbin: String) -> R {
             // the UI silently did nothing, so the exact NUL-byte error its tooltip promises to
             // fix ("ASCII '\0' appeared in the statement") kept recurring with the box checked.
             if req["binaryMode"].as_bool().unwrap_or(false) { args.push("--binary-mode".into()); }
+            // Export lets you raise mysqldump's --max-allowed-packet (needed for extended-insert
+            // with large rows/BLOBs), but the mysql client re-importing that exact file has its
+            // own, separate default (16M) - without a matching bump here, re-importing a dump
+            // exported with a larger packet size fails with "MySQL server has gone away".
+            if let Some(mp) = req["maxpacket"].as_str() { if !mp.is_empty() { args.push(format!("--max-allowed-packet={}", mp)); } }
             if !target.is_empty() { args.push(target.clone()); }
             let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
             let mut cmd = Command::new(&mbin);
