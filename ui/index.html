@@ -229,6 +229,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row"><a href="#" onclick="cmpToggleTablePicker();return false" style="font-size:11px;color:var(--accent)">Choose specific tables (optional)</a></div>
 <div id="cmpTablesBox" style="display:none;max-height:140px;overflow:auto;border:1px solid var(--bd2);border-radius:4px;padding:4px 8px;margin-bottom:6px"></div>
 <div class="row"><button class="go" onclick="runCompare()">Run comparison</button><span id="cmpRoNote" class="muted" style="font-size:11px;margin-left:8px;display:none;color:var(--del)">Target is read-only / safe mode - apply will be blocked.</span></div>
+ <div class="row" id="cmpTallyRow" style="display:none"><span id="cmpTally" class="muted" style="font-size:11px"></span></div>
  <div class="row" id="cmpResultsSearchRow" style="display:none"><input id="cmpResultSearch" type="text" placeholder="filter results by table name…" oninput="cmpFilterResults()" style="width:100%;font-size:12px"></div>
  <div id="cmpResults" style="max-height:320px;overflow:auto;margin-top:6px"></div>
  <div class="row" style="display:flex;justify-content:space-between;align-items:center">
@@ -2931,14 +2932,26 @@ async function cmpLoadDbs(side){const connSel=$(side==='src'?'cmpSrcConn':'cmpTg
    if(srcDbVal&&r.databases.includes(srcDbVal))dbSel.value=srcDbVal;
    $('cmpRoNote').style.display=r.readonly?'inline':'none';
  }}
-async function openCompare(){$('cmpResults').innerHTML='';$('cmpLog').textContent='';$('cmpSummary').textContent='';_cmpTables=null;cmpResetTablePicker();
+async function openCompare(){$('cmpResults').innerHTML='';$('cmpLog').textContent='';$('cmpSummary').textContent='';const tr=$('cmpTallyRow');if(tr)tr.style.display='none';_cmpTables=null;cmpResetTablePicker();
  await cmpFillConnSelect($('cmpSrcConn'));await cmpFillConnSelect($('cmpTgtConn'));
  if(window._primaryConn){$('cmpSrcConn').value=window._primaryConn;}
  await cmpLoadDbs('src');await cmpLoadDbs('tgt');
  show('mCompare');}
 function cmpBadge(status){const map={missing_target:['missing on target','#4a2626','#f0997b'],missing_source:['missing on source','#4a2626','#f0997b'],diff:['differs','#4a4526','#facb75'],same:['structure identical','#1d3a2a','#5dcaa5']};const m=map[status]||['?','#333','#ccc'];return '<span style="background:'+m[1]+';color:'+m[2]+';border-radius:10px;padding:2px 8px;font-size:11px;white-space:nowrap">'+m[0]+'</span>';}
-function cmpRenderResults(){const box=$('cmpResults');const sr=$('cmpResultsSearchRow');if(!_cmpTables||!_cmpTables.length){box.innerHTML='<div class="muted">No tables found on either side.</div>';if(sr)sr.style.display='none';return;}
+function cmpTally(){const tr=$('cmpTallyRow'),t=$('cmpTally');if(!tr||!t)return;
+ if(!_cmpTables||!_cmpTables.length){tr.style.display='none';return;}
+ const c={same:0,diff:0,missing_target:0,missing_source:0};
+ _cmpTables.forEach(x=>{c[x.status]=(c[x.status]||0)+1;});
+ const differing=c.diff+c.missing_target+c.missing_source;
+ const parts=[differing+' of '+_cmpTables.length+' table(s) differ'];
+ if(c.diff)parts.push(c.diff+' differ'+(c.diff===1?'s':'')+' in structure');
+ if(c.missing_target)parts.push(c.missing_target+' missing on target');
+ if(c.missing_source)parts.push(c.missing_source+' missing on source');
+ t.textContent=parts.join(' — ')+(differing?'':' (structure identical)');
+ tr.style.display='block';}
+function cmpRenderResults(){const box=$('cmpResults');const sr=$('cmpResultsSearchRow');if(!_cmpTables||!_cmpTables.length){box.innerHTML='<div class="muted">No tables found on either side.</div>';if(sr)sr.style.display='none';cmpTally();return;}
  if(sr)sr.style.display=_cmpTables.length>8?'block':'none';
+ cmpTally();
  let h='<table style="width:100%;border-collapse:collapse;font-size:12px"><tr class="muted" style="text-align:left;font-size:11px"><th style="padding:4px 6px"></th><th style="padding:4px 6px">Table</th><th style="padding:4px 6px">Status</th></tr>';
  _cmpTables.forEach((t,ti)=>{const hasSql=t.sql&&t.sql.length;
   h+='<tr class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="border-top:1px solid var(--bd2)"><td style="padding:6px">'+(hasSql?('<input type="checkbox" '+(t.sql.some(s=>s.checked)?'checked':'')+' onclick="cmpToggleAllForTable('+ti+',this.checked)">'):'')+'</td><td style="padding:6px">'+esc(t.name)+(hasSql?' <a href="#" onclick="cmpToggleDetail('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">details</a>':'')+' <a href="#" onclick="cmpCompareRows('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">rows\u2026</a></td><td style="padding:6px">'+cmpBadge(t.status)+'</td></tr>';
