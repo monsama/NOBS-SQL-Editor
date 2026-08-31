@@ -3076,7 +3076,10 @@ function cmpRowScanSetStatus(checked,total,differ,done){
  // most of the time. Once cancellation has been requested, leave that message alone; the loop's
  // own done=true call right after will show the real "Stopped after N of M" result.
  if(_cmpRowScanCancelled)return;
- el.innerHTML='Checking table '+checked+' of '+total+'… '+differ+' so far have row differences. <a href="#" onclick="cmpRowScanCancel();return false" style="color:var(--accent)">Stop</a>';
+ // A real <button>, not a small inline text link: at 11px, a 4-character "Stop" link was an
+ // easy miss - a slightly-off click just selected the surrounding text instead of firing the
+ // handler (which looks EXACTLY like "clicking Stop does nothing", with no error to go on).
+ el.innerHTML='Checking table '+checked+' of '+total+'… '+differ+' so far have row differences. <button type="button" class="sm" onclick="cmpRowScanCancel()" style="margin-left:4px">Stop</button>';
 }
 function cmpRowScanCancel(){
  _cmpRowScanCancelled=true;
