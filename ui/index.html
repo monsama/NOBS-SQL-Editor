@@ -99,7 +99,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  #ctx{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:180px}
  #colPicker,#objTypePicker{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
  #copyMenu{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
- .cphdr{display:flex;justify-content:space-between;align-items:center;padding:4px 12px 6px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--bd2);margin-bottom:4px}
+ .cphdr{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:4px 12px 6px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--bd2);margin-bottom:4px}
  .cplink{color:var(--accent);cursor:pointer}
  .cpitem{display:flex;align-items:center;gap:6px;padding:3px 12px;font-size:12px;cursor:pointer;white-space:nowrap}
  .cpitem:hover{background:var(--hover,rgba(127,127,127,.12))}
@@ -338,6 +338,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 <div class="modal floating" id="mAbout"><div class="box" style="width:560px;max-width:92vw;top:70px;left:150px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mAbout')" title="Drag to move"><h3 id="aboutTitle" style="margin:0 0 10px">NOBS SQL Editor</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mAbout')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="muted" style="font-size:12px;line-height:1.6">
   A lightweight desktop client for MySQL and MariaDB, built with Tauri.<br>
+  <i>No BS, just SQL.</i><br>
   Copyright &copy; 2026 Viktor Ljuca
  </div>
  <div style="margin:12px 0 4px;font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--muted)">LICENSE</div>
@@ -1090,7 +1091,7 @@ function hideAllObjTypes(){window._objTypeFilter=new Set();renderObjects();const
 // its own picker is already open closes it, instead of relying only on the outside-click listener.
 function toggleObjTypePicker(btn){const p=$('objTypePicker');if(p&&p.style.display==='block'){p.style.display='none';return;}openObjTypePicker(btn);}
 function openObjTypePicker(btn){const p=$('objTypePicker');const s=window._objTypeFilter;
- let h='<div class="cphdr"><span>Show/hide object types</span><span><span class="cplink" onclick="showAllObjTypes()">Show all</span> · <span class="cplink" onclick="hideAllObjTypes()">Hide all</span></span></div>';
+ let h='<div class="cphdr"><span>Show/hide object types</span><span><span class="cplink" onclick="event.stopPropagation();showAllObjTypes()">Show all</span> · <span class="cplink" onclick="event.stopPropagation();hideAllObjTypes()">Hide all</span></span></div>';
  OBJ_TYPES.forEach(([type,label])=>{h+='<label class="cpitem"><input type="checkbox" '+(s.has(type)?'checked':'')+' onchange="setObjTypeVis(\''+type+'\',this.checked)"> '+label+'</label>';});
  p.innerHTML=h;
  p.style.display='block';p.style.visibility='hidden';p.style.left='0';p.style.top='0';
@@ -1455,7 +1456,7 @@ function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqu
  tb.addEventListener('drop',e=>{e.preventDefault();tb.classList.remove('dragover');const srcId=e.dataTransfer.getData('text/plain');if(!srcId||srcId===id)return;reorderTab(srcId,id);});
  $('tabsbar').appendChild(tb);saveSession();
  const pane=document.createElement('div');pane.className='tabpane';pane.id='pane_'+id;
- const applyBtn=tab.ddl?'<button class="go write" onclick="applyDdl(\''+id+'\')">Apply (recreate)</button>':'';const lastBtn=tab.ddl?'':'<button title="Toggle between the current query and the last one you ran" onclick="toggleLast(\''+id+'\')">\u21C4 Last query</button>';const selBtn=tab.table?'<button title="Toggle between your query and SELECT * (the whole table)" onclick="toggleAll(\''+id+'\')">\u21C4 Show all</button>':'';
+ const applyBtn=tab.ddl?'<button class="go write" onclick="applyDdl(\''+id+'\')">Apply (recreate)</button>':'';const lastBtn=tab.ddl?'':'<button title="Toggle between the current query and the last one you ran" onclick="toggleLast(\''+id+'\')">\u21C4 Last query</button>';const selBtn=tab.table?'<button title="Toggle between your query and SELECT * (the whole table)" onclick="toggleAll(\''+id+'\')">\u21C4 Base query</button>':'';
  const pager='<span class="tbsep"></span><span id="pager_'+id+'" style="display:inline-flex;align-items:center;gap:6px"></span>';
  pane.innerHTML='<div class="edwrap" id="ew_'+id+'"><pre class="hl" id="hl_'+id+'"></pre><textarea class="editor" id="ed_'+id+'" spellcheck="false"></textarea></div>'+
   '<div class="edsplit" id="es_'+id+'" title="Drag to resize the editor"></div>'+
@@ -1943,7 +1944,7 @@ function decodeCtrlCharCell(hexStr,maxChars){
  return html;
 }
 function cellHtml(v,isBit){if(v===null)return '<span style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return isBit?esc(hexToBitNumber(v)):decodeCtrlCharCell(v,300);return esc(clip(v,300));}
-function colgroupHtml(id){const t=T(id);const ed=!!t.pk;const hidden=t.hiddenCols||new Set();let h='<colgroup><col style="width:30px">'+(ed?'<col style="width:34px">':'');t.cols.forEach((c,ci)=>{h+='<col style="width:150px'+(hidden.has(ci)?';display:none':'')+'">';});return h+'<col></colgroup>';}
+function colgroupHtml(id){const t=T(id);const ed=!!t.pk;const hidden=t.hiddenCols||new Set();let h='<colgroup><col style="width:30px">'+(ed?'<col style="width:34px">':'');t.cols.forEach((c,ci)=>{h+='<col style="width:150px'+(hidden.has(ci)?';visibility:collapse':'')+'">';});return h+'<col></colgroup>';}
 // wireColResize(): drag a column edge to resize, double-click to auto-fit (widths saved per table).
 function wireColResize(id){const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const t=T(id);const off=(!!t.pk)?2:1;
  wrap.querySelectorAll('thead .rz').forEach(rz=>{const ci=+rz.getAttribute('data-ci');const col=cg.children[ci+off];if(!col)return;let sx=0,sw=0,drag=false;
@@ -1966,7 +1967,11 @@ function autofitAll(id,retries){const t=T(id);if(!t.cols||!t.cols.length)return;
  // more "extra" padding on top of that, so columns kept growing forever instead of settling.
  for(let ci=0;ci<n;ci++){const col=cg.children[ci+off];if(col&&!hidden.has(ci))col.style.width='2px';}
  const w=[];const heads=table.querySelectorAll('thead tr:first-child th');for(let ci=0;ci<n;ci++){if(hidden.has(ci)){w[ci]=0;continue;}let mx=heads[ci+off]?heads[ci+off].scrollWidth:60;const cells=table.querySelectorAll('tbody td:nth-child('+(ci+off+1)+')');for(let i=0;i<cells.length;i++){mx=Math.max(mx,cells[i].scrollWidth);}w[ci]=Math.min(Math.max(60,mx+18),400);}const visCount=n-hidden.size;const fixed=30+(off===2?34:0);let sum=fixed;for(let i=0;i<n;i++)sum+=w[i];const avail=wrap.clientWidth-2;if(avail>sum&&visCount>0){const extra=Math.floor((avail-sum)/visCount);for(let i=0;i<n;i++){if(!hidden.has(i))w[i]+=extra;}}for(let ci=0;ci<n;ci++){const col=cg.children[ci+off];if(col&&!hidden.has(ci))col.style.width=w[ci]+'px';}}
-function applyColVis(id){const t=T(id);const ed=!!t.pk;const off=ed?2:1;const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const hidden=t.hiddenCols||new Set();t.cols.forEach((c,ci)=>{const col=cg.children[ci+off];if(col)col.style.display=hidden.has(ci)?'none':'';});autofitAll(id);}
+// visibility:collapse (not display:none) - display:none on a <col> doesn't reliably collapse
+// the corresponding <td>/<th> cells' rendered width in table-layout:fixed, so a "hidden" column
+// was staying at whatever width autofit last gave it, just with its own <col> reporting
+// display:none while its cells sat there full-width and visible.
+function applyColVis(id){const t=T(id);const ed=!!t.pk;const off=ed?2:1;const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const hidden=t.hiddenCols||new Set();t.cols.forEach((c,ci)=>{const col=cg.children[ci+off];if(col)col.style.visibility=hidden.has(ci)?'collapse':'';});autofitAll(id);}
 function setColVis(id,ci,visible){const t=T(id);if(!t.hiddenCols)t.hiddenCols=new Set();if(visible)t.hiddenCols.delete(ci);else t.hiddenCols.add(ci);applyColVis(id);}
 function showAllCols(id){const t=T(id);t.hiddenCols=new Set();applyColVis(id);const btn=$('colsbtn_'+id);if(btn)openColPicker(id,btn);}
 function hideAllCols(id){const t=T(id);t.hiddenCols=new Set(t.cols.map((_,ci)=>ci));applyColVis(id);const btn=$('colsbtn_'+id);if(btn)openColPicker(id,btn);}
@@ -1976,7 +1981,7 @@ function hideAllCols(id){const t=T(id);t.hiddenCols=new Set(t.cols.map((_,ci)=>c
 function toggleColPicker(id,btn){const p=$('colPicker');if(p&&p.style.display==='block'&&p.dataset.forId===id){p.style.display='none';return;}openColPicker(id,btn);}
 function openColPicker(id,btn){const t=T(id);if(!t||!t.cols)return;if(!t.hiddenCols)t.hiddenCols=new Set();
  const p=$('colPicker');p.dataset.forId=id;
- let h='<div class="cphdr"><span>Show/hide columns</span><span><span class="cplink" onclick="showAllCols(\''+id+'\')">Show all</span> · <span class="cplink" onclick="hideAllCols(\''+id+'\')">Hide all</span></span></div>';
+ let h='<div class="cphdr"><span>Show/hide columns</span><span><span class="cplink" onclick="event.stopPropagation();showAllCols(\''+id+'\')">Show all</span> · <span class="cplink" onclick="event.stopPropagation();hideAllCols(\''+id+'\')">Hide all</span></span></div>';
  t.cols.forEach((c,ci)=>{h+='<label class="cpitem"><input type="checkbox" '+(t.hiddenCols.has(ci)?'':'checked')+' onchange="setColVis(\''+id+'\','+ci+',this.checked)"> '+esc(c)+'</label>';});
  p.innerHTML=h;
  p.style.display='block';p.style.visibility='hidden';p.style.left='0';p.style.top='0';
@@ -2178,6 +2183,9 @@ function switchHexTab(mode){
  _vHexState.mode=mode;updateHexTabButtons();
 }
 function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;const ta=$('vText');const sel=$('vSelect');const multi=$('vMulti');const dt=$('vDate');const hexTabs=$('vHexTabs');const img=$('vImg');
+ // A date/time value only needs room for the native picker widget, not the full 780px meant for
+ // long text - a narrower modal reads much better for a single date/time/datetime cell.
+ $('mView').querySelector('.box').style.maxWidth=opts.dateType?'380px':'780px';
  ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';hexTabs.style.display='none';img.style.display='none';img.removeAttribute('src');_vHexState=null;
  // Checkbox mode: SET columns, whose valid values are any comma-joined COMBINATION of the
  // column's defined members - unlike ENUM (exactly one value), a single dropdown can't represent
