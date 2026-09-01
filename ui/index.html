@@ -174,6 +174,8 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row"><span id="brActions"></span><span style="flex:1"></span><button onclick="brClose()">Cancel</button></div></div></div>
 
 <div class="modal floating" id="mView"><div class="box" style="max-width:780px;top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mView')" title="Drag to move"><h3 id="vTitle" style="margin:0">Value</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mView')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
+ <div id="vHexTabs" style="display:none;margin-bottom:6px"><button id="vTabText" onclick="switchHexTab('text')">Text</button><button id="vTabHex" onclick="switchHexTab('hex')">Hex</button></div>
+ <img id="vImg" style="display:none;max-width:100%;max-height:340px;margin-bottom:6px;border:1px solid var(--bd);border-radius:3px">
  <textarea id="vText" style="width:100%;height:340px;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px"></textarea>
  <select id="vSelect" style="width:100%;display:none;padding:8px;font-size:13px"></select>
  <div id="vMulti" style="width:100%;display:none;max-height:340px;overflow:auto;padding:8px;border:1px solid var(--bd);border-radius:3px;background:var(--in);box-sizing:border-box;font-size:13px"></div>
@@ -2066,8 +2068,55 @@ function mysqlToNativeDate(v,dateType){
  return dateType==='date' ? s : (m[1]+'-'+m[2]+'-'+m[3]+'T'+m[4]+':'+m[5]+(m[6]||''));
 }
 function nativeDateToMysql(v,dateType){ return dateType==='datetime-local' ? v.replace('T',' ') : v; }
-function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;const ta=$('vText');const sel=$('vSelect');const multi=$('vMulti');const dt=$('vDate');
- ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';
+// ---- Text/Hex toggle for binary/BLOB cells (not BIT - see is_bit_col) ----
+// A LOT of real-world binary columns hold plain ASCII/UTF-8 (bcrypt hashes, tokens, UUIDs stored
+// as bytes), and forcing hex-only entry for those is a real usability regression vs Heidi/
+// Workbench. So both Text and Hex are offered as explicit, user-picked EDIT modes here - but
+// Text is only ever offered when it is PROVABLY lossless: strict (fatal) UTF-8 decode, then
+// re-encoded and compared byte-for-byte against the original. Anything that doesn't round-trip
+// exactly (real binary data, legacy non-UTF8 text, malformed byte sequences) never gets offered
+// as Text at all, so there is no best-effort/lossy guess that could silently swap bytes on Save.
+const MAX_HEXTEXT_BYTES=2000000; // ~2MB - beyond this, skip the round-trip check and image
+                                  // preview (still fully editable as Hex) rather than risk UI jank
+function hexToBytes(hexStr){const hex=(hexStr||'').slice(2);const bytes=new Uint8Array(Math.floor(hex.length/2));for(let i=0;i<bytes.length;i++)bytes[i]=parseInt(hex.substr(i*2,2),16);return bytes;}
+function bytesToHex(bytes){let s='0x';for(let i=0;i<bytes.length;i++)s+=bytes[i].toString(16).padStart(2,'0');return s;}
+function bytesToBase64(bytes){let bin='';for(let i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);return btoa(bin);}
+function hexToStrictText(hexStr){
+ const hex=hexStr||'0x';if(hex.length>MAX_HEXTEXT_BYTES*2)return null;
+ try{
+  const bytes=hexToBytes(hex);
+  const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
+  if(bytesToHex(new TextEncoder().encode(text)).toLowerCase()!==hex.toLowerCase())return null; // paranoia: enforce an exact round-trip, not just "decodes without throwing"
+  return text;
+ }catch(e){return null;}
+}
+function textToHex(text){return bytesToHex(new TextEncoder().encode(text));}
+const IMAGE_SIGS=[[[0x89,0x50,0x4E,0x47],'image/png'],[[0xFF,0xD8,0xFF],'image/jpeg'],[[0x47,0x49,0x46,0x38],'image/gif'],[[0x42,0x4D],'image/bmp']];
+function detectImageMime(bytes){
+ for(const [sig,mime] of IMAGE_SIGS){if(bytes.length>=sig.length&&sig.every((b,i)=>bytes[i]===b))return mime;}
+ if(bytes.length>=12&&bytes[0]===0x52&&bytes[1]===0x49&&bytes[2]===0x46&&bytes[3]===0x46&&bytes[8]===0x57&&bytes[9]===0x45&&bytes[10]===0x42&&bytes[11]===0x50)return 'image/webp'; // 'RIFF'....'WEBP'
+ return null;
+}
+let _vHexState=null; // {mode:'text'|'hex'} for the modal currently open on a binary cell - null otherwise
+function updateHexTabButtons(){
+ const bt=$('vTabText'),bh=$('vTabHex');if(!bt||!bh||!_vHexState)return;
+ const on='font-weight:700;text-decoration:underline',off='';
+ bt.style.cssText=_vHexState.mode==='text'?on:off;bh.style.cssText=_vHexState.mode==='hex'?on:off;
+}
+function switchHexTab(mode){
+ if(!_vHexState||_vHexState.mode===mode)return;
+ const ta=$('vText');
+ if(mode==='text'){
+  const decoded=hexToStrictText(ta.value); // leaving hex mode, so the box currently holds hex
+  if(decoded==null){toast('This value is not valid UTF-8 text - edit it as Hex instead.',true);return;}
+  ta.value=decoded;
+ } else {
+  ta.value=textToHex(ta.value); // leaving text mode, so the box currently holds text
+ }
+ _vHexState.mode=mode;updateHexTabButtons();
+}
+function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;const ta=$('vText');const sel=$('vSelect');const multi=$('vMulti');const dt=$('vDate');const hexTabs=$('vHexTabs');const img=$('vImg');
+ ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';hexTabs.style.display='none';img.style.display='none';img.removeAttribute('src');_vHexState=null;
  // Checkbox mode: SET columns, whose valid values are any comma-joined COMBINATION of the
  // column's defined members - unlike ENUM (exactly one value), a single dropdown can't represent
  // that, but a checkbox per member can, mirroring how Heidi/Workbench edit SET data.
@@ -2093,23 +2142,31 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
  } else if(opts.dateType){
   dt.type=opts.dateType;dt.style.display='block';
   dt.value=mysqlToNativeDate(text,opts.dateType);
- } else {
-  ta.style.display='block';
-  ta.value=(text==null?'':text);ta.readOnly=!!opts.readonly;
- }
- const a=$('vActions');a.innerHTML='';const add=(label,cls,fn)=>{const b=document.createElement('button');b.textContent=label;if(cls)b.className=cls;b.onclick=fn;a.appendChild(b);};
- const getVal=()=>{
-  if(opts.multiOptions&&opts.multiOptions.length)return [...multi.querySelectorAll('input:checked')].map(cb=>cb.value).join(',');
-  if(opts.dateType)return nativeDateToMysql(dt.value,opts.dateType);
+ // Binary/BLOB column (not BIT): offer both Text and Hex as explicit edit modes - see the block
+ // comment above hexToStrictText for why Text is only ever offered when provably lossless.
+ } else if(opts.hexText){
+  ta.style.display='block';hexTabs.style.display='flex';hexTabs.style.cssText='display:flex;gap:6px;margin-bottom:6px';
+  const rawHex=(text==null?'0x':text);
+  const decoded=hexToStrictText(rawHex);
+  _vHexState={mode:decoded!=null?'text':'hex'};
+  ta.value=decoded!=null?decoded:rawHex;
+  updateHexTabButtons();
+  const bytes=hexToBytes(rawHex);
+  if(bytes.length<=MAX_HEXTEXT_BYTES){
+   const mime=detectImageMime(bytes);
+   if(mime){img.src='data:'+mime+';base64,'+bytesToBase64(bytes);img.style.display='block';}
+  }
   return opts.options?sel.value:ta.value;
  };
  if(!opts.options&&!opts.multiOptions&&!opts.dateType){
   add('Copy','',()=>{navigator.clipboard.writeText(ta.value);log('Copied to clipboard.');});
   // Offer to pretty-print, but only when the content genuinely parses as a JSON object/array -
   // a bare number or quoted string technically "parses" too, but reformatting those does nothing
-  // useful, so they're excluded.
-  let isJson=false;try{const p=JSON.parse(ta.value);isJson=(p!==null&&typeof p==='object');}catch(e){}
-  if(isJson&&!opts.readonly)add('Format JSON','',()=>{try{ta.value=JSON.stringify(JSON.parse(ta.value),null,2);}catch(e){}});
+  // useful, so they're excluded. Not offered for binary cells - decoded/hex content is never JSON.
+  if(!opts.hexText){
+   let isJson=false;try{const p=JSON.parse(ta.value);isJson=(p!==null&&typeof p==='object');}catch(e){}
+   if(isJson&&!opts.readonly)add('Format JSON','',()=>{try{ta.value=JSON.stringify(JSON.parse(ta.value),null,2);}catch(e){}});
+  }
  }
  if(opts.onNull)add('Set NULL','',()=>{opts.onNull();hide('mView');});
  if(opts.onSave)add('Save','go',()=>{opts.onSave(getVal());hide('mView');});
@@ -2162,15 +2219,7 @@ function parseQuotedOptionList(colType){
 // or other value it can't represent falls back to plain text instead of risking Save silently
 // discarding it the moment the dialog opens.
 async function editWidgetFor(id,colName,curVal){
- const colType=await getColType(id,colName);
- if(colType&&/^enum\(/i.test(colType))return {options:parseQuotedOptionList(colType)};
- if(colType&&/^set\(/i.test(colType))return {multiOptions:parseQuotedOptionList(colType)};
- if(colType&&/^tinyint\(1\)/i.test(colType))return {options:['0','1']};
- let dateType=null;
- if(colType&&/^date$/i.test(colType))dateType='date';
- else if(colType&&/^(datetime|timestamp)/i.test(colType))dateType='datetime-local';
- else if(colType&&/^time/i.test(colType))dateType='time';
- if(dateType&&(curVal==null||curVal===''||mysqlToNativeDate(curVal,dateType)))return {dateType};
+ const t=T(id);
  return {};
 }
 async function editCell(td,id,ri,ci){clearTimeout(clickTimer);const t=T(id);const key=ri+':'+ci;const cur=(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci];
