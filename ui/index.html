@@ -101,7 +101,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  #vHexTabs button{border:1px solid var(--bd);background:var(--btn);color:var(--fg);border-radius:4px;padding:4px 12px;cursor:pointer;font:inherit}
  #vHexTabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
  #ctx{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:180px}
- #colPicker,#objTypePicker{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
+ #colPicker,#objTypePicker,#impDbPicker{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
  #copyMenu{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
  .cphdr{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:4px 12px 6px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--bd2);margin-bottom:4px}
  .cplink{color:var(--accent);cursor:pointer}
@@ -175,6 +175,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 <div id="minimizedTray" style="display:none;position:fixed;bottom:10px;right:10px;gap:8px;z-index:9500"></div>
 <div id="colPicker"></div>
 <div id="objTypePicker"></div>
+<div id="impDbPicker"></div>
 <div id="copyMenu"></div>
 <div id="acx"></div>
 <div class="modal floating" id="mBrowse"><div class="box" style="width:660px;max-width:95vw;top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mBrowse')" title="Drag to move"><h3 id="brTitle" style="margin:0 0 10px">Browse</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mBrowse')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
@@ -221,7 +222,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 <div class="modal floating" id="mImport"><div class="box" style="width:900px;max-width:95vw;top:80px;left:200px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mImport')" title="Drag to move"><h3 style="margin:0 0 10px">Data Import</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mImport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div><div class="row">SQL file paths (one per line):</div>
  <textarea id="impFiles" style="width:100%;height:90px;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;white-space:pre;overflow:auto"></textarea>
  <div class="row"><button onclick="impAddFiles()">Add files...</button><button onclick="impAddFolder()">Add folder (all .sql)...</button><button class="sm" onclick="$('impFiles').value=''">Clear</button></div>
- <div class="row">Target DB <input id="impDb" list="impDbList" placeholder="(blank if dump has CREATE DATABASE)" style="width:320px" onfocus="dbFieldShowAll(this)" onblur="dbFieldRestoreIfEmpty(this)"><datalist id="impDbList"></datalist></div>
+ <div class="row">Target DB <input id="impDb" placeholder="(blank if dump has CREATE DATABASE)" style="width:320px" autocomplete="off" onfocus="openImpDbPicker()" oninput="renderImpDbPicker()"></div>
  <div class="row"><label title="Create the target database first if it doesn't exist"><input type="checkbox" id="impCreate"> create DB</label><label title="Disable foreign-key and unique checks during import (for out-of-order or circular tables)"><input type="checkbox" id="impFk" checked> disable FK checks</label><label title="Keep going when a file or statement fails instead of stopping (mysql --force)"><input type="checkbox" id="impForce"> continue on errors</label><label title="Required if the dump contains raw NUL bytes in binary/text columns (fixes: ASCII '\0' appeared in the statement). Safe to leave on for any dump that might contain binary data."><input type="checkbox" id="impBinary"> binary-mode</label><label title="mysql --max-allowed-packet. Raise this to match (or exceed) whatever the dump was exported with - a file created with a bumped packet size (needed for extended-insert with large rows/BLOBs) can otherwise fail to re-import with &quot;MySQL server has gone away&quot; against this client's smaller default (16M).">max packet <input id="impMaxPacket" value="1G" style="width:56px"></label></div>
  <div class="row" style="justify-content:flex-end"><button class="go" id="impGoBtn" onclick="runImport()">Run Import</button><button class="warn" id="impCancelBtn" disabled onclick="cancelJob('imp')">Cancel</button><button onclick="hide('mImport')">Close</button></div>
  <div id="impProgress" style="display:none;margin-top:8px">
@@ -675,7 +676,7 @@ function buildMenuItems(container,items){items.forEach(it=>{if(it==='-'){const s
  if(isSub){d.style.position='relative';const fly=document.createElement('div');fly.className='ctxsub';buildMenuItems(fly,it[1]);d.appendChild(fly);let ht=null;const showFly=()=>{if(ht){clearTimeout(ht);ht=null;}fly.style.display='block';fly.style.left='';fly.style.right='';fly.style.top='0';const r=fly.getBoundingClientRect(),dr=d.getBoundingClientRect();if(dr.right+r.width>innerWidth-4){fly.style.right='100%';}else{fly.style.left='100%';}if(dr.top+r.height>innerHeight-4){fly.style.top=(innerHeight-4-(dr.top+r.height))+'px';}};const hideFly=()=>{ht=setTimeout(()=>{fly.style.display='none';},200);};d.onmouseenter=showFly;d.onmouseleave=hideFly;fly.onmouseenter=()=>{if(ht){clearTimeout(ht);ht=null;}};fly.onmouseleave=hideFly;
  }else{d.onclick=()=>{$('ctx').style.display='none';it[1]();};}
  container.appendChild(d);});}
-document.addEventListener('click',(e)=>{$('ctx').style.display='none';const cp=$('colPicker');if(cp&&cp.style.display==='block'&&!cp.contains(e.target))cp.style.display='none';const cm=$('copyMenu');if(cm&&cm.style.display==='block'&&!cm.contains(e.target))cm.style.display='none';const otp=$('objTypePicker');if(otp&&otp.style.display==='block'&&!otp.contains(e.target)&&e.target.id!=='objTypeBtn')otp.style.display='none';});
+document.addEventListener('click',(e)=>{$('ctx').style.display='none';const cp=$('colPicker');if(cp&&cp.style.display==='block'&&!cp.contains(e.target))cp.style.display='none';const cm=$('copyMenu');if(cm&&cm.style.display==='block'&&!cm.contains(e.target))cm.style.display='none';const otp=$('objTypePicker');if(otp&&otp.style.display==='block'&&!otp.contains(e.target)&&e.target.id!=='objTypeBtn')otp.style.display='none';const idp=$('impDbPicker');if(idp&&idp.style.display==='block'&&!idp.contains(e.target)&&e.target.id!=='impDb')idp.style.display='none';});
 
 // syntax highlight (single-pass tokenizer)
 const KW=RESERVED;
@@ -3680,13 +3681,26 @@ async function cmprTopUpAfterInsert(insertedRows){
 // topmost modal directly (see the plToggleAutoRefresh comment above for the same issue), which
 // would bypass a close-time reset entirely. Resetting on open works regardless of how it was
 // last closed.
-// A <datalist> filters its options against the input's CURRENT text - once a value is already
-// typed/prefilled (e.g. the current schema, prefilled below), clicking back in only ever shows
-// that one matching option, not the full list. Standard workaround: blank the field on focus so
-// every option shows, then put the value back on blur if nothing was picked (still empty).
-function dbFieldShowAll(inp){inp.dataset.prevVal=inp.value;inp.value='';}
-function dbFieldRestoreIfEmpty(inp){if(inp.value===''&&inp.dataset.prevVal)inp.value=inp.dataset.prevVal;delete inp.dataset.prevVal;}
-async function openImport(){$('impFiles').value='';$('impLog').textContent='';$('impCreate').checked=false;$('impFk').checked=true;$('impForce').checked=false;$('impBinary').checked=false;$('impMaxPacket').value='1G';const dl=$('impDbList');dl.innerHTML='';const inp=$('impDb');inp.value=(typeof curSchema!=='undefined'&&curSchema)?curSchema:'';try{const r=await api('/api/schemas');if(r.ok)r.schemas.forEach(s=>{const o=document.createElement('option');o.value=s.name;dl.appendChild(o);});}catch(e){}show('mImport');}
+// Target DB used to be a native <input list=...> datalist, but a datalist filters its options
+// against the field's CURRENT text - once a value is already typed/prefilled (e.g. the current
+// schema, prefilled below), clicking back in only ever showed that one matching option, not the
+// full list, and that filtering is native/browser-controlled so it can't be told to ignore the
+// current text on focus. A small custom dropdown (same floating-picker pattern as the Columns
+// and object-type pickers) gives full control instead: focus always shows every schema, typing
+// narrows it like a normal autocomplete.
+window._impDbSchemas=[];
+// On focus, always the FULL list regardless of whatever is already typed - that's the one thing
+// a native datalist couldn't do. Typing afterward (oninput) narrows it like a normal autocomplete.
+function openImpDbPicker(){showImpDbList(window._impDbSchemas);}
+function renderImpDbPicker(){const inp=$('impDb');const f=inp.value.toLowerCase();
+ showImpDbList(window._impDbSchemas.filter(n=>!f||n.toLowerCase().includes(f)));}
+function showImpDbList(matches){const p=$('impDbPicker');const inp=$('impDb');if(!p||!inp)return;
+ if(!matches.length){p.style.display='none';return;}
+ p.innerHTML=matches.map(n=>'<div class="item" onmousedown="event.preventDefault();impDbPick(\''+n.replace(/'/g,"\\'")+'\')">'+esc(n)+'</div>').join('');
+ const r=inp.getBoundingClientRect();
+ p.style.left=r.left+'px';p.style.top=r.bottom+2+'px';p.style.minWidth=r.width+'px';p.style.display='block';}
+function impDbPick(name){$('impDb').value=name;$('impDbPicker').style.display='none';}
+async function openImport(){$('impFiles').value='';$('impLog').textContent='';$('impCreate').checked=false;$('impFk').checked=true;$('impForce').checked=false;$('impBinary').checked=false;$('impMaxPacket').value='1G';const inp=$('impDb');inp.value=(typeof curSchema!=='undefined'&&curSchema)?curSchema:'';window._impDbSchemas=[];try{const r=await api('/api/schemas');if(r.ok)window._impDbSchemas=r.schemas.map(s=>s.name);}catch(e){}show('mImport');}
 async function runImport(){const files=$('impFiles').value.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);if(!files.length){toast('Add at least one file path.',true);return;}
  $('impLog').textContent='';
  const jobId=(crypto.randomUUID?crypto.randomUUID():('j'+Date.now()+Math.random()));
