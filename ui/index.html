@@ -176,6 +176,8 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 <div class="modal floating" id="mView"><div class="box" style="max-width:780px;top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mView')" title="Drag to move"><h3 id="vTitle" style="margin:0">Value</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mView')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <textarea id="vText" style="width:100%;height:340px;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px"></textarea>
  <select id="vSelect" style="width:100%;display:none;padding:8px;font-size:13px"></select>
+ <div id="vMulti" style="width:100%;display:none;max-height:340px;overflow:auto;padding:8px;border:1px solid var(--bd);border-radius:3px;background:var(--in);box-sizing:border-box;font-size:13px"></div>
+ <input id="vDate" style="width:100%;display:none;padding:8px;font-size:13px;box-sizing:border-box">
  <div class="row" id="vActions"></div></div></div>
 <div class="modal floating" id="mCsv"><div class="box" style="top:70px;left:140px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mCsv')" title="Drag to move"><h3 id="csvTitle" style="margin:0">Import CSV into table</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCsv')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="row">CSV file <input id="csvFile" style="flex:1"><button onclick="browse({title:'Select CSV file',filter:'*.csv',mode:'file',onPick:pp=>$('csvFile').value=pp})">Browse...</button></div>
@@ -2038,21 +2040,65 @@ function updateEditBar(id){const t=T(id);if(!t.pk){$('edit_'+id).innerHTML='';re
  const n=Object.keys(t.pending.upd).length+t.pending.del.size+t.pending.ins.length;
  const hasSel=t.selected&&t.selected.size>0;
  $('edit_'+id).innerHTML='<span class="pill">'+n+' pending</span><button class="write" onclick="addRow(\''+id+'\')">+ Row</button><button class="warn write" '+(hasSel?'':'disabled')+' title="Mark all checked rows for deletion (applied on Apply)" onclick="deleteSel(\''+id+'\')">Delete selected</button><span class="tbsep"></span><button class="go write" '+(n?'':'disabled')+' onclick="applyChanges(\''+id+'\')">Apply</button><button '+(n?'':'disabled')+' onclick="revertChanges(\''+id+'\')">Revert</button>';}
-function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;const ta=$('vText');const sel=$('vSelect');
+// MySQL's own DATE/DATETIME/TIME text format <-> what a native <input type="date"/"datetime-
+// local"/"time"> needs. Deliberately conservative: anything the native widget can't faithfully
+// round-trip - a zero-date ('0000-00-00'), a zero month/day, a TIME past the widget's 00:00:00-
+// 23:59:59 range (MySQL TIME can hold up to 838:59:59, and negative) - returns '' rather than a
+// silently-wrong guess, which the caller treats as "don't offer the picker for this value",
+// falling back to plain text so nothing gets discarded just by opening and closing the editor.
+function mysqlToNativeDate(v,dateType){
+ if(v==null)return '';
+ const s=String(v).trim();
+ if(dateType==='time'){
+  const m=s.match(/^(\d{1,2}):(\d{2}):(\d{2})/);
+  if(!m||+m[1]>23)return '';
+  return m[1].padStart(2,'0')+':'+m[2]+':'+m[3];
+ }
+ const m=s.match(dateType==='date' ? /^(\d{4})-(\d{2})-(\d{2})$/ : /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(:\d{2})?/);
+ if(!m)return '';
+ const mo=+m[2],da=+m[3];
+ if(mo<1||mo>12||da<1||da>31)return '';
+ return dateType==='date' ? s : (m[1]+'-'+m[2]+'-'+m[3]+'T'+m[4]+':'+m[5]+(m[6]||''));
+}
+function nativeDateToMysql(v,dateType){ return dateType==='datetime-local' ? v.replace('T',' ') : v; }
+function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;const ta=$('vText');const sel=$('vSelect');const multi=$('vMulti');const dt=$('vDate');
+ ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';
+ // Checkbox mode: SET columns, whose valid values are any comma-joined COMBINATION of the
+ // column's defined members - unlike ENUM (exactly one value), a single dropdown can't represent
+ // that, but a checkbox per member can, mirroring how Heidi/Workbench edit SET data.
+ if(opts.multiOptions&&opts.multiOptions.length){
+  multi.style.display='block';multi.innerHTML='';
+  const cur=new Set((text||'').split(',').filter(s=>s!==''));
+  opts.multiOptions.forEach(o=>{
+   const lbl=document.createElement('label');lbl.style.cssText='display:flex;align-items:center;gap:6px;padding:3px 2px';
+   const cb=document.createElement('input');cb.type='checkbox';cb.value=o;cb.checked=cur.has(o);
+   lbl.appendChild(cb);lbl.appendChild(document.createTextNode(o===''?'(empty string)':o));
+   multi.appendChild(lbl);
+  });
  // Dropdown mode: used for ENUM columns (their real defined values) and tinyint(1) "boolean"
  // columns (treated as a 2-value enum of '0'/'1') - picking from the actual valid values is
  // safer and faster than free-typing, and can't produce an out-of-range value by mistake.
- if(opts.options&&opts.options.length){
-  ta.style.display='none';sel.style.display='block';sel.innerHTML='';
+ } else if(opts.options&&opts.options.length){
+  sel.style.display='block';sel.innerHTML='';
   opts.options.forEach(o=>{const op=document.createElement('option');op.value=o;op.textContent=(o===''?'(empty string)':o);sel.appendChild(op);});
   sel.value=(text==null?opts.options[0]:text);
+ // Native date/datetime/time picker - a real calendar/clock widget instead of guessing at format
+ // order, matching Heidi/Workbench. Only reached when editWidgetFor() already confirmed the
+ // current value round-trips through it (or the cell is empty), so there's nothing to lose here.
+ } else if(opts.dateType){
+  dt.type=opts.dateType;dt.style.display='block';
+  dt.value=mysqlToNativeDate(text,opts.dateType);
  } else {
-  ta.style.display='block';sel.style.display='none';
+  ta.style.display='block';
   ta.value=(text==null?'':text);ta.readOnly=!!opts.readonly;
  }
  const a=$('vActions');a.innerHTML='';const add=(label,cls,fn)=>{const b=document.createElement('button');b.textContent=label;if(cls)b.className=cls;b.onclick=fn;a.appendChild(b);};
- const getVal=()=>opts.options?sel.value:ta.value;
- if(!opts.options){
+ const getVal=()=>{
+  if(opts.multiOptions&&opts.multiOptions.length)return [...multi.querySelectorAll('input:checked')].map(cb=>cb.value).join(',');
+  if(opts.dateType)return nativeDateToMysql(dt.value,opts.dateType);
+  return opts.options?sel.value:ta.value;
+ };
+ if(!opts.options&&!opts.multiOptions&&!opts.dateType){
   add('Copy','',()=>{navigator.clipboard.writeText(ta.value);log('Copied to clipboard.');});
   // Offer to pretty-print, but only when the content genuinely parses as a JSON object/array -
   // a bare number or quoted string technically "parses" too, but reformatting those does nothing
@@ -2063,7 +2109,7 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
  if(opts.onNull)add('Set NULL','',()=>{opts.onNull();hide('mView');});
  if(opts.onSave)add('Save','go',()=>{opts.onSave(getVal());hide('mView');});
  add('Close','',()=>hide('mView'));
- show('mView');setTimeout(()=>{if(opts.options){sel.focus();}else if(!opts.readonly){ta.focus();}},60);}
+ show('mView');setTimeout(()=>{if(opts.multiOptions){}else if(opts.options){sel.focus();}else if(opts.dateType){dt.focus();}else if(!opts.readonly){ta.focus();}},60);}
 // Column type info, fetched once per table (lazily, only when the user actually starts editing
 // a cell there) and cached on the tab, so browsing/running queries never pays this extra cost -
 // only editing a table-backed result does.
@@ -2078,11 +2124,12 @@ async function getColType(id,colName){
  }
  return t.colTypes[colName]||null;
 }
-// Parses MySQL's enum('a','b','c') column-type text into the actual list of values. Enum values
-// can contain commas and escaped quotes (enum('a,b','c''d')), so this can't just split on ',' -
-// it walks the string tracking whether it's currently inside a quoted value.
-function parseEnumOptions(colType){
- const m=colType.match(/^enum\((.*)\)$/i);if(!m)return [];
+// Parses MySQL's enum('a','b','c') or set('a','b','c') column-type text into the actual list of
+// values - both share the exact same parenthesized-quoted-list syntax. Values can contain commas
+// and escaped quotes (enum('a,b','c''d')), so this can't just split on ',' - it walks the string
+// tracking whether it's currently inside a quoted value.
+function parseQuotedOptionList(colType){
+ const m=colType.match(/^(?:enum|set)\((.*)\)$/i);if(!m)return [];
  const out=[];let cur='',inQ=false;
  for(let i=0;i<m[1].length;i++){
   const c=m[1][i];
@@ -2098,12 +2145,32 @@ function parseEnumOptions(colType){
  out.push(cur);
  return out;
 }
+// Picks the right editing widget for a column - a single-select dropdown of its real defined
+// values for ENUM (typos aren't possible), a checkbox per member for SET (its value is any
+// comma-joined COMBINATION of members, which a single dropdown can't represent), the same
+// 2-value on/off dropdown as ENUM for tinyint(1)/BOOLEAN, a native date/time picker for DATE/
+// DATETIME/TIMESTAMP/TIME (matching Heidi/Workbench's calendar widget instead of guessing at
+// format order) - or nothing (plain free text) for everything else. Shared by editCell (existing
+// rows) and editIns (new rows) so both get the same picker instead of only already-saved rows.
+// curVal is needed only for the date/time case: the picker is offered exclusively when the
+// CURRENT value actually round-trips through it (see mysqlToNativeDate), so a legacy zero-date
+// or other value it can't represent falls back to plain text instead of risking Save silently
+// discarding it the moment the dialog opens.
+async function editWidgetFor(id,colName,curVal){
+ const colType=await getColType(id,colName);
+ if(colType&&/^enum\(/i.test(colType))return {options:parseQuotedOptionList(colType)};
+ if(colType&&/^set\(/i.test(colType))return {multiOptions:parseQuotedOptionList(colType)};
+ if(colType&&/^tinyint\(1\)/i.test(colType))return {options:['0','1']};
+ let dateType=null;
+ if(colType&&/^date$/i.test(colType))dateType='date';
+ else if(colType&&/^(datetime|timestamp)/i.test(colType))dateType='datetime-local';
+ else if(colType&&/^time/i.test(colType))dateType='time';
+ if(dateType&&(curVal==null||curVal===''||mysqlToNativeDate(curVal,dateType)))return {dateType};
+ return {};
+}
 async function editCell(td,id,ri,ci){clearTimeout(clickTimer);const t=T(id);const key=ri+':'+ci;const cur=(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci];
- const colType=await getColType(id,t.cols[ci]);
- let options=null;
- if(colType&&/^enum\(/i.test(colType)){options=parseEnumOptions(colType);}
- else if(colType&&/^tinyint\(1\)/i.test(colType)){options=['0','1'];}
- viewText('Cell - '+t.cols[ci]+(cur===null?'  (currently NULL)':''),cur,{onSave:v=>setUpd(id,ri,ci,v),onNull:()=>setUpd(id,ri,ci,null),options});}
+ const ew=await editWidgetFor(id,t.cols[ci],cur);
+ viewText('Cell - '+t.cols[ci]+(cur===null?'  (currently NULL)':''),cur,{onSave:v=>setUpd(id,ri,ci,v),onNull:()=>setUpd(id,ri,ci,null),...ew});}
 function setUpd(id,ri,ci,v){const t=T(id);if(!t.pending){toast('This result is not editable (no primary key detected).',true);return;}if(v===null&&t.pk&&t.pk.indexOf(t.cols[ci])>=0){toast('Column "'+t.cols[ci]+'" is part of the primary key and cannot be set to NULL.',true);return;}const key=ri+':'+ci;if(v===t.rows[ri][ci])delete t.pending.upd[key];else t.pending.upd[key]=v;renderGrid(id);}
 let clickTimer=null;
 let gridFocus={}; // per-tab: {ri, ci} of the currently keyboard-focused cell
@@ -2196,8 +2263,9 @@ function toggleDel(id,ri){const t=T(id);if(t.pending.del.has(ri))t.pending.del.d
 function deleteSel(id){const t=T(id);if(!t.pk){alert('This result is not editable (no primary key).');return;}const ids=[...(t.selected||[])];if(!ids.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}ids.forEach(ri=>t.pending.del.add(ri));renderGrid(id);log(ids.length+' row(s) marked for deletion - click Apply to commit.');}
 function addRow(id){const t=T(id);t.pending.ins.push({});renderGrid(id);}
 function delIns(id,ii){const t=T(id);t.pending.ins.splice(ii,1);renderGrid(id);}
-function editIns(td,id,ii,col){clearTimeout(clickTimer);const t=T(id);const cur=t.pending.ins[ii][col];
- viewText('New row - '+col,(cur==null?'':cur),{onSave:v=>{t.pending.ins[ii][col]=v;renderGrid(id);},onNull:()=>{t.pending.ins[ii][col]=null;renderGrid(id);}});}
+async function editIns(td,id,ii,col){clearTimeout(clickTimer);const t=T(id);const cur=t.pending.ins[ii][col];
+ const ew=await editWidgetFor(id,col,cur);
+ viewText('New row - '+col,(cur==null?'':cur),{onSave:v=>{t.pending.ins[ii][col]=v;renderGrid(id);},onNull:()=>{t.pending.ins[ii][col]=null;renderGrid(id);},...ew});}
 function insCellMenu(e,id,ii,col){e.preventDefault();const t=T(id);const cur=t.pending.ins[ii][col];
  const items=[['Copy value',()=>{navigator.clipboard.writeText(cur==null?'':String(cur));log('Copied value.');}],
   ['Paste row into this new row',()=>pasteRowIntoIns(id,ii)],
@@ -2220,10 +2288,24 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
  // 0x38 (the character '8') isn't a mistake to guard against, it's simply what "store this text"
  // means for a BLOB - so only a BIT column's value is worth validating at all.
  const bitAt=ci=>!!(t.bitCols&&t.bitCols[ci]);
- // Same value formatting as lit(), except a plain integer bound for a BIT column goes through
- // unquoted (MySQL reads it as the bit pattern) instead of being quoted into the bytes of its
- // own text - lit() itself stays column-agnostic; this is the one place that needs to know more.
- const litForCol=(ci,v)=>(v!==null&&bitAt(ci)&&!isHex(v)&&isPlainInt(v))?String(v):lit(v);
+ // A small, deliberately narrow allowlist of MySQL's built-in "current moment" date/time
+ // functions - typing one of these into ANY cell (not just a date/time column; the intent is
+ // unambiguous either way, and a mismatched target column just errors the same as any other bad
+ // value) sends it through unquoted as a real expression instead of being quoted into literal
+ // text MySQL would then reject, matching how Heidi/Workbench let you set a column to "now"
+ // without knowing this app's own syntax for it. Not a general "detect SQL expressions" feature -
+ // just these specific, well-known, always-safe keywords.
+ const isDateTimeKeyword=v=>/^(CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME|NOW|CURDATE|CURTIME|UTC_TIMESTAMP|UTC_DATE|UTC_TIME)(\(\s*\d*\s*\))?$/i.test(String(v).trim());
+ // Same value formatting as lit(), except: a recognized date/time keyword goes through unquoted
+ // as an expression, and a plain integer bound for a BIT column goes through unquoted too (MySQL
+ // reads it as the bit pattern) instead of being quoted into the bytes of its own text - lit()
+ // itself stays column-agnostic; this is the one place that needs to know more.
+ const litForCol=(ci,v)=>{
+  if(v===null)return lit(v);
+  if(isDateTimeKeyword(v))return String(v).trim();
+  if(bitAt(ci)&&!isHex(v)&&isPlainInt(v))return String(v);
+  return lit(v);
+ };
  const badBin=[];
  Object.keys(t.pending.upd).forEach(k=>{const [ri,ci]=k.split(':').map(Number);
   if(!bitAt(ci))return;
