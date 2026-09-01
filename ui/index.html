@@ -912,14 +912,15 @@ function togglePin(db,name){const p=pinnedTables(db);const i=p.indexOf(name);if(
 
 function fmtCount(n){n=Math.round(+n||0);return String(n).replace(/\B(?=(\d{3})+(?!\d))/g,"'");}
 function fmtMs(ms){ms=+ms||0;if(ms>=10000)return Math.round(ms/1000)+'s';if(ms>=1000)return (ms/1000).toFixed(1)+'s';return Math.round(ms)+'ms';}
-function viewRangeLabel(id){const t=T(id);if(!t)return '';const total=(t._total!=null?t._total:(t.rows?t.rows.length:0));if(!total)return '0 shown';const ps=t.limit||1000;const off=Math.min(t.offset||0,Math.max(0,total-1));const shown=Math.min(ps,Math.max(0,total-off));return (off+1)+'-'+(off+shown);}
 function updateStatusLine(id){const t=T(id);if(!t||!t.rows)return;const st=$('st_'+id);if(!st)return;
   const rowLabel=(t.table&&t.estRows!=null)?(t.rows.length+' row(s) of '+fmtCount(t.estRows)+' rows.'):(t.rows.length+' row(s).');
-  const viewLabel=(t.rows.length>0)?(' View shows '+viewRangeLabel(id)+'.'):'';
   const ms=(t.lastElapsedMs!=null)?(' '+t.lastElapsedMs+' ms'):'';
   st.className='status';
-  const moreLabel=t.hasMore?'  |  more rows available - scroll down or click Next to load more':'';
-  st.textContent=rowLabel+viewLabel+ms+moreLabel+(t.pk?('  |  editable PK: '+t.pk.join(', ')):'');
+  // The grid itself is a single continuous virtualized list over everything loaded so far - no
+  // "page" to move to - so this just says more is available; scrolling near the bottom (see
+  // maybePrefetchNextBatch) is what actually goes and gets it, automatically.
+  const moreLabel=t.hasMore?'  |  more rows available - keep scrolling to load more':'';
+  st.textContent=rowLabel+ms+moreLabel+(t.pk?('  |  editable PK: '+t.pk.join(', ')):'');
 }
 // Tears down a tab's open result cursor (if any), server-side, and forgets it locally. Fire-and-
 // forget - cursor teardown must never hold up tab close/replace/app-quit for a round trip - and
@@ -934,11 +935,11 @@ function closeCursorFor(t){if(t&&t.cursorId){api('/api/close-cursor',{cursorId:t
 // via t.pk, not row count). Reads straight from the already-open server-side result set (no
 // re-running the query, no OFFSET rescan) via fetch_cursor_batch.
 //
-// There is deliberately no standalone "Fetch more" button - reaching the loaded boundary via the
-// pager's own Next (pg()) or by scrolling near the bottom of the grid (see the scroll listener in
-// renderGrid) triggers this the same way clicking one would have, so paging/scrolling never just
-// dead-ends while more is actually available. Concurrent callers are fine: t.fetchingMore makes a
-// second call (e.g. a scroll event firing while Next's own fetch is still in flight) a no-op.
+// There is deliberately no standalone "Fetch more" button or page boundary to hit - the grid is
+// one continuous virtualized list (see renderBody), and scrolling near its bottom (the scroll
+// listener in renderGrid, via maybePrefetchNextBatch) triggers this automatically, so scrolling
+// never just dead-ends while more is actually available. Concurrent callers are fine:
+// t.fetchingMore makes an overlapping call (e.g. two scroll events firing close together) a no-op.
 //
 // Reuses the exact same Run/Cancel toggle and t.runningReqId the initial run uses: the backend
 // keeps this cursor's connection registered under its original requestId (t.cursorReqId) for the
@@ -1754,7 +1755,6 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
  t.abortCtrl=new AbortController();t.runningReqId=reqId;setRunning(id,true);
  try{
   if(isSelect){
-    if(!paging)t.offset=0;
     if(needsScriptStep){
       // Each leading statement was already correctly, individually extracted by splitStmts()
       // above - including correctly handling any DELIMITER directive within it (a procedure's
@@ -1846,38 +1846,15 @@ async function cancelQuery(id){const t=T(id);if(!t)return;if(t.abortCtrl){try{t.
  }
  log('Cancel requested.');}
 
+// The grid is one continuous virtualized list over everything loaded so far (see renderBody) -
+// there's no "page" to move between, so this is just a compact loaded-count readout, not a
+// control. "+" means the server has more than what's shown; scrolling near the bottom of the
+// grid (maybePrefetchNextBatch) is what actually goes and fetches it.
 function updatePager(id){const t=T(id);const p=$('pager_'+id);if(!p)return;const total=(t._total!=null?t._total:(t.rows?t.rows.length:0));if(!total){p.innerHTML='';return;}
- const ps=t.limit||1000;const off=t.offset||0;const shown=Math.min(ps,Math.max(0,total-off));const prevDis=off<=0?' disabled':'';
- // Next stays enabled past the loaded boundary as long as the server has more (t.hasMore) - pg()
- // fetches the next batch first in that case, rather than the button just going dead once you've
- // paged through everything loaded so far.
- const nextDis=(off+ps>=total&&!t.hasMore)?' disabled':'';
- const totalLabel=total+(t.hasMore?'+':'');
- const label=(total===0)?'0 rows':((off+1)+'-'+(off+shown)+' of '+totalLabel);
- p.innerHTML='<span>Limit</span><input id="lim_'+id+'" type="number" min="1" value="'+t.limit+'" title="Rows per page (Enter to apply)" onchange="setLimit(\''+id+'\')" onkeydown="if(event.key===\'Enter\')setLimit(\''+id+'\')" style="width:70px"><button'+prevDis+' onclick="pg(\''+id+'\',-1)">Previous</button><button'+nextDis+' onclick="pg(\''+id+'\',1)">Next</button><span class="muted">'+label+'</span>';}
-function setLimit(id){const t=T(id);const v=Math.max(1,parseInt($('lim_'+id).value)||1000);if(v===t.limit)return;t.limit=v;t.offset=0;pageShow(id);}
-// Advancing past the last loaded page fetches the next batch from the server first (if there is
-// one) and only then moves the view forward - so Next never just dead-ends while the table
-// actually has more rows, matching the pager's own "X+ " total hint. Going backwards or paging
-// within already-loaded rows never touches the network.
-async function pg(id,dir){
- const t=T(id);t.limit=Math.max(1,parseInt($('lim_'+id).value)||1000);
- let total=(t._total!=null?t._total:(t.rows?t.rows.length:0));
- let no=(t.offset||0)+dir*t.limit;
- if(no<0)no=0;
- if(no>=total){
-  if(dir>0&&t.hasMore){
-   await fetchNextBatch(id);
-   total=(t._total!=null?t._total:(t.rows?t.rows.length:0));
-  }
-  if(no>=total)no=Math.max(0,(t.offset||0));
- }
- t.offset=no;pageShow(id);
-}
+ p.innerHTML='<span class="muted">'+fmtCount(total)+(t.hasMore?'+':'')+' row(s) loaded</span>';}
 function toggleLast(id){const t=T(id);const ta=$('ed_'+id);if(t.prevRun==null){log('No previous query to toggle to yet.');return;}ta.value=t.prevRun;if(typeof syncHl==='function')syncHl(id);runSql(id,t.prevRun);}
-function toggleAll(id){const t=T(id);if(!t.table)return;const ta=$('ed_'+id);const base='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+' LIMIT '+(t.limit||1000)+';';const cur=(ta.value||'').trim();if(cur!==base.trim()){t.beforeAll=ta.value;ta.value=base;}else if(t.beforeAll!=null){ta.value=t.beforeAll;}else{ta.value=base;}if(typeof syncHl==='function')syncHl(id);runSql(id,ta.value);}
-async function openRun(id){const t=T(id);const wh=t.filter?(' WHERE '+t.filter):'';const sql='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+wh+' LIMIT 1000;';$('ed_'+id).value=sql;syncHl(id);t.offset=0;await runSql(id,sql);updateFilterBar(id);}
-function pageShow(id){renderBody(id);updatePager(id);updateStatusLine(id);}
+function toggleAll(id){const t=T(id);if(!t.table)return;const ta=$('ed_'+id);const base='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+' LIMIT 1000;';const cur=(ta.value||'').trim();if(cur!==base.trim()){t.beforeAll=ta.value;ta.value=base;}else if(t.beforeAll!=null){ta.value=t.beforeAll;}else{ta.value=base;}if(typeof syncHl==='function')syncHl(id);runSql(id,ta.value);}
+async function openRun(id){const t=T(id);const wh=t.filter?(' WHERE '+t.filter):'';const sql='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+wh+' LIMIT 1000;';$('ed_'+id).value=sql;syncHl(id);await runSql(id,sql);updateFilterBar(id);}
 
 // ---- editable grid with pending changes ----
 function clip(v,n){const s=String(v);return s.length>n?s.slice(0,n)+'\u2026':s;}
@@ -1983,17 +1960,14 @@ function renderGrid(id){const t=T(id);const ed=!!t.pk;if(!t.filters)t.filters={}
  const wrap=$('res_'+id);if(wrap&&!wrap.dataset.kbWired){wrap.tabIndex=-1;wrap.addEventListener('keydown',e=>gridKeyNav(id,e));wrap.addEventListener('mousedown',e=>{const td=e.target.closest('td.editable');if(td){const tr=td.closest('tr[data-r]');if(tr){const ri=+tr.getAttribute('data-r');const t2=T(id);const off=(!!t2.pk)?2:1;const ci=[...tr.children].indexOf(td)-off;if(ci>=0)gridSetFocus(id,ri,ci,false);}}});
   let _vraf=null;wrap.addEventListener('scroll',()=>{if(_vraf)return;_vraf=requestAnimationFrame(()=>{_vraf=null;renderBody(id);maybePrefetchNextBatch(id,wrap);});});
   wrap.dataset.kbWired='1';}}
-// Silently tops up a tab's loaded rows once the user scrolls near the bottom of the currently
-// shown page, so continuing to scroll (or clicking Next right after) rarely hits a round-trip
-// wall - mirrors how DBeaver/DataGrip transparently extend a result set near the end of what's
-// loaded rather than requiring a separate "load more" click. Only fires on the LAST loaded page
-// (there's nothing to top up otherwise) and is a safe no-op mid-fetch (fetchNextBatch's own
-// t.fetchingMore guard) or once the cursor is exhausted (t.hasMore false).
+// Silently tops up a tab's loaded rows once the user scrolls near the bottom of the grid's own
+// scrollable area (true infinite scroll - the grid is one continuous virtualized list over
+// everything loaded, see renderBody, not a fixed-size page) - mirrors how DBeaver/DataGrip
+// transparently extend a result set near the end of what's loaded, with no "load more" click
+// and no page boundary to hit. Safe no-op mid-fetch (fetchNextBatch's own t.fetchingMore guard)
+// or once the cursor is exhausted (t.hasMore false).
 function maybePrefetchNextBatch(id,wrap){
  const t=T(id);if(!t||!t.hasMore||t.fetchingMore||!wrap)return;
- const total=(t._total!=null?t._total:(t.rows?t.rows.length:0));
- const ps=t.limit||1000,off=t.offset||0;
- if(off+ps<total)return;
  if((wrap.scrollTop+wrap.clientHeight)>=(wrap.scrollHeight-200))fetchNextBatch(id);
 }
 function toggleWrap(id){const t=T(id);t.wrap=!t.wrap;const wrap=$('res_'+id);if(wrap)wrap.classList.toggle('wraptext',t.wrap);const btn=$('wrapbtn_'+id);if(btn)btn.textContent='Wrap: '+(t.wrap?'On':'Off');}
@@ -2022,7 +1996,12 @@ function viewIndices(id){const t=T(id);let view=t.rows.map((r,ri)=>ri);
    if(!isNaN(na)&&!isNaN(nb)&&String(na)===String(va).trim()&&String(nb)===String(vb).trim())return na-nb;
    return String(va).localeCompare(String(vb));});if(t.sortDir<0)view.reverse();}
  return view;}
-function renderBody(id){const t=T(id);const ed=!!t.pk;if(!t.selected)t.selected=new Set();const _full=viewIndices(id);t._total=_full.length;const _ps=t.limit||1000;const _off=Math.min(t.offset||0,Math.max(0,_full.length-1));const view=_full.slice(_off,_off+_ps);
+// One continuous virtualized list over EVERY loaded (filtered/sorted) row - no fixed-size "page"
+// slice - so scrolling has something to scroll into as far as t.rows actually reaches, instead of
+// hitting a hard wall at some arbitrary page boundary. Windowing (startIdx/endIdx below) already
+// only renders the rows near the current scroll position plus a small buffer, so this scales fine
+// even once t.rows has grown to tens of thousands of rows via repeated fetches.
+function renderBody(id){const t=T(id);const ed=!!t.pk;if(!t.selected)t.selected=new Set();const view=viewIndices(id);t._total=view.length;
  const wrap=$('res_'+id);const rowH=t._rowH||23;const VIRT_THRESHOLD=300;const BUFFER=15;
  let startIdx=0,endIdx=view.length,topH=0,botH=0;
  if(view.length>VIRT_THRESHOLD&&wrap){
@@ -2134,16 +2113,16 @@ function gridSetFocus(id,ri,ci,scroll){const t=T(id);if(!t)return;const view=vie
  gridFocus[id]={ri,ci};const el=gridCellEl(id,ri,ci);if(el){el.classList.add('kbfocus');if(scroll!==false)el.scrollIntoView({block:'nearest',inline:'nearest'});el.focus({preventScroll:true});}}
 function gridClearFocus(id){const old=gridFocus[id];if(old){const oe=gridCellEl(id,old.ri,old.ci);if(oe)oe.classList.remove('kbfocus');}delete gridFocus[id];}
 function gridKeyNav(id,e){const t=T(id);if(!t||!t.pk)return;const f=gridFocus[id];
- const view=viewIndices(id);const _ps=t.limit||1000;const _off=Math.min(t.offset||0,Math.max(0,view.length-1));const pageView=view.slice(_off,_off+_ps);
- if(!f){ if(['ArrowDown','ArrowUp','ArrowLeft','ArrowRight','Tab'].includes(e.key) && pageView.length){e.preventDefault();gridSetFocus(id,pageView[0],0);} return; }
- let {ri,ci}=f; const rowPos=pageView.indexOf(ri); if(rowPos<0)return;
+ const view=viewIndices(id);
+ if(!f){ if(['ArrowDown','ArrowUp','ArrowLeft','ArrowRight','Tab'].includes(e.key) && view.length){e.preventDefault();gridSetFocus(id,view[0],0);} return; }
+ let {ri,ci}=f; const rowPos=view.indexOf(ri); if(rowPos<0)return;
  const nCols=t.cols.length;
- if(e.key==='ArrowDown'){e.preventDefault();if(rowPos<pageView.length-1)gridSetFocus(id,pageView[rowPos+1],ci);}
- else if(e.key==='ArrowUp'){e.preventDefault();if(rowPos>0)gridSetFocus(id,pageView[rowPos-1],ci);}
+ if(e.key==='ArrowDown'){e.preventDefault();if(rowPos<view.length-1)gridSetFocus(id,view[rowPos+1],ci);}
+ else if(e.key==='ArrowUp'){e.preventDefault();if(rowPos>0)gridSetFocus(id,view[rowPos-1],ci);}
  else if(e.key==='ArrowLeft'){e.preventDefault();if(ci>0)gridSetFocus(id,ri,ci-1);}
  else if(e.key==='ArrowRight'){e.preventDefault();if(ci<nCols-1)gridSetFocus(id,ri,ci+1);}
- else if(e.key==='Tab'){e.preventDefault();if(e.shiftKey){if(ci>0)gridSetFocus(id,ri,ci-1);else if(rowPos>0)gridSetFocus(id,pageView[rowPos-1],nCols-1);}
-   else{if(ci<nCols-1)gridSetFocus(id,ri,ci+1);else if(rowPos<pageView.length-1)gridSetFocus(id,pageView[rowPos+1],0);}}
+ else if(e.key==='Tab'){e.preventDefault();if(e.shiftKey){if(ci>0)gridSetFocus(id,ri,ci-1);else if(rowPos>0)gridSetFocus(id,view[rowPos-1],nCols-1);}
+   else{if(ci<nCols-1)gridSetFocus(id,ri,ci+1);else if(rowPos<view.length-1)gridSetFocus(id,view[rowPos+1],0);}}
  else if(e.key==='Enter'||e.key==='F2'){e.preventDefault();const el=gridCellEl(id,ri,ci);if(el)inlineEdit(el,id,ri,ci);}
  else if(e.key==='Escape'){gridClearFocus(id);}
 }
@@ -2194,7 +2173,7 @@ function qfSub(id,col,val){const q=qid(col);const lv=lit(val);const esc=s=>Strin
  if(isNum||isDate){sub.push('-');sub.push([q+' > '+dv,()=>setFilterWhere(id,q+' > '+lv)]);sub.push([q+' >= '+dv,()=>setFilterWhere(id,q+' >= '+lv)]);sub.push([q+' < '+dv,()=>setFilterWhere(id,q+' < '+lv)]);sub.push([q+' <= '+dv,()=>setFilterWhere(id,q+' <= '+lv)]);}
  if(!isNum){sub.push('-');sub.push([q+" LIKE '%"+ld+"%'",()=>setFilterWhere(id,q+" LIKE '%"+esc(like)+"%'")]);sub.push([q+" LIKE '"+ld+"%'",()=>setFilterWhere(id,q+" LIKE '"+esc(like)+"%'")]);if(!isDate)sub.push([q+" LIKE '%"+ld+"'",()=>setFilterWhere(id,q+" LIKE '%"+esc(like)+"'")]);}
  sub.push('-');sub.push([q+' IS NULL',()=>setFilterWhere(id,q+' IS NULL')]);sub.push([q+' IS NOT NULL',()=>setFilterWhere(id,q+' IS NOT NULL')]);return sub;}
-async function setFilterWhere(id,where){const t=T(id);t.filter=where;t.offset=0;await openRun(id);if(where)log('Filter: '+where);else log('Filter cleared.');}
+async function setFilterWhere(id,where){const t=T(id);t.filter=where;await openRun(id);if(where)log('Filter: '+where);else log('Filter cleared.');}
 function updateFilterBar(id){const t=T(id);const st=$('st_'+id);if(!st)return;st.title=t.filter?('WHERE '+t.filter):'';}
 let _rf=null;
 function rowForm(id,ri){const t=T(id);_rf={id:id,ri:ri};$('rfTitle').textContent='Edit row'+(t.table?(' - '+t.table):'');const box=$('rfFields');box.innerHTML='';
