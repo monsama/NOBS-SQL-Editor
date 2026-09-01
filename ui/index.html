@@ -94,6 +94,8 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  .box h3{margin:0 0 10px} .grid2{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px}
  label.ck{display:block;padding:2px 0} .row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap} .muted{color:var(--muted);font-size:12px}
  #vActions{justify-content:flex-end}
+ #vHexTabs button{border:1px solid var(--bd);background:var(--btn);color:var(--fg);border-radius:4px;padding:4px 12px;cursor:pointer;font:inherit}
+ #vHexTabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
  #ctx{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:180px}
  #colPicker{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
  #copyMenu{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
@@ -105,7 +107,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  .item.kbsel{background:var(--hover);outline:1px solid var(--accent);outline-offset:-1px}
  #acx{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9600;display:none;max-height:230px;overflow:auto;min-width:160px;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px}
  #acx .ai{padding:3px 10px;cursor:pointer;white-space:nowrap} #acx .ai.on{background:var(--accent);color:#fff}
- table.dz{border-collapse:collapse;width:100%} table.dz th{border:none;border-bottom:2px solid var(--bd);padding:4px 6px;text-align:left;color:var(--muted);font-weight:600;font-size:12px} table.dz td{border:none;border-bottom:1px solid var(--bd2);padding:4px} table.dz tr:last-child td{border-bottom:none} table.dz input,table.dz select{width:100%}
+ table.dz{border-collapse:collapse;width:100%;margin:8px 0} table.dz th{border:none;border-bottom:2px solid var(--bd);padding:6px 6px;text-align:left;color:var(--muted);font-weight:600;font-size:12px} table.dz td{border:none;border-bottom:1px solid var(--bd2);padding:6px 4px} table.dz tr:last-child td{border-bottom:none} table.dz input,table.dz select{width:100%}
 .pill{background:var(--accent);color:#fff;border-radius:10px;padding:0 7px;font-size:11px}
 #toasts{position:fixed;bottom:16px;right:16px;z-index:99997;display:flex;flex-direction:column;gap:8px;max-width:360px}
 .toast{background:var(--panel2);border:1px solid var(--bd);border-left:4px solid var(--accent);border-radius:6px;padding:10px 14px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.3);animation:toastin .2s ease-out}
@@ -2118,8 +2120,7 @@ function bitNumberToHex(decStr){return '0x'+BigInt(decStr).toString(16);}
 let _vHexState=null; // {kind:'binText'|'bitNum', mode:'text'|'hex'} for the modal currently open on a binary/BIT cell - null otherwise
 function updateHexTabButtons(){
  const bt=$('vTabText'),bh=$('vTabHex');if(!bt||!bh||!_vHexState)return;
- const on='font-weight:700;text-decoration:underline',off='';
- bt.style.cssText=_vHexState.mode==='text'?on:off;bh.style.cssText=_vHexState.mode==='hex'?on:off;
+ bt.classList.toggle('on',_vHexState.mode==='text');bh.classList.toggle('on',_vHexState.mode==='hex');
 }
 function switchHexTab(mode){
  if(!_vHexState||_vHexState.mode===mode)return;
