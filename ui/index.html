@@ -373,6 +373,9 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 
 <script>
 const TOKEN="__TOKEN__";
+// Rows fetched per "page" of chunked query-result pagination - kept in sync with the backend's
+// own default pageSize so the two stay obviously the same number.
+const PAGE_BATCH=1000;
 let curSchema=null, tabs=[], tabSeq=0, activeTab=null;
 /* ============================================================================
    FRONT-END (runs in the browser)
@@ -916,7 +919,32 @@ function updateStatusLine(id){const t=T(id);if(!t||!t.rows)return;const st=$('st
   const ms=(t.lastElapsedMs!=null)?(' '+t.lastElapsedMs+' ms'):'';
   st.className='status';
   const truncLabel=t.truncated?'  |  truncated - add a LIMIT to see more':'';
-  st.textContent=rowLabel+viewLabel+ms+truncLabel+(t.pk?('  |  editable PK: '+t.pk.join(', ')):'');
+  const moreLabel=t.hasMore?'  |  more rows available - Fetch next '+PAGE_BATCH+' rows':'';
+  st.textContent=rowLabel+viewLabel+ms+truncLabel+moreLabel+(t.pk?('  |  editable PK: '+t.pk.join(', ')):'');
+}
+// Shows/hides the "Fetch next N rows" button based on t.hasMore - called after every fetch
+// (first run and each subsequent batch) so it tracks the tab's current pagination state.
+function updateFetchMoreBtn(id){const b=$('fetchmore_'+id);if(!b)return;const t=T(id);b.style.display=(t&&t.hasMore)?'':'none';}
+// Fetches the next PAGE_BATCH rows of the currently-loaded query (same SQL/db, next offset) and
+// APPENDS them to t.rows in place - Workbench-style "fetch next" - then re-renders the grid and
+// status line so it grows without disturbing what's already loaded (including any in-progress
+// edits, which key off row identity via t.pk, not row count).
+async function fetchNextBatch(id){
+ const t=T(id);if(!t||!t.hasMore||t.fetchingMore)return;
+ if(!t.pageSql){toast('Nothing to fetch - run a query first.',true);return;}
+ const btn=$('fetchmore_'+id);t.fetchingMore=true;
+ const prevLabel=btn?btn.textContent:null;if(btn){btn.disabled=true;btn.textContent='Fetching…';}
+ try{
+  const r=await api('/api/query',{sql:t.pageSql,db:t.pageDb,offset:t.pageOffset||0,pageSize:PAGE_BATCH});
+  if(!T(id))return;
+  if(!r.ok){toast(r.error,true);log(logErr(r.error));return;}
+  t.rows=(t.rows||[]).concat(r.rows);
+  t.pageOffset=(t.pageOffset||0)+r.rows.length;
+  t.hasMore=!!r.hasMore;
+  renderGrid(id);updateStatusLine(id);updateFetchMoreBtn(id);
+  log('Fetched '+fmtCount(r.rows.length)+' more row(s), '+fmtCount(t.rows.length)+' total loaded.');
+ }catch(e){toast(String(e),true);}
+ finally{t.fetchingMore=false;if(btn){btn.disabled=false;btn.textContent=prevLabel;}updateFetchMoreBtn(id);}
 }
 let objData=null;
 async function loadObjects(db) {
@@ -1371,6 +1399,7 @@ function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqu
   '<span class="tbsep"></span>'+
   '<span id="resultActions_'+id+'" style="display:none;gap:9px;align-items:center" class="tbgroup">'+
   '<button title="Copy the grid to the clipboard, as CSV or Markdown, all rows or just the selected (checked) ones (binary/control-character values are copied as 0x... hex text, not the literal bytes)" onclick="event.stopPropagation();toggleCopyMenu(\''+id+'\',this)">Copy \u25BE</button>'+'<button class="sm" id="wrapbtn_'+id+'" title="Toggle text wrapping in the grid" onclick="toggleWrap(\''+id+'\')">Wrap: Off</button>'+'<button class="sm" id="colsbtn_'+id+'" title="Show or hide columns" onclick="event.stopPropagation();toggleColPicker(\''+id+'\',this)">Columns</button>'+
+  '<button class="sm" id="fetchmore_'+id+'" style="display:none" title="Fetch the next '+PAGE_BATCH+' rows from the server and add them to the grid" onclick="fetchNextBatch(\''+id+'\')">Fetch next '+PAGE_BATCH+' rows</button>'+
   '<span class="tbsep"></span></span>'+
   '<span style="flex:1 1 auto"></span>'+
   '<span id="edit_'+id+'" style="display:inline-flex;align-items:center;gap:6px"></span>'+pager+'</div>'+
@@ -1725,11 +1754,16 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
       if(!scriptR.ok){st.className='status err';st.textContent=scriptR.error;$('res_'+id).innerHTML='';log('ERROR: '+scriptR.error);return;}
     }
     const _q=(leadingAreAllUse&&stmts.length>1?sql:lastStmt).trim().replace(/;+\s*$/,'');
-    const r=await api('/api/query',{sql:_q,db:dbOf(t),requestId:reqId},t.abortCtrl.signal);
+    t.pageSql=_q;t.pageDb=dbOf(t);
+    // offset/pageSize are always sent for the main Run path - the backend is the source of truth
+    // on whether pagination actually applies (it only does for a SELECT-shaped statement with no
+    // trailing LIMIT of its own; otherwise these are simply ignored and hasMore stays unset).
+    const r=await api('/api/query',{sql:_q,db:dbOf(t),requestId:reqId,offset:0,pageSize:PAGE_BATCH},t.abortCtrl.signal);
     if(r.aborted){if(T(id)){st.className='status';st.textContent='Query cancelled.';}return;}
     if(!T(id))return;
     if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));return;}
     t.cols=r.columns;t.binCols=r.binaryCols||[];t.rows=r.rows;t.truncated=!!r.truncated;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
+    t.pageOffset=r.rows.length;t.hasMore=!!r.hasMore;updateFetchMoreBtn(id);
     if(!r.columns.length){st.textContent=r.message||'Query OK.';$('res_'+id).innerHTML='';updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';return;}
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
     if(t.table){const pk=await api('/api/pk',{db:t.db,table:t.table});if(pk.ok&&pk.pk.length){t.pk=pk.pk;t.pending={upd:{},del:new Set(),ins:[]};}

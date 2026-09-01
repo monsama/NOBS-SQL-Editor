@@ -355,6 +355,74 @@ fn run_select_bin_capped(conn: &mut Conn, sql: &str, cap: usize) -> Result<(Vec<
     Ok((cols, rows, bin, truncated))
 }
 
+// ---------- chunked pagination helpers ----------
+// Strips comments (block /* */, -- , #) AND quoted literals/identifiers ('...', "...", `...`)
+// from a chunk of SQL, replacing each with a single space. Mirrors sql_is_readonly's own
+// comment-stripping regexes; extended here with quote-aware stripping (backslash escapes and
+// doubled-quote escapes both honored) so a trailing-clause check can't be fooled by a
+// LIMIT-shaped token sitting inside a string literal.
+fn sql_strip_comments_and_literals(sql: &str) -> String {
+    let re_exec  = regex::Regex::new(r"(?s)/\*!\d*(.*?)\*/").unwrap();
+    let re_block = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
+    let re_dash  = regex::Regex::new(r"(?m)--.*$").unwrap();
+    let re_hash  = regex::Regex::new(r"(?m)#.*$").unwrap();
+    let unwrapped = re_exec.replace_all(sql, " $1 ");
+    let step1 = re_block.replace_all(&unwrapped, " ");
+    let step2 = re_dash.replace_all(&step1, " ");
+    let no_comments = re_hash.replace_all(&step2, " ");
+
+    let mut out = String::with_capacity(no_comments.len());
+    let chars: Vec<char> = no_comments.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\'' || c == '"' || c == '`' {
+            let quote = c;
+            out.push(' ');
+            i += 1;
+            while i < chars.len() {
+                // Backslash escaping doesn't apply inside backtick-quoted identifiers.
+                if chars[i] == '\\' && quote != '`' && i + 1 < chars.len() {
+                    i += 2;
+                    continue;
+                }
+                if chars[i] == quote {
+                    // A doubled quote ('' or ``) is an escaped literal quote, not the closer.
+                    if i + 1 < chars.len() && chars[i + 1] == quote {
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+// True if `sql` (a single statement) already ends in its own LIMIT clause - "LIMIT n",
+// "LIMIT m,n", or "LIMIT n OFFSET m" - after comments and quoted literals are stripped out
+// first. A LIMIT trapped inside a string, comment, or a non-final subquery is never mistaken
+// for the statement's own trailing clause: a subquery's LIMIT can't land at the very end of the
+// stripped text anyway, since the subquery's closing paren (or an alias/ORDER BY after it) would
+// be the last non-space token instead.
+fn sql_has_trailing_limit(sql: &str) -> bool {
+    let stripped = sql_strip_comments_and_literals(sql);
+    let t = stripped.trim().trim_end_matches(';').trim();
+    let re = regex::Regex::new(r"(?is)\bLIMIT\s+\d+\s*(,\s*\d+|OFFSET\s+\d+)?\s*$").unwrap();
+    re.is_match(t)
+}
+// The statement's leading keyword, after stripping comments/literals - used to gate pagination
+// to genuinely SELECT-shaped ad-hoc queries (SELECT / WITH ... SELECT), the same class the
+// frontend already restricts its "Run" pagination request to.
+fn sql_leading_keyword(sql: &str) -> String {
+    sql_strip_comments_and_literals(sql).trim_start().split_whitespace().next().unwrap_or("").to_uppercase()
+}
+
 // ---------- SQL text helpers (identifier + literal, Workbench-style + hex rule) ----------
 fn sql_id(name: &str) -> String { format!("`{}`", name.replace('`', "``")) }
 // Mirrors the PowerShell version's Test-SqlReadOnly: strips /* */, --, and # comments, then
@@ -780,11 +848,35 @@ async fn query(req: Value) -> R {
                 }
             }
         }
+        // Chunked pagination (Workbench-style "fetch next batch"): the frontend's main Run action
+        // sends offset/pageSize for every eligible SELECT it runs; this command decides whether to
+        // actually honor them. Only a genuinely SELECT-shaped statement (SELECT / WITH ... SELECT)
+        // that does NOT already carry its own trailing LIMIT is eligible - anything else (a query
+        // already limited by the user, or a non-SELECT like SHOW/DESCRIBE that a caller might send
+        // these fields for anyway) falls straight through to the old QUERY_ROW_CAP safety net
+        // unchanged, with no offset/pageSize/hasMore in play at all.
+        let paginate_requested = req.get("offset").is_some() || req.get("pageSize").is_some();
+        let offset = req.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+        let page_size = req.get("pageSize").and_then(|v| v.as_u64()).unwrap_or(1000).max(1);
+        let leading_kw = sql_leading_keyword(&sql);
+        let paginate = paginate_requested
+            && (leading_kw == "SELECT" || leading_kw == "WITH")
+            && !sql_has_trailing_limit(&sql);
+        // Fetch one extra row (pageSize+1) so "is there more?" is answered from this same result
+        // set, with no separate COUNT(*) round trip - the extra row is dropped below and never
+        // reaches the frontend.
+        let fetch_sql = if paginate { format!("{} LIMIT {} OFFSET {}", sql, page_size + 1, offset) } else { sql.clone() };
+        let cap = if paginate { (page_size + 1) as usize } else { QUERY_ROW_CAP };
+
         let t = std::time::Instant::now();
-        let result = match run_select_bin_capped(&mut c, &sql, QUERY_ROW_CAP) {
-            Ok((cols, rows, bin, truncated)) => {
+        let result = match run_select_bin_capped(&mut c, &fetch_sql, cap) {
+            Ok((cols, mut rows, bin, truncated)) => {
                 if cols.is_empty() {
                     Ok(json!({"ok":true,"columns":[],"rows":[],"elapsedMs":t.elapsed().as_millis() as u64,"message":"Query OK. No result set."}))
+                } else if paginate {
+                    let has_more = rows.len() > page_size as usize;
+                    if has_more { rows.truncate(page_size as usize); }
+                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"truncated":false,"hasMore":has_more,"elapsedMs":t.elapsed().as_millis() as u64}))
                 } else {
                     Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"truncated":truncated,"elapsedMs":t.elapsed().as_millis() as u64}))
                 }
