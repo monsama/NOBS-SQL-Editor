@@ -459,7 +459,9 @@ function floatCenterY(id){
  const box=$(id).querySelector('.box');
  if(!box)return;
  const h=box.getBoundingClientRect().height;
- box.style.top=Math.max(0,Math.round((window.innerHeight-h)/2))+'px';
+ // Biased a bit above dead-center (not a plain 50/50 split) - looks more natural than true
+ // centering, and keeps tall modals (e.g. Compare Databases) from crowding the bottom edge.
+ box.style.top=Math.max(0,Math.round((window.innerHeight-h)/2-window.innerHeight*0.06))+'px';
 }
 let _floatDrag=null;
 function floatDragStart(e,id){
