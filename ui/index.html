@@ -800,7 +800,7 @@ async function cloneConn(){const n0=$('connlist').value;
  if(n0){const c=accMap()[n0];if(c)accSet(nn,c);const m=connMeta()[n0];if(m)connMetaSet(nn,m);}
  await refreshConns();$('connlist').value=nn;window.curAccent=accMap()[nn]||'';applyAccent(window.curAccent);applyEnv(nn);
  log('Cloned connection: '+nn);}
-async function delConn(){const n=$('connlist').value;if(!n)return;if(!(await ask('Delete saved connection "'+n+'"?')))return;await api('/api/conn-delete',{name:n});accSet(n,'');window.curAccent='';applyAccent('');refreshConns();}
+async function delConn(){const n=$('connlist').value;if(!n)return;await api('/api/conn-delete',{name:n});accSet(n,'');window.curAccent='';applyAccent('');refreshConns();}
 
 // connect(): open the connection, then load the schema sidebar.
 async function connect() {
@@ -2551,7 +2551,7 @@ async function dlBinary(blob,name){
 function hist(){try{return JSON.parse(localStorage.getItem('history')||'[]');}catch(e){return[];}}
 function addHistory(sql){sql=sql.trim();if(!sql)return;let h=hist().filter(x=>x!==sql);h.unshift(sql);h=h.slice(0,200);localStorage.setItem('history',JSON.stringify(h));}
 function openHistory(){const box=$('histList');const h=hist();box.innerHTML=h.length?'':'<div class="muted">No history yet.</div>';h.forEach(sql=>{const d=document.createElement('div');d.className='item';d.style.borderBottom='1px solid var(--bd2)';d.style.fontFamily='"Cascadia Code",Consolas,"SF Mono",Menlo,"DejaVu Sans Mono",monospace';d.style.whiteSpace='pre-wrap';d.textContent=sql.slice(0,300);d.onclick=()=>{hide('mHist');openTab('history',sql,curSchema,false,null);};box.appendChild(d);});show('mHist');}
-async function clearHistory(){if(await ask('Clear query history?')){localStorage.removeItem('history');openHistory();}}
+async function clearHistory(){localStorage.removeItem('history');openHistory();}
 let _libCache=[];
 function libAll(){return _libCache.slice();}
 // --- Query library: saved queries, kept on the server so they survive restarts.
