@@ -2229,6 +2229,31 @@ function parseQuotedOptionList(colType){
 // discarding it the moment the dialog opens.
 async function editWidgetFor(id,colName,curVal){
  const t=T(id);
+ const colType=await getColType(id,colName);
+ if(colType&&/^enum\(/i.test(colType))return {options:parseQuotedOptionList(colType)};
+ if(colType&&/^set\(/i.test(colType))return {multiOptions:parseQuotedOptionList(colType)};
+ if(colType&&/^tinyint\(1\)/i.test(colType))return {options:['0','1']};
+ let dateType=null;
+ if(colType&&/^date$/i.test(colType))dateType='date';
+ else if(colType&&/^(datetime|timestamp)/i.test(colType))dateType='datetime-local';
+ else if(colType&&/^time/i.test(colType))dateType='time';
+ if(dateType&&(curVal==null||curVal===''||mysqlToNativeDate(curVal,dateType)))return {dateType};
+ // True binary/BLOB columns (not BIT - is_bit_col narrows binaryCols down to just BIT, see its
+ // comment in main.rs) always render as "0x.." hex; offering a Text tab too lets you type/read
+ // things like bcrypt hashes or tokens directly instead of hand-converting to hex, while Hex
+ // stays available (and is all that's offered) for genuinely non-text bytes like images.
+ const ci=t&&t.cols?t.cols.indexOf(colName):-1;
+ const bitCol=ci>=0&&t.bitCols&&t.bitCols[ci];
+ const flaggedBinary=ci>=0&&t.binCols&&t.binCols[ci];
+ // A column that ISN'T declared VARBINARY/BLOB (so binCols says false) can still arrive here as
+ // "0x.." hex: the backend's val_to_opt() falls back to hex for ANY value whose bytes fail a
+ // UTF-8 decode, regardless of the column's declared type - a VARCHAR/TEXT column storing a
+ // legacy/non-UTF8-charset hash is a real example of this, not just theoretical. Catching that
+ // by the VALUE's own shape (same 0x.. heuristic cellHtml() already uses for display) means the
+ // Text/Hex tabs still show up for it instead of silently falling through to plain-text mode
+ // with an unexplained raw hex blob.
+ const looksHex=typeof curVal==='string'&&/^0x[0-9A-Fa-f]+$/.test(curVal);
+ if(!bitCol&&(flaggedBinary||looksHex))return {hexText:true};
  return {};
 }
 async function editCell(td,id,ri,ci){clearTimeout(clickTimer);const t=T(id);const key=ri+':'+ci;const cur=(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci];
