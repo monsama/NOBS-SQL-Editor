@@ -941,7 +941,7 @@ async function fetchNextBatch(id){
   t.rows=(t.rows||[]).concat(r.rows);
   t.pageOffset=(t.pageOffset||0)+r.rows.length;
   t.hasMore=!!r.hasMore;
-  renderGrid(id);updateStatusLine(id);updateFetchMoreBtn(id);
+  renderGrid(id);updatePager(id);updateFetchMoreBtn(id);
   log('Fetched '+fmtCount(r.rows.length)+' more row(s), '+fmtCount(t.rows.length)+' total loaded.');
  }catch(e){toast(String(e),true);}
  finally{t.fetchingMore=false;if(btn){btn.disabled=false;btn.textContent=prevLabel;}updateFetchMoreBtn(id);}
