@@ -96,6 +96,8 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  #vActions{justify-content:flex-end}
  #vHexTabs button{border:1px solid var(--bd);background:var(--btn);color:var(--fg);border-radius:4px;padding:4px 12px;cursor:pointer;font:inherit}
  #vHexTabs button.on{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+ .objchip{height:20px;padding:0 7px;font-size:10.5px;border-radius:10px;opacity:.55}
+ .objchip.on{background:var(--accent);border-color:var(--accent);color:#fff;opacity:1}
  #ctx{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:180px}
  #colPicker{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
  #copyMenu{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
@@ -160,6 +162,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 <input id="objFilter" placeholder="filter objects..." oninput="renderObjects()" onkeydown="if(event.key==='ArrowDown'){event.preventDefault();focusList($('objects'));}" style="flex:1;font-size:12px">
 <button class="sm" id="allSchemasBtn" title="Search this name across all schemas" onclick="searchAllSchemas()" style="padding:2px 6px;font-size:11px">All DBs</button>
 </div>
+<div id="objTypeChips" style="display:flex;gap:3px;margin:0 6px 4px;flex-wrap:wrap"></div>
   <div id="objects" tabindex="0"></div>
  </div>
  <div id="sideResize" title="Drag to resize the sidebar (double-click to reset)"></div>
@@ -1077,8 +1080,15 @@ async function cancelJob(prefix){
   try{await api('/api/cancel-job',{jobId});}catch(e){}
   log('Cancel requested for '+prefix+' job.');
 }
-function renderObjects(){const box=$('objects');box.innerHTML='';if(!objData)return;const db=objData.db,r=objData.r;const f=($('objFilter').value||'').toLowerCase();
- const pinned=pinnedTables(db);
+// Which object types (Tables/Views/Procedures/Functions/Triggers/Events) show in the sidebar -
+// all on by default, so this is purely additive to the existing text filter above it.
+const OBJ_TYPES=[['table','Tables'],['view','Views'],['procedure','Procs'],['function','Funcs'],['trigger','Triggers'],['event','Events']];
+window._objTypeFilter=window._objTypeFilter||new Set(OBJ_TYPES.map(t=>t[0]));
+function toggleObjType(type){const s=window._objTypeFilter;if(s.has(type))s.delete(type);else s.add(type);renderObjTypeChips();renderObjects();}
+function renderObjTypeChips(){const box=$('objTypeChips');if(!box)return;box.innerHTML='';const s=window._objTypeFilter;
+ OBJ_TYPES.forEach(([type,label])=>{const b=document.createElement('button');b.className='objchip'+(s.has(type)?' on':'');b.textContent=label;b.title='Show/hide '+label.toLowerCase();b.onclick=()=>toggleObjType(type);box.appendChild(b);});}
+function renderObjects(){const box=$('objects');box.innerHTML='';if(!$('objTypeChips').childElementCount)renderObjTypeChips();if(!objData)return;const db=objData.db,r=objData.r;const f=($('objFilter').value||'').toLowerCase();const tf=window._objTypeFilter;
+ const pinned=tf.has('table')?pinnedTables(db):[];
  if(pinned.length){
    const fil=pinned.filter(n=>r.tables.includes(n)&&(!f||n.toLowerCase().includes(f)));
    if(fil.length){const h=document.createElement('div');h.className='ohdr';h.textContent='\u2605 Pinned ('+fil.length+')';box.appendChild(h);
@@ -1087,7 +1097,7 @@ function renderObjects(){const box=$('objects');box.innerHTML='';if(!objData)ret
       d.oncontextmenu=e=>{e.preventDefault();objMenu(e,db,'table',n);};box.appendChild(d);});}
  }
  const groups=[['Tables',r.tables,'table'],['Views',r.views,'view'],['Procedures',r.procedures,'procedure'],['Functions',r.functions,'function'],['Triggers',r.triggers,'trigger'],['Events',r.events,'event']];
- groups.forEach(([label,items,type])=>{const fil=(items||[]).filter(n=>!f||n.toLowerCase().includes(f));if(!fil.length)return;const h=document.createElement('div');h.className='ohdr';h.textContent=label+' ('+fil.length+(f?'/'+items.length:'')+')';box.appendChild(h);
+ groups.forEach(([label,items,type])=>{if(!tf.has(type))return;const fil=(items||[]).filter(n=>!f||n.toLowerCase().includes(f));if(!fil.length)return;const h=document.createElement('div');h.className='ohdr';h.textContent=label+' ('+fil.length+(f?'/'+items.length:'')+')';box.appendChild(h);
   fil.forEach(n=>{const d=document.createElement('div');d.className='item';if(type==='table'&&objData.sizes&&(n in objData.sizes)){const a=document.createElement('span');a.className='onm';a.textContent=n;const b=document.createElement('span');b.className='osz';b.textContent=fmtBytes(objData.sizes[n]);d.appendChild(a);d.appendChild(b);}else{d.textContent=n;}
    d.onclick=()=>{[...box.querySelectorAll('.item')].forEach(c=>c.classList.remove('sel'));d.classList.add('sel');objOpen(db,type,n);};
    d.oncontextmenu=e=>{e.preventDefault();objMenu(e,db,type,n);};box.appendChild(d);});});}
