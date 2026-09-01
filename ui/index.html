@@ -3033,7 +3033,6 @@ async function refreshProcessList(){
  $('plGrid').innerHTML=h;
 }
 async function killProcess(pid){
- if(!(await ask('Kill process '+pid+'? This immediately terminates its current query/connection.')))return;
  const r=await api('/api/kill-process',{pid});
  if(r.ok){log('Killed process '+pid+'.');refreshProcessList();}
  else{toast(r.error||('Could not kill process '+pid+'.'),true);}
