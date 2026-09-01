@@ -638,16 +638,31 @@ fn resolve_bin(names: &[&str], env_key: &str) -> Result<String, String> {
             }
         }
     }
-    // last resort: try the bare name on PATH
-    let name = names[0];
-    match Command::new(name).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status() {
-        Ok(_) => Ok(name.to_string()),
-        // Names the Settings dialog first: it is the fix inside the app (pick the path, or download
-        // the MariaDB client tools), whereas PATH and the environment variable both need a restart
-        // to take effect. The "Could not find '<tool>'" prefix is matched by showToolError() in the
-        // UI to decide whether to offer an Open Settings button - keep it if this text changes.
-        Err(_) => Err(format!("Could not find '{}'. Open Settings in the app to select {}.exe or download the MariaDB client tools. Alternatively add its bin folder to PATH, or set the {} environment variable to its full path.", name, name, env_key)),
+    // Last resort: search PATH directories for the executable directly, rather than spawning it
+    // with --version just to confirm it runs. All that's actually needed here is "does this file
+    // exist and is it presumably runnable" - a plain existence check answers that without paying
+    // for process creation (and, in practice, whatever a fresh/unscanned .exe costs to launch
+    // under Windows Defender's real-time scanning) on every uncached tools_status call. Returns
+    // the bare name on a match, same as the old --version-spawn check did (not the resolved full
+    // path) - describe()'s "found on PATH" vs "found on system" label depends on that; a bare
+    // name still spawns fine later since Command::new() resolves it via PATH itself.
+    if let Ok(path_var) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            for n in names {
+                #[cfg(windows)]
+                let candidate = dir.join(format!("{}.exe", n));
+                #[cfg(not(windows))]
+                let candidate = dir.join(n);
+                if candidate.exists() { return Ok(n.to_string()); }
+            }
+        }
     }
+    let name = names[0];
+    // Names the Settings dialog first: it is the fix inside the app (pick the path, or download
+    // the MariaDB client tools), whereas PATH and the environment variable both need a restart
+    // to take effect. The "Could not find '<tool>'" prefix is matched by showToolError() in the
+    // UI to decide whether to offer an Open Settings button - keep it if this text changes.
+    Err(format!("Could not find '{}'. Open Settings in the app to select {}.exe or download the MariaDB client tools. Alternatively add its bin folder to PATH, or set the {} environment variable to its full path.", name, name, env_key))
 }
 
 fn first_err(s: &str) -> String {
@@ -2719,8 +2734,21 @@ async fn export_table_run(app: Option<tauri::AppHandle>, req: Value) -> R {
     }).await.map_err(|e| e.to_string())?
 }
 
+// tools_status's checks are expensive enough to notice (a directory tree walk under Program
+// Files, and - see below - a real process spawn for mysqldump's --version) that recomputing them
+// on every single Settings-dialog open was the actual source of the multi-second delay, not any
+// one check in isolation. The paths/flavor can't change out from under the app on their own, so
+// this caches the whole result for the life of the process and only recomputes when something
+// that could actually invalidate it happens: save_config (the user picked a new path) or a
+// successful download_tools (new binaries appeared on disk) both clear it.
+fn tools_status_cache() -> &'static Mutex<Option<Value>> {
+    static CACHE: OnceLock<Mutex<Option<Value>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
 #[tauri::command]
 fn tools_status(app: tauri::AppHandle) -> R {
+    if let Some(cached) = tools_status_cache().lock().unwrap().clone() { return Ok(cached); }
     fn describe(app: &tauri::AppHandle, base: &str, names: &[&str], env_key: &str) -> (String, String) {
         let cfg = load_cfg();
         if let Some(p) = cfg.get(&format!("{}_bin", base)).and_then(|v| v.as_str()) {
@@ -2741,19 +2769,23 @@ fn tools_status(app: tauri::AppHandle) -> R {
     // MySQL 5.6+ only, --column-statistics is MySQL 8+ only - MariaDB's mysqldump has neither,
     // and checking either against it aborts the whole export with "unknown variable". Running
     // `--version` once here lets the export dialog grey those options out up front instead of
-    // letting the user discover it mid-export.
+    // letting the user discover it mid-export. This is the one check here that genuinely needs to
+    // launch the binary - the version STRING is the only way to tell the two flavors apart -
+    // unlike resolve_bin's PATH fallback below, which only needs to know the binary exists.
     let dump_is_mariadb = if d != "(not found)" {
         Command::new(&d).arg("--version").output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("mariadb"))
     } else { None };
-    Ok(json!({
+    let result = json!({
         "ok": true,
         "mysql": m, "mysql_source": ms,
         "mysqldump": d, "mysqldump_source": ds,
         "mysqldump_is_mariadb": dump_is_mariadb,
         "download_dir": tools_dir().to_string_lossy(),
         "config_file": config_file().to_string_lossy()
-    }))
+    });
+    *tools_status_cache().lock().unwrap() = Some(result.clone());
+    Ok(result)
 }
 
 #[tauri::command]
@@ -2768,7 +2800,12 @@ fn save_config(req: Value) -> R {
         for (k, v) in m { cfg[k] = v.clone(); }
     }
     match std::fs::write(config_file(), serde_json::to_string_pretty(&cfg).unwrap_or_default()) {
-        Ok(_) => Ok(json!({"ok":true})),
+        Ok(_) => {
+            // The saved config may have changed mysql_bin/mysqldump_bin - drop the cached
+            // tools_status result so the next check reflects the new path instead of a stale one.
+            *tools_status_cache().lock().unwrap() = None;
+            Ok(json!({"ok":true}))
+        }
         Err(e) => Ok(json!({"ok":false,"error":e.to_string()})),
     }
 }
@@ -2860,6 +2897,9 @@ async fn download_tools(_app: tauri::AppHandle) -> R {
         if let Some(p) = pick("mysql.exe", "mariadb.exe") { cfg["mysql_bin"] = json!(p); }
         if let Some(p) = pick("mysqldump.exe", "mariadb-dump.exe") { cfg["mysqldump_bin"] = json!(p); }
         std::fs::write(config_file(), serde_json::to_string_pretty(&cfg).unwrap_or_default()).map_err(|e| e.to_string())?;
+        // New binaries just landed on disk and the config above may point at them now - the
+        // cached tools_status result (if any) is stale.
+        *tools_status_cache().lock().unwrap() = None;
         Ok(json!({"ok":true, "message": format!("Downloaded MariaDB {} client tools to {}", patch, dest.to_string_lossy()), "config": cfg}))
     }).await.map_err(|e| e.to_string())?
 }
