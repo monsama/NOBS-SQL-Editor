@@ -1944,7 +1944,10 @@ function decodeCtrlCharCell(hexStr,maxChars){
  return html;
 }
 function cellHtml(v,isBit){if(v===null)return '<span style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return isBit?esc(hexToBitNumber(v)):decodeCtrlCharCell(v,300);return esc(clip(v,300));}
-function colgroupHtml(id){const t=T(id);const ed=!!t.pk;const hidden=t.hiddenCols||new Set();let h='<colgroup><col style="width:30px">'+(ed?'<col style="width:34px">':'');t.cols.forEach((c,ci)=>{h+='<col style="width:150px'+(hidden.has(ci)?';visibility:collapse':'')+'">';});return h+'<col></colgroup>';}
+// When every data column is hidden (via "Hide all" or unchecking each one by hand), the leading
+// row-select checkbox and delete/undo columns are pointless to keep showing on their own - an
+// empty grid with just those two columns looks broken, not "hidden".
+function colgroupHtml(id){const t=T(id);const ed=!!t.pk;const hidden=t.hiddenCols||new Set();const allHidden=t.cols.length>0&&hidden.size===t.cols.length;let h='<colgroup><col style="width:30px'+(allHidden?';visibility:collapse':'')+'">'+(ed?'<col style="width:34px'+(allHidden?';visibility:collapse':'')+'">':'');t.cols.forEach((c,ci)=>{h+='<col style="width:150px'+(hidden.has(ci)?';visibility:collapse':'')+'">';});return h+'<col></colgroup>';}
 // wireColResize(): drag a column edge to resize, double-click to auto-fit (widths saved per table).
 function wireColResize(id){const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const t=T(id);const off=(!!t.pk)?2:1;
  wrap.querySelectorAll('thead .rz').forEach(rz=>{const ci=+rz.getAttribute('data-ci');const col=cg.children[ci+off];if(!col)return;let sx=0,sw=0,drag=false;
@@ -1971,7 +1974,11 @@ function autofitAll(id,retries){const t=T(id);if(!t.cols||!t.cols.length)return;
 // the corresponding <td>/<th> cells' rendered width in table-layout:fixed, so a "hidden" column
 // was staying at whatever width autofit last gave it, just with its own <col> reporting
 // display:none while its cells sat there full-width and visible.
-function applyColVis(id){const t=T(id);const ed=!!t.pk;const off=ed?2:1;const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const hidden=t.hiddenCols||new Set();t.cols.forEach((c,ci)=>{const col=cg.children[ci+off];if(col)col.style.visibility=hidden.has(ci)?'collapse':'';});autofitAll(id);}
+function applyColVis(id){const t=T(id);const ed=!!t.pk;const off=ed?2:1;const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const hidden=t.hiddenCols||new Set();
+ const allHidden=t.cols.length>0&&hidden.size===t.cols.length;
+ const cbCol=cg.children[0];if(cbCol)cbCol.style.visibility=allHidden?'collapse':'';
+ if(ed){const delCol=cg.children[1];if(delCol)delCol.style.visibility=allHidden?'collapse':'';}
+ t.cols.forEach((c,ci)=>{const col=cg.children[ci+off];if(col)col.style.visibility=hidden.has(ci)?'collapse':'';});autofitAll(id);}
 function setColVis(id,ci,visible){const t=T(id);if(!t.hiddenCols)t.hiddenCols=new Set();if(visible)t.hiddenCols.delete(ci);else t.hiddenCols.add(ci);applyColVis(id);}
 function showAllCols(id){const t=T(id);t.hiddenCols=new Set();applyColVis(id);const btn=$('colsbtn_'+id);if(btn)openColPicker(id,btn);}
 function hideAllCols(id){const t=T(id);t.hiddenCols=new Set(t.cols.map((_,ci)=>ci));applyColVis(id);const btn=$('colsbtn_'+id);if(btn)openColPicker(id,btn);}
