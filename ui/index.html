@@ -3371,8 +3371,14 @@ function impAddFiles(){browse({title:'Select SQL files',filter:'*.sql',mode:'fil
 function impAddFolder(){browse({title:'Select a folder (imports all .sql inside)',mode:'folder',onPick:async folder=>{const r=await api('/api/browse',{path:folder,filter:'*.sql',dirsOnly:false});if(r.ok){const ps=r.files.map(f=>f.path);impAppend(ps);log('Added '+ps.length+' .sql file(s) from '+folder);}else alert(r.error);}});}
 // ---- close tabs ----
 async function closeAll(){const dirty=tabs.filter(t=>pendingCount(t)>0);if(dirty.length){if(!(await ask(dirty.length+' tab(s) have unsaved changes. Close all and discard them?')))return;}
+ // Same reasoning as closeTab(): a tab being removed while its query is still in flight must go
+ // through cancelQuery() first, or the query keeps running server-side with nothing left to ever
+ // cancel it. closeTab() already does this for a single tab; closeAll/closeOthers used to just rip
+ // the DOM nodes out and drop the tab objects, silently leaking every running query in the batch.
+ await Promise.all(tabs.filter(t=>t.runningReqId).map(t=>cancelQuery(t.id)));
  [...tabs].forEach(t=>{$('tabbtn_'+t.id).remove();$('pane_'+t.id).remove();});tabs=[];activeTab=null;saveSession();toggleOverview();const _sb=$('schemaBadge');if(_sb){_sb.style.display='none';_sb.textContent='';}}
 async function closeOthers(id){const dirty=tabs.filter(t=>t.id!==id&&pendingCount(t)>0);if(dirty.length){if(!(await ask(dirty.length+' other tab(s) have unsaved changes. Close them and discard the changes?')))return;}
+ await Promise.all(tabs.filter(t=>t.id!==id&&t.runningReqId).map(t=>cancelQuery(t.id)));
  tabs.filter(t=>t.id!==id).forEach(t=>{$('tabbtn_'+t.id).remove();$('pane_'+t.id).remove();});tabs=tabs.filter(t=>t.id===id);activate(id);}
 
 // ---- keyboard navigation for side lists ----
@@ -3481,5 +3487,10 @@ if(!(window.__TAURI__)){
 document.body.classList.add('disconnected');
 window.addEventListener('beforeunload',e=>{saveSession();if(anyPending()){e.preventDefault();e.returnValue='';return '';}});
 (function(){function initSideResize(){const sd=$('side'),rz=$('sideResize'),mn=$('main');if(!sd||!rz||!mn){setTimeout(initSideResize,300);return;}const saved=parseInt(localStorage.getItem('sideW')||'',10);if(saved&&saved>=180)sd.style.width=saved+'px';let drag=false;rz.addEventListener('pointerdown',e=>{drag=true;rz.classList.add('drag');try{rz.setPointerCapture(e.pointerId);}catch(_){}document.body.style.userSelect='none';e.preventDefault();});rz.addEventListener('pointermove',e=>{if(!drag)return;const left=mn.getBoundingClientRect().left;let w=e.clientX-left;const max=Math.max(200,window.innerWidth-320);w=Math.max(180,Math.min(w,max));sd.style.width=w+'px';});const end=e=>{if(!drag)return;drag=false;rz.classList.remove('drag');try{rz.releasePointerCapture(e.pointerId);}catch(_){}document.body.style.userSelect='';localStorage.setItem('sideW',String(parseInt(sd.style.width,10)||280));};rz.addEventListener('pointerup',end);rz.addEventListener('pointercancel',end);rz.addEventListener('dblclick',()=>{sd.style.width='280px';localStorage.setItem('sideW','280');});}initSideResize();})();
-if(window.__TAURI__&&window.__TAURI__.window&&window.__TAURI__.window.getCurrentWindow){try{const _w=window.__TAURI__.window.getCurrentWindow();_w.onCloseRequested(async(ev)=>{if(anyPending()){ev.preventDefault();if(await ask('You have unsaved changes in one or more tabs.\n\nClose the app and discard them?')){saveSession();_w.destroy();}}else{saveSession();}});}catch(e){}}
+if(window.__TAURI__&&window.__TAURI__.window&&window.__TAURI__.window.getCurrentWindow){try{const _w=window.__TAURI__.window.getCurrentWindow();_w.onCloseRequested(async(ev)=>{
+ // Quitting with a query still running must cancel it the same way closing its tab would -
+ // otherwise it keeps executing against the DB after the window (and the user's ability to
+ // cancel it) is gone. Fire-and-forget: don't block app exit on the round-trip.
+ tabs.filter(t=>t.runningReqId).forEach(t=>{cancelQuery(t.id);});
+ if(anyPending()){ev.preventDefault();if(await ask('You have unsaved changes in one or more tabs.\n\nClose the app and discard them?')){saveSession();_w.destroy();}}else{saveSession();}});}catch(e){}}
 </script></body></html>
