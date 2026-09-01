@@ -2156,6 +2156,15 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
    const mime=detectImageMime(bytes);
    if(mime){img.src='data:'+mime+';base64,'+bytesToBase64(bytes);img.style.display='block';}
   }
+ } else {
+  ta.style.display='block';
+  ta.value=(text==null?'':text);ta.readOnly=!!opts.readonly;
+ }
+ const a=$('vActions');a.innerHTML='';const add=(label,cls,fn)=>{const b=document.createElement('button');b.textContent=label;if(cls)b.className=cls;b.onclick=fn;a.appendChild(b);};
+ const getVal=()=>{
+  if(opts.multiOptions&&opts.multiOptions.length)return [...multi.querySelectorAll('input:checked')].map(cb=>cb.value).join(',');
+  if(opts.dateType)return nativeDateToMysql(dt.value,opts.dateType);
+  if(opts.hexText)return _vHexState.mode==='text'?textToHex(ta.value):ta.value;
   return opts.options?sel.value:ta.value;
  };
  if(!opts.options&&!opts.multiOptions&&!opts.dateType){
