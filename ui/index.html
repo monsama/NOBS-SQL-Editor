@@ -1789,7 +1789,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     if(r.aborted){if(T(id)){st.className='status';st.textContent='Query cancelled.';}return;}
     if(!T(id))return;
     if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));return;}
-    t.cols=r.columns;t.binCols=r.binaryCols||[];t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
+    t.cols=r.columns;t.binCols=r.binaryCols||[];t.bitCols=r.bitCols||[];t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
     t.cursorId=r.cursorId||null;t.hasMore=!!r.hasMore;t.cursorReqId=t.cursorId?reqId:null;
     if(!r.columns.length){st.textContent=r.message||'Query OK.';$('res_'+id).innerHTML='';updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';return;}
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
@@ -2211,39 +2211,41 @@ function pasteRowIntoIns(id,ii){const t=T(id);const vals=window._rowClipboard;if
  renderGrid(id);log('Pasted copied row into new row. Review and click Apply to commit.');}
 function revertChanges(id){const t=T(id);t.pending={upd:{},del:new Set(),ins:[]};renderGrid(id);}
 async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];const tbl=qid(t.db)+'.'+qid(t.table);
- // updates grouped by row
- const byRow={};Object.keys(t.pending.upd).forEach(k=>{const[ri,ci]=k.split(':').map(Number);(byRow[ri]=byRow[ri]||{})[ci]=t.pending.upd[k];});
- Object.keys(byRow).forEach(ri=>{ri=+ri;const sets=Object.keys(byRow[ri]).map(ci=>qid(t.cols[ci])+'='+lit(byRow[ri][ci]));
-   const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('UPDATE '+tbl+' SET '+sets.join(',')+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
- t.pending.del.forEach(ri=>{const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('DELETE FROM '+tbl+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
- t.pending.ins.forEach(row=>{const cols=Object.keys(row);if(!cols.length)return;S.push('INSERT INTO '+tbl+' ('+cols.map(qid).join(',')+') VALUES ('+cols.map(c=>lit(row[c])).join(',')+');');});
- // A BIT or binary column round-trips as 0x..., and lit() passes that through unquoted. Anything
- // else is quoted, and MySQL then stores the BYTES of the text: typing 8 into a BIT(8) cell
- // stored 56 - the byte value of the character '8' - silently, with no error, because one byte
- // fits in eight bits. Refuse the batch instead of corrupting the column.
  const isHex=v=>/^0x[0-9A-Fa-f]*$/.test(String(v));
- // Two ways to know a column is binary. binaryCols comes from the server, which reads the real
- // column type - available in the Tauri build. Failing that, fall back to the value already in
- // the cell: both builds render a binary/BIT value as 0x..., so replacing one with something
- // else is the same mistake regardless of who reported the type.
- const binAt=(ci,ri)=>(t.binCols&&t.binCols[ci])||(ri!=null&&t.rows[ri]&&t.rows[ri][ci]!=null&&isHex(t.rows[ri][ci]));
+ const isPlainInt=v=>/^-?\d+$/.test(String(v));
+ // bitCols narrows binaryCols (both BIT and true binary/BLOB columns display as 0x.. hex) down
+ // to just the BIT(n) columns, where MySQL also accepts a bare integer literal as the correct
+ // bit pattern - the same thing 0x01/0x00 already meant, just without requiring hex. A real
+ // binary/BLOB column has no such shortcut: typing 8 there and having it stored as the BYTE
+ // 0x38 (the character '8') isn't a mistake to guard against, it's simply what "store this text"
+ // means for a BLOB - so only a BIT column's value is worth validating at all.
+ const bitAt=ci=>!!(t.bitCols&&t.bitCols[ci]);
+ // Same value formatting as lit(), except a plain integer bound for a BIT column goes through
+ // unquoted (MySQL reads it as the bit pattern) instead of being quoted into the bytes of its
+ // own text - lit() itself stays column-agnostic; this is the one place that needs to know more.
+ const litForCol=(ci,v)=>(v!==null&&bitAt(ci)&&!isHex(v)&&isPlainInt(v))?String(v):lit(v);
  const badBin=[];
  Object.keys(t.pending.upd).forEach(k=>{const [ri,ci]=k.split(':').map(Number);
-  if(!binAt(ci,ri))return;
+  if(!bitAt(ci))return;
   const v=t.pending.upd[k];
-  if(v!==null&&!isHex(v)) badBin.push(t.cols[ci]+' = '+JSON.stringify(String(v)));
+  if(v!==null&&!isHex(v)&&!isPlainInt(v)) badBin.push(t.cols[ci]+' = '+JSON.stringify(String(v)));
  });
  t.pending.ins.forEach(row=>{Object.keys(row).forEach(cn=>{const ci=t.cols.indexOf(cn);
-  if(ci<0||!binAt(ci,null))return;
+  if(ci<0||!bitAt(ci))return;
   const v=row[cn];
-  if(v!==null&&!isHex(v)) badBin.push(cn+' = '+JSON.stringify(String(v)));
+  if(v!==null&&!isHex(v)&&!isPlainInt(v)) badBin.push(cn+' = '+JSON.stringify(String(v)));
  });});
  if(badBin.length){
-  alert('These are binary/BIT columns and only accept a 0x value:\n\n'+badBin.join('\n')
-    +'\n\nUse 0x01 for 1, 0x00 for zero. A plain number would be stored as the bytes of its text '
-    +'(8 becomes 56), which MySQL accepts without an error.');
+  alert('These are BIT columns and only accept a plain integer or a 0x hex value:\n\n'+badBin.join('\n')
+    +'\n\nUse 1 or 0x01 for on, 0 or 0x00 for off/zero.');
   return;
  }
+ // updates grouped by row
+ const byRow={};Object.keys(t.pending.upd).forEach(k=>{const[ri,ci]=k.split(':').map(Number);(byRow[ri]=byRow[ri]||{})[ci]=t.pending.upd[k];});
+ Object.keys(byRow).forEach(ri=>{ri=+ri;const sets=Object.keys(byRow[ri]).map(ci=>qid(t.cols[ci])+'='+litForCol(+ci,byRow[ri][ci]));
+   const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('UPDATE '+tbl+' SET '+sets.join(',')+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
+ t.pending.del.forEach(ri=>{const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('DELETE FROM '+tbl+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
+ t.pending.ins.forEach(row=>{const cols=Object.keys(row);if(!cols.length)return;S.push('INSERT INTO '+tbl+' ('+cols.map(qid).join(',')+') VALUES ('+cols.map(c=>litForCol(t.cols.indexOf(c),row[c])).join(',')+');');});
  if(!S.length)return;log('APPLY:\n'+S.join('\n'));
  // Runs as one transaction, so a failure part-way leaves the table exactly as it was.
  // Foreign keys are NOT disabled here: they were, which let an edit point a row at a
