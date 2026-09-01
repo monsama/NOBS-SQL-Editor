@@ -93,6 +93,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  .modal.show{display:flex} .box{background:var(--bg);color:var(--fg);border-radius:6px;padding:16px;max-width:900px;width:94%;max-height:92%;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.4)}
  .box h3{margin:0 0 10px} .grid2{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px}
  label.ck{display:block;padding:2px 0} .row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap} .muted{color:var(--muted);font-size:12px}
+ #vActions{justify-content:flex-end}
  #ctx{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:180px}
  #colPicker{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
  #copyMenu{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
@@ -188,7 +189,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
   <label title="Add the CSV rows to the existing table (does not delete anything)"><input type="radio" name="csvmode" id="csvAppend" checked> Append</label>
   <label title="Empty the table first, then load (use this to restore a table from its own export)"><input type="radio" name="csvmode" id="csvReplace"> Replace (truncate first)</label><label style="margin-left:14px" title="A cell holding exactly this is imported as NULL. Clear it to treat empty cells as NULL instead.">NULL value <input id="csvNullVal" value="\N" style="width:52px;font-family:Consolas,monospace"></label></div>
  <div class="muted" style="font-size:11px">Columns are matched to the table by header name; unmatched CSV columns are ignored. A cell equal to the NULL value below is imported as NULL; an empty cell is imported as an empty string. Clear the NULL value to import empty cells as NULL instead, which is usually what a spreadsheet means. For an exact restore of a whole database, prefer Export/Import (mysqldump).</div>
- <div class="row"><button class="go" onclick="runCsvImport()">Import</button><button onclick="hide('mCsv')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button class="go" onclick="runCsvImport()">Import</button><button onclick="hide('mCsv')">Close</button></div>
  <div id="csvLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:200px;overflow:auto;margin-top:6px"></div></div></div>
 <div class="modal floating" id="mExport"><div class="box" style="top:80px;left:120px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mExport')" title="Drag to move"><h3 style="margin:0">Data Export</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mExport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="row"><b>Databases</b> <button onclick="expAll(true)">All</button><button onclick="expAll(false)">None</button></div>
@@ -200,7 +201,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
   <label title="mysqldump --max-allowed-packet. Raise this for very large rows or BLOBs (e.g. 1G).">max packet <input id="expMaxPacket" value="1G" style="width:56px"></label>
   <label id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none">filename <input id="expFilename" placeholder="all_selected" style="width:120px"></label></div>
  <div class="row">Folder <input id="expFolder" style="flex:1" value="C:\temp"><button onclick="browse({title:'Select export folder',mode:'folder',start:$('expFolder').value,onPick:pp=>$('expFolder').value=pp})">Browse...</button></div>
- <div class="row"><button class="go" id="expGoBtn" onclick="runExport()">Start Export</button><button class="warn" id="expCancelBtn" disabled onclick="cancelJob('exp')">Cancel</button><button onclick="hide('mExport')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button class="go" id="expGoBtn" onclick="runExport()">Start Export</button><button class="warn" id="expCancelBtn" disabled onclick="cancelJob('exp')">Cancel</button><button onclick="hide('mExport')">Close</button></div>
  <div id="expProgress" style="display:none;margin-top:8px">
    <div style="height:6px;border-radius:3px;background:var(--panel2);overflow:hidden"><div id="expBar" style="height:100%;width:40%;background:var(--accent);animation:expmove 1.1s ease-in-out infinite"></div></div>
    <div id="expProgLabel" class="muted" style="font-size:11px;margin-top:4px"></div>
@@ -212,7 +213,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row"><button onclick="impAddFiles()">Add files...</button><button onclick="impAddFolder()">Add folder (all .sql)...</button><button class="sm" onclick="$('impFiles').value=''">Clear</button></div>
  <div class="row">Target DB <input id="impDb" list="impDbList" placeholder="(blank if dump has CREATE DATABASE)" style="width:320px"><datalist id="impDbList"></datalist></div>
  <div class="row"><label title="Create the target database first if it doesn't exist"><input type="checkbox" id="impCreate"> create DB</label><label title="Disable foreign-key and unique checks during import (for out-of-order or circular tables)"><input type="checkbox" id="impFk" checked> disable FK checks</label><label title="Keep going when a file or statement fails instead of stopping (mysql --force)"><input type="checkbox" id="impForce"> continue on errors</label><label title="Required if the dump contains raw NUL bytes in binary/text columns (fixes: ASCII '\0' appeared in the statement). Safe to leave on for any dump that might contain binary data."><input type="checkbox" id="impBinary"> binary-mode</label><label title="mysql --max-allowed-packet. Raise this to match (or exceed) whatever the dump was exported with - a file created with a bumped packet size (needed for extended-insert with large rows/BLOBs) can otherwise fail to re-import with &quot;MySQL server has gone away&quot; against this client's smaller default (16M).">max packet <input id="impMaxPacket" value="1G" style="width:56px"></label></div>
- <div class="row"><button class="go" id="impGoBtn" onclick="runImport()">Run Import</button><button class="warn" id="impCancelBtn" disabled onclick="cancelJob('imp')">Cancel</button><button onclick="hide('mImport')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button class="go" id="impGoBtn" onclick="runImport()">Run Import</button><button class="warn" id="impCancelBtn" disabled onclick="cancelJob('imp')">Cancel</button><button onclick="hide('mImport')">Close</button></div>
  <div id="impProgress" style="display:none;margin-top:8px">
    <div style="height:6px;border-radius:3px;background:var(--panel2);overflow:hidden"><div id="impBar" style="height:100%;width:40%;background:var(--accent);animation:expmove 1.1s ease-in-out infinite"></div></div>
    <div id="impProgLabel" class="muted" style="font-size:11px;margin-top:4px"></div>
@@ -278,7 +279,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row"><b>Exclude these accounts</b> <input id="utExclude" style="flex:1" value="mysql.sys,root,debian-sys-maint,mariadb.sys,healthcheck,mariabackup,galera,replica,PUBLIC"></div>
  <div class="row"><button class="go" onclick="genUserTransfer()">Generate</button><span id="utStatus" class="muted" style="margin-left:8px"></span></div>
  <textarea id="utResult" readonly style="width:100%;height:340px;box-sizing:border-box;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px;margin-top:8px"></textarea>
- <div class="row"><button onclick="copyUserTransfer()">Copy</button><button onclick="saveUserTransferFile()">Save to file...</button><button onclick="hide('mUserTransfer')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button onclick="copyUserTransfer()">Copy</button><button onclick="saveUserTransferFile()">Save to file...</button><button onclick="hide('mUserTransfer')">Close</button></div>
 </div></div>
 
 <div class="modal floating" id="mProcessList"><div class="box" style="width:900px;max-width:96vw;top:40px;left:140px" id="mProcessListBox"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mProcessList')" title="Drag to move"><h3 style="margin:0">Server Processes</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mProcessList')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
@@ -305,7 +306,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 
 <div class="modal floating" id="mHist"><div class="box" style="top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mHist')" title="Drag to move"><h3 style="margin:0">Query History</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mHist')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div id="histList" style="max-height:400px;overflow:auto"></div>
- <div class="row"><button class="warn" onclick="clearHistory()">Clear history</button><button onclick="hide('mHist')">Close</button></div></div></div>
+ <div class="row" style="justify-content:flex-end"><button class="warn" onclick="clearHistory()">Clear history</button><button onclick="hide('mHist')">Close</button></div></div></div>
 <div class="modal floating" id="mRowForm"><div class="box" style="width:560px;max-width:94vw;top:70px;left:160px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mRowForm')" title="Drag to move"><h3 id="rfTitle" style="margin:0">Edit row</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mRowForm')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div id="rfFields" style="max-height:60vh;overflow:auto"></div>
  <div class="row" style="justify-content:flex-end;margin-top:6px"><button class="go" onclick="rfSave()">Save to pending</button><button onclick="hide('mRowForm')">Cancel</button></div></div></div>
@@ -372,7 +373,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <table class="dz"><thead><tr><th>Column</th><th>Type</th><th>Length</th><th title="NOT NULL">NN</th><th title="AUTO_INCREMENT">AI</th><th title="PRIMARY KEY">PK</th><th>Default</th><th>Comment</th><th></th></tr></thead><tbody id="dCols"></tbody></table>
  <div class="row"><button onclick="dAddCol()">+ Column</button></div>
  <div class="row">Generated SQL: <span id="dEditNote" class="muted" style="color:#b26a00"></span></div><textarea id="dSql" oninput="dMark()" style="width:100%;height:120px;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace"></textarea>
- <div class="row"><button title="Rebuild the SQL from the column grid (discards manual edits in the box)" onclick="dGen(true)">Regenerate from columns</button><button class="go write" title="Run the SQL shown above against the database - creates the table if it's new, or alters it if it already exists" onclick="dApply()">Apply</button><button onclick="hide('mDesign')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button title="Rebuild the SQL from the column grid (discards manual edits in the box)" onclick="dGen(true)">Regenerate from columns</button><button class="go write" title="Run the SQL shown above against the database - creates the table if it's new, or alters it if it already exists" onclick="dApply()">Apply</button><button onclick="hide('mDesign')">Close</button></div>
  <div id="dLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:220px;overflow:auto;margin-top:6px"></div></div></div>
 
 <script>
@@ -2177,6 +2178,9 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
    if(isJson&&!opts.readonly)add('Format JSON','',()=>{try{ta.value=JSON.stringify(JSON.parse(ta.value),null,2);}catch(e){}});
   }
  }
+ // Order: utility actions, then Set NULL, then Save, then Close last - matching every other
+ // modal's own action-row convention in this app (Save/Apply/Import/Run.../then Close), not a
+ // one-off choice for just this dialog.
  if(opts.onNull)add('Set NULL','',()=>{opts.onNull();hide('mView');});
  if(opts.onSave)add('Save','go',()=>{opts.onSave(getVal());hide('mView');});
  add('Close','',()=>hide('mView'));
