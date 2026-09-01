@@ -1085,11 +1085,12 @@ const OBJ_TYPES=[['table','Tables'],['view','Views'],['procedure','Procedures'],
 window._objTypeFilter=window._objTypeFilter||new Set(OBJ_TYPES.map(t=>t[0]));
 function setObjTypeVis(type,visible){const s=window._objTypeFilter;if(visible)s.add(type);else s.delete(type);renderObjects();}
 function showAllObjTypes(){window._objTypeFilter=new Set(OBJ_TYPES.map(t=>t[0]));renderObjects();const btn=$('objTypeBtn');if(btn)openObjTypePicker(btn);}
+function hideAllObjTypes(){window._objTypeFilter=new Set();renderObjects();const btn=$('objTypeBtn');if(btn)openObjTypePicker(btn);}
 // Same toggle-close behavior as the Columns picker - a second click on the Types button while
 // its own picker is already open closes it, instead of relying only on the outside-click listener.
 function toggleObjTypePicker(btn){const p=$('objTypePicker');if(p&&p.style.display==='block'){p.style.display='none';return;}openObjTypePicker(btn);}
 function openObjTypePicker(btn){const p=$('objTypePicker');const s=window._objTypeFilter;
- let h='<div class="cphdr"><span>Show/hide object types</span><span class="cplink" onclick="showAllObjTypes()">Show all</span></div>';
+ let h='<div class="cphdr"><span>Show/hide object types</span><span><span class="cplink" onclick="showAllObjTypes()">Show all</span> · <span class="cplink" onclick="hideAllObjTypes()">Hide all</span></span></div>';
  OBJ_TYPES.forEach(([type,label])=>{h+='<label class="cpitem"><input type="checkbox" '+(s.has(type)?'checked':'')+' onchange="setObjTypeVis(\''+type+'\',this.checked)"> '+label+'</label>';});
  p.innerHTML=h;
  p.style.display='block';p.style.visibility='hidden';p.style.left='0';p.style.top='0';
@@ -1956,17 +1957,26 @@ function wireColResize(id){const wrap=$('res_'+id);if(!wrap)return;const table=w
 function autofitAll(id,retries){const t=T(id);if(!t.cols||!t.cols.length)return;const off=(!!t.pk)?2:1;const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;
  if(wrap.clientWidth<150){if((retries||0)<5){requestAnimationFrame(()=>autofitAll(id,(retries||0)+1));}return;}
  t.colsFitted=true;
- const hidden=t.hiddenCols||new Set();const n=t.cols.length;const w=[];const heads=table.querySelectorAll('thead tr:first-child th');for(let ci=0;ci<n;ci++){if(hidden.has(ci)){w[ci]=0;continue;}let mx=heads[ci+off]?heads[ci+off].scrollWidth:60;const cells=table.querySelectorAll('tbody td:nth-child('+(ci+off+1)+')');for(let i=0;i<cells.length;i++){mx=Math.max(mx,cells[i].scrollWidth);}w[ci]=Math.min(Math.max(60,mx+18),400);}const visCount=n-hidden.size;const fixed=30+(off===2?34:0);let sum=fixed;for(let i=0;i<n;i++)sum+=w[i];const avail=wrap.clientWidth-2;if(avail>sum&&visCount>0){const extra=Math.floor((avail-sum)/visCount);for(let i=0;i<n;i++){if(!hidden.has(i))w[i]+=extra;}}for(let ci=0;ci<n;ci++){const col=cg.children[ci+off];if(col&&!hidden.has(ci))col.style.width=w[ci]+'px';}}
+ const hidden=t.hiddenCols||new Set();const n=t.cols.length;
+ // Collapse every visible column to a sliver first, so the scrollWidth measurement below reads
+ // each cell's true content width. Skipping this let a column's PREVIOUS (already autofit-
+ // widened) width leak back in as its own "content width" - with table-layout:fixed, a cell no
+ // longer overflows once its column is wide enough, so scrollWidth just reports the current
+ // (inflated) column width instead - and each repeat call (e.g. clicking "Show all" again) piled
+ // more "extra" padding on top of that, so columns kept growing forever instead of settling.
+ for(let ci=0;ci<n;ci++){const col=cg.children[ci+off];if(col&&!hidden.has(ci))col.style.width='2px';}
+ const w=[];const heads=table.querySelectorAll('thead tr:first-child th');for(let ci=0;ci<n;ci++){if(hidden.has(ci)){w[ci]=0;continue;}let mx=heads[ci+off]?heads[ci+off].scrollWidth:60;const cells=table.querySelectorAll('tbody td:nth-child('+(ci+off+1)+')');for(let i=0;i<cells.length;i++){mx=Math.max(mx,cells[i].scrollWidth);}w[ci]=Math.min(Math.max(60,mx+18),400);}const visCount=n-hidden.size;const fixed=30+(off===2?34:0);let sum=fixed;for(let i=0;i<n;i++)sum+=w[i];const avail=wrap.clientWidth-2;if(avail>sum&&visCount>0){const extra=Math.floor((avail-sum)/visCount);for(let i=0;i<n;i++){if(!hidden.has(i))w[i]+=extra;}}for(let ci=0;ci<n;ci++){const col=cg.children[ci+off];if(col&&!hidden.has(ci))col.style.width=w[ci]+'px';}}
 function applyColVis(id){const t=T(id);const ed=!!t.pk;const off=ed?2:1;const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const hidden=t.hiddenCols||new Set();t.cols.forEach((c,ci)=>{const col=cg.children[ci+off];if(col)col.style.display=hidden.has(ci)?'none':'';});autofitAll(id);}
 function setColVis(id,ci,visible){const t=T(id);if(!t.hiddenCols)t.hiddenCols=new Set();if(visible)t.hiddenCols.delete(ci);else t.hiddenCols.add(ci);applyColVis(id);}
 function showAllCols(id){const t=T(id);t.hiddenCols=new Set();applyColVis(id);const btn=$('colsbtn_'+id);if(btn)openColPicker(id,btn);}
+function hideAllCols(id){const t=T(id);t.hiddenCols=new Set(t.cols.map((_,ci)=>ci));applyColVis(id);const btn=$('colsbtn_'+id);if(btn)openColPicker(id,btn);}
 // Toggles: a second click on the SAME Columns button while its picker is already open closes
 // it, instead of only closing via the document-level "click outside" listener (which never even
 // sees this click, since the button's own onclick calls stopPropagation() first).
 function toggleColPicker(id,btn){const p=$('colPicker');if(p&&p.style.display==='block'&&p.dataset.forId===id){p.style.display='none';return;}openColPicker(id,btn);}
 function openColPicker(id,btn){const t=T(id);if(!t||!t.cols)return;if(!t.hiddenCols)t.hiddenCols=new Set();
  const p=$('colPicker');p.dataset.forId=id;
- let h='<div class="cphdr"><span>Show/hide columns</span><span class="cplink" onclick="showAllCols(\''+id+'\')">Show all</span></div>';
+ let h='<div class="cphdr"><span>Show/hide columns</span><span><span class="cplink" onclick="showAllCols(\''+id+'\')">Show all</span> · <span class="cplink" onclick="hideAllCols(\''+id+'\')">Hide all</span></span></div>';
  t.cols.forEach((c,ci)=>{h+='<label class="cpitem"><input type="checkbox" '+(t.hiddenCols.has(ci)?'':'checked')+' onchange="setColVis(\''+id+'\','+ci+',this.checked)"> '+esc(c)+'</label>';});
  p.innerHTML=h;
  p.style.display='block';p.style.visibility='hidden';p.style.left='0';p.style.top='0';
