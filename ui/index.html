@@ -918,45 +918,51 @@ function updateStatusLine(id){const t=T(id);if(!t||!t.rows)return;const st=$('st
   const viewLabel=(t.rows.length>0)?(' View shows '+viewRangeLabel(id)+'.'):'';
   const ms=(t.lastElapsedMs!=null)?(' '+t.lastElapsedMs+' ms'):'';
   st.className='status';
-  const moreLabel=t.hasMore?'  |  more rows available - Fetch next '+PAGE_BATCH+' rows':'';
+  const moreLabel=t.hasMore?'  |  more rows available - scroll down or click Next to load more':'';
   st.textContent=rowLabel+viewLabel+ms+moreLabel+(t.pk?('  |  editable PK: '+t.pk.join(', ')):'');
 }
-// Shows/hides the "Fetch next N rows" button based on t.hasMore - called after every fetch
-// (first run and each subsequent batch) so it tracks the tab's current pagination state.
-function updateFetchMoreBtn(id){const b=$('fetchmore_'+id);if(!b)return;const t=T(id);b.style.display=(t&&t.hasMore)?'':'none';}
 // Tears down a tab's open result cursor (if any), server-side, and forgets it locally. Fire-and-
 // forget - cursor teardown must never hold up tab close/replace/app-quit for a round trip - and
 // a safe no-op when there's nothing open (close_cursor tolerates an unknown/already-gone id).
 // Distinct from cancelQuery(): that stops an ACTIVELY RUNNING query via KILL QUERY; this closes
-// an IDLE cursor that's simply waiting for more "Fetch next" calls. A tab can have either, both,
-// or neither open at a given moment.
+// an IDLE cursor that's simply waiting to be read from further. A tab can have either, both, or
+// neither open at a given moment.
 function closeCursorFor(t){if(t&&t.cursorId){api('/api/close-cursor',{cursorId:t.cursorId});t.cursorId=null;t.cursorReqId=null;}}
-// Fetches the next PAGE_BATCH rows from the tab's open cursor and APPENDS them to t.rows in
-// place - Workbench-style "fetch next" - then re-renders the grid and status line so it grows
-// without disturbing what's already loaded (including any in-progress edits, which key off row
-// identity via t.pk, not row count). Reads straight from the already-open server-side result set
-// (no re-running the query, no OFFSET rescan) via fetch_cursor_batch.
+// Pulls the next PAGE_BATCH rows from the tab's open cursor and APPENDS them to t.rows in place,
+// then re-renders the grid/pager/status line so the newly-available rows show up without
+// disturbing what's already loaded (including any in-progress edits, which key off row identity
+// via t.pk, not row count). Reads straight from the already-open server-side result set (no
+// re-running the query, no OFFSET rescan) via fetch_cursor_batch.
+//
+// There is deliberately no standalone "Fetch more" button - reaching the loaded boundary via the
+// pager's own Next (pg()) or by scrolling near the bottom of the grid (see the scroll listener in
+// renderGrid) triggers this the same way clicking one would have, so paging/scrolling never just
+// dead-ends while more is actually available. Concurrent callers are fine: t.fetchingMore makes a
+// second call (e.g. a scroll event firing while Next's own fetch is still in flight) a no-op.
+//
 // Reuses the exact same Run/Cancel toggle and t.runningReqId the initial run uses: the backend
 // keeps this cursor's connection registered under its original requestId (t.cursorReqId) for the
-// cursor's whole life, so clicking Cancel during a slow "fetch next" KILL QUERYs it exactly like
+// cursor's whole life, so clicking Cancel during a slow fetch KILL QUERYs it exactly like
 // cancelling the first page does - not just during the very first fetch.
 async function fetchNextBatch(id){
  const t=T(id);if(!t||!t.hasMore||t.fetchingMore)return;
- if(!t.cursorId){toast('Nothing to fetch - run a query first.',true);return;}
- const btn=$('fetchmore_'+id);t.fetchingMore=true;
- const prevLabel=btn?btn.textContent:null;if(btn){btn.disabled=true;btn.textContent='Fetching…';}
+ if(!t.cursorId)return;
+ t.fetchingMore=true;
  t.runningReqId=t.cursorReqId;setRunning(id,true);
  try{
   const r=await api('/api/fetch-cursor-batch',{cursorId:t.cursorId,requestId:t.cursorReqId,pageSize:PAGE_BATCH});
   if(!T(id))return;
-  if(!r.ok){toast(r.error,true);log(logErr(r.error));t.hasMore=false;t.cursorId=null;t.cursorReqId=null;updateFetchMoreBtn(id);return;}
+  if(!r.ok){toast(r.error,true);log(logErr(r.error));t.hasMore=false;t.cursorId=null;t.cursorReqId=null;updatePager(id);return;}
   t.rows=(t.rows||[]).concat(r.rows);
   t.hasMore=!!r.hasMore;
   if(!t.hasMore){t.cursorId=null;t.cursorReqId=null;} // server already closed it once exhausted
-  renderGrid(id);updatePager(id);updateFetchMoreBtn(id);
+  // renderBody (not renderGrid) deliberately: it only rewrites tbody's own innerHTML, not the
+  // scrollable wrap element's - renderGrid replacing wrap's innerHTML resets scrollTop to 0,
+  // which would yank the view back to the top on every background scroll-triggered prefetch.
+  renderBody(id);updatePager(id);updateStatusLine(id);
   log('Fetched '+fmtCount(r.rows.length)+' more row(s), '+fmtCount(t.rows.length)+' total loaded.');
  }catch(e){toast(String(e),true);}
- finally{t.fetchingMore=false;if(btn){btn.disabled=false;btn.textContent=prevLabel;}updateFetchMoreBtn(id);if(T(id)){t.runningReqId=null;setRunning(id,false);}}
+ finally{t.fetchingMore=false;if(T(id)){t.runningReqId=null;setRunning(id,false);}}
 }
 let objData=null;
 async function loadObjects(db) {
@@ -1411,7 +1417,6 @@ function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqu
   '<span class="tbsep"></span>'+
   '<span id="resultActions_'+id+'" style="display:none;gap:9px;align-items:center" class="tbgroup">'+
   '<button title="Copy the grid to the clipboard, as CSV or Markdown, all rows or just the selected (checked) ones (binary/control-character values are copied as 0x... hex text, not the literal bytes)" onclick="event.stopPropagation();toggleCopyMenu(\''+id+'\',this)">Copy \u25BE</button>'+'<button class="sm" id="wrapbtn_'+id+'" title="Toggle text wrapping in the grid" onclick="toggleWrap(\''+id+'\')">Wrap: Off</button>'+'<button class="sm" id="colsbtn_'+id+'" title="Show or hide columns" onclick="event.stopPropagation();toggleColPicker(\''+id+'\',this)">Columns</button>'+
-  '<button class="sm" id="fetchmore_'+id+'" style="display:none" title="Fetch the next '+PAGE_BATCH+' rows from the server and add them to the grid" onclick="fetchNextBatch(\''+id+'\')">Fetch next '+PAGE_BATCH+' rows</button>'+
   '<span class="tbsep"></span></span>'+
   '<span style="flex:1 1 auto"></span>'+
   '<span id="edit_'+id+'" style="display:inline-flex;align-items:center;gap:6px"></span>'+pager+'</div>'+
@@ -1779,7 +1784,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     if(!T(id))return;
     if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));return;}
     t.cols=r.columns;t.binCols=r.binaryCols||[];t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
-    t.cursorId=r.cursorId||null;t.hasMore=!!r.hasMore;t.cursorReqId=t.cursorId?reqId:null;updateFetchMoreBtn(id);
+    t.cursorId=r.cursorId||null;t.hasMore=!!r.hasMore;t.cursorReqId=t.cursorId?reqId:null;
     if(!r.columns.length){st.textContent=r.message||'Query OK.';$('res_'+id).innerHTML='';updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';return;}
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
     if(t.table){const pk=await api('/api/pk',{db:t.db,table:t.table});if(pk.ok&&pk.pk.length){t.pk=pk.pk;t.pending={upd:{},del:new Set(),ins:[]};}
@@ -1842,11 +1847,33 @@ async function cancelQuery(id){const t=T(id);if(!t)return;if(t.abortCtrl){try{t.
  log('Cancel requested.');}
 
 function updatePager(id){const t=T(id);const p=$('pager_'+id);if(!p)return;const total=(t._total!=null?t._total:(t.rows?t.rows.length:0));if(!total){p.innerHTML='';return;}
- const ps=t.limit||1000;const off=t.offset||0;const shown=Math.min(ps,Math.max(0,total-off));const prevDis=off<=0?' disabled':'';const nextDis=(off+ps>=total)?' disabled':'';
- const label=(total===0)?'0 rows':((off+1)+'-'+(off+shown)+' of '+total);
+ const ps=t.limit||1000;const off=t.offset||0;const shown=Math.min(ps,Math.max(0,total-off));const prevDis=off<=0?' disabled':'';
+ // Next stays enabled past the loaded boundary as long as the server has more (t.hasMore) - pg()
+ // fetches the next batch first in that case, rather than the button just going dead once you've
+ // paged through everything loaded so far.
+ const nextDis=(off+ps>=total&&!t.hasMore)?' disabled':'';
+ const totalLabel=total+(t.hasMore?'+':'');
+ const label=(total===0)?'0 rows':((off+1)+'-'+(off+shown)+' of '+totalLabel);
  p.innerHTML='<span>Limit</span><input id="lim_'+id+'" type="number" min="1" value="'+t.limit+'" title="Rows per page (Enter to apply)" onchange="setLimit(\''+id+'\')" onkeydown="if(event.key===\'Enter\')setLimit(\''+id+'\')" style="width:70px"><button'+prevDis+' onclick="pg(\''+id+'\',-1)">Previous</button><button'+nextDis+' onclick="pg(\''+id+'\',1)">Next</button><span class="muted">'+label+'</span>';}
 function setLimit(id){const t=T(id);const v=Math.max(1,parseInt($('lim_'+id).value)||1000);if(v===t.limit)return;t.limit=v;t.offset=0;pageShow(id);}
-function pg(id,dir){const t=T(id);t.limit=Math.max(1,parseInt($('lim_'+id).value)||1000);const total=(t._total!=null?t._total:(t.rows?t.rows.length:0));let no=(t.offset||0)+dir*t.limit;if(no<0)no=0;if(no>=total)no=Math.max(0,(t.offset||0));t.offset=no;pageShow(id);}
+// Advancing past the last loaded page fetches the next batch from the server first (if there is
+// one) and only then moves the view forward - so Next never just dead-ends while the table
+// actually has more rows, matching the pager's own "X+ " total hint. Going backwards or paging
+// within already-loaded rows never touches the network.
+async function pg(id,dir){
+ const t=T(id);t.limit=Math.max(1,parseInt($('lim_'+id).value)||1000);
+ let total=(t._total!=null?t._total:(t.rows?t.rows.length:0));
+ let no=(t.offset||0)+dir*t.limit;
+ if(no<0)no=0;
+ if(no>=total){
+  if(dir>0&&t.hasMore){
+   await fetchNextBatch(id);
+   total=(t._total!=null?t._total:(t.rows?t.rows.length:0));
+  }
+  if(no>=total)no=Math.max(0,(t.offset||0));
+ }
+ t.offset=no;pageShow(id);
+}
 function toggleLast(id){const t=T(id);const ta=$('ed_'+id);if(t.prevRun==null){log('No previous query to toggle to yet.');return;}ta.value=t.prevRun;if(typeof syncHl==='function')syncHl(id);runSql(id,t.prevRun);}
 function toggleAll(id){const t=T(id);if(!t.table)return;const ta=$('ed_'+id);const base='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+' LIMIT '+(t.limit||1000)+';';const cur=(ta.value||'').trim();if(cur!==base.trim()){t.beforeAll=ta.value;ta.value=base;}else if(t.beforeAll!=null){ta.value=t.beforeAll;}else{ta.value=base;}if(typeof syncHl==='function')syncHl(id);runSql(id,ta.value);}
 async function openRun(id){const t=T(id);const wh=t.filter?(' WHERE '+t.filter):'';const sql='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+wh+' LIMIT 1000;';$('ed_'+id).value=sql;syncHl(id);t.offset=0;await runSql(id,sql);updateFilterBar(id);}
@@ -1954,8 +1981,21 @@ function renderGrid(id){const t=T(id);const ed=!!t.pk;if(!t.filters)t.filters={}
  h+='</tr></thead><tbody id="tbody_'+id+'"></tbody></table>';
  $('res_'+id).innerHTML=h;renderBody(id);syncFilterRowTop(id);requestAnimationFrame(()=>autofitAll(id));wireColResize(id);updateStatusLine(id);refreshTabDirty(id);
  const wrap=$('res_'+id);if(wrap&&!wrap.dataset.kbWired){wrap.tabIndex=-1;wrap.addEventListener('keydown',e=>gridKeyNav(id,e));wrap.addEventListener('mousedown',e=>{const td=e.target.closest('td.editable');if(td){const tr=td.closest('tr[data-r]');if(tr){const ri=+tr.getAttribute('data-r');const t2=T(id);const off=(!!t2.pk)?2:1;const ci=[...tr.children].indexOf(td)-off;if(ci>=0)gridSetFocus(id,ri,ci,false);}}});
-  let _vraf=null;wrap.addEventListener('scroll',()=>{if(_vraf)return;_vraf=requestAnimationFrame(()=>{_vraf=null;renderBody(id);});});
+  let _vraf=null;wrap.addEventListener('scroll',()=>{if(_vraf)return;_vraf=requestAnimationFrame(()=>{_vraf=null;renderBody(id);maybePrefetchNextBatch(id,wrap);});});
   wrap.dataset.kbWired='1';}}
+// Silently tops up a tab's loaded rows once the user scrolls near the bottom of the currently
+// shown page, so continuing to scroll (or clicking Next right after) rarely hits a round-trip
+// wall - mirrors how DBeaver/DataGrip transparently extend a result set near the end of what's
+// loaded rather than requiring a separate "load more" click. Only fires on the LAST loaded page
+// (there's nothing to top up otherwise) and is a safe no-op mid-fetch (fetchNextBatch's own
+// t.fetchingMore guard) or once the cursor is exhausted (t.hasMore false).
+function maybePrefetchNextBatch(id,wrap){
+ const t=T(id);if(!t||!t.hasMore||t.fetchingMore||!wrap)return;
+ const total=(t._total!=null?t._total:(t.rows?t.rows.length:0));
+ const ps=t.limit||1000,off=t.offset||0;
+ if(off+ps<total)return;
+ if((wrap.scrollTop+wrap.clientHeight)>=(wrap.scrollHeight-200))fetchNextBatch(id);
+}
 function toggleWrap(id){const t=T(id);t.wrap=!t.wrap;const wrap=$('res_'+id);if(wrap)wrap.classList.toggle('wraptext',t.wrap);const btn=$('wrapbtn_'+id);if(btn)btn.textContent='Wrap: '+(t.wrap?'On':'Off');}
 // The filter row's sticky "top" offset needs to sit at exactly the main header row's actual
 // height, or a gap opens up between them that the first scrolled-past data row peeks through -
