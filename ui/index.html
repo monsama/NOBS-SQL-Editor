@@ -99,7 +99,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  #ctx{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:180px}
  #colPicker,#objTypePicker{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
  #copyMenu{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
- .cphdr{display:flex;justify-content:space-between;align-items:center;padding:4px 12px 6px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--bd2);margin-bottom:4px}
+ .cphdr{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:4px 12px 6px;font-size:11px;color:var(--muted);border-bottom:1px solid var(--bd2);margin-bottom:4px}
  .cplink{color:var(--accent);cursor:pointer}
  .cpitem{display:flex;align-items:center;gap:6px;padding:3px 12px;font-size:12px;cursor:pointer;white-space:nowrap}
  .cpitem:hover{background:var(--hover,rgba(127,127,127,.12))}
@@ -2178,6 +2178,9 @@ function switchHexTab(mode){
  _vHexState.mode=mode;updateHexTabButtons();
 }
 function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;const ta=$('vText');const sel=$('vSelect');const multi=$('vMulti');const dt=$('vDate');const hexTabs=$('vHexTabs');const img=$('vImg');
+ // A date/time value only needs room for the native picker widget, not the full 780px meant for
+ // long text - a narrower modal reads much better for a single date/time/datetime cell.
+ $('mView').querySelector('.box').style.maxWidth=opts.dateType?'380px':'780px';
  ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';hexTabs.style.display='none';img.style.display='none';img.removeAttribute('src');_vHexState=null;
  // Checkbox mode: SET columns, whose valid values are any comma-joined COMBINATION of the
  // column's defined members - unlike ENUM (exactly one value), a single dropdown can't represent
