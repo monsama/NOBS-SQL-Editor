@@ -183,11 +183,11 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div id="brList" style="height:340px;overflow:auto;border:1px solid var(--bd2);padding:2px"></div>
  <div class="row"><span id="brActions"></span><span style="flex:1"></span><button onclick="brClose()">Cancel</button></div></div></div>
 
-<div class="modal floating" id="mView"><div class="box" style="width:780px;max-width:95vw;display:flex;flex-direction:column;overflow:hidden;top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mView')" title="Drag to move"><h3 id="vTitle" style="margin:0 0 10px">Value</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mView')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
+<div class="modal floating" id="mView"><div class="box" style="width:1000px;max-width:95vw;display:flex;flex-direction:column;overflow:hidden;top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mView')" title="Drag to move"><h3 id="vTitle" style="margin:0 0 10px">Value</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mView')" title="Maximize" id="maxBtn_mView" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mView')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
  <img id="vImg" style="display:none;max-width:100%;max-height:340px;margin-bottom:6px;border:1px solid var(--bd);border-radius:3px;flex:none">
- <textarea id="vText" style="width:100%;height:340px;flex:1;min-height:0;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px"></textarea>
+ <textarea id="vText" style="width:100%;height:520px;flex:1;min-height:0;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px"></textarea>
  <select id="vSelect" style="width:100%;display:none;padding:8px;font-size:13px;flex:none"></select>
- <div id="vMulti" style="width:100%;display:none;max-height:340px;overflow:auto;padding:8px;border:1px solid var(--bd);border-radius:3px;background:var(--in);box-sizing:border-box;font-size:13px;flex:1;min-height:0"></div>
+ <div id="vMulti" style="width:100%;display:none;max-height:520px;overflow:auto;padding:8px;border:1px solid var(--bd);border-radius:3px;background:var(--in);box-sizing:border-box;font-size:13px;flex:1;min-height:0"></div>
  <input id="vDate" style="width:100%;display:none;padding:8px;font-size:13px;box-sizing:border-box;flex:none">
  <div class="row" style="justify-content:flex-end;align-items:center;flex:none">
   <div id="vHexTabs" style="display:none;gap:6px;margin-right:auto"><button id="vTabText" onclick="switchHexTab('text')">Text</button><button id="vTabHex" onclick="switchHexTab('hex')">Hex</button></div>
@@ -222,7 +222,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 <div class="modal floating" id="mImport"><div class="box" style="width:900px;max-width:95vw;top:80px;left:200px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mImport')" title="Drag to move"><h3 style="margin:0 0 10px">Data Import</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mImport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div><div class="row">SQL file paths (one per line):</div>
  <textarea id="impFiles" style="width:100%;height:90px;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;white-space:pre;overflow:auto"></textarea>
  <div class="row"><button onclick="impAddFiles()">Add files...</button><button onclick="impAddFolder()">Add folder (all .sql)...</button><button class="sm" onclick="$('impFiles').value=''">Clear</button></div>
- <div class="row">Target DB <input id="impDb" placeholder="(blank if dump has CREATE DATABASE)" style="width:320px" autocomplete="off" onfocus="openImpDbPicker()" oninput="renderImpDbPicker()"></div>
+ <div class="row">Target DB <input id="impDb" placeholder="(blank if dump has CREATE DATABASE)" style="width:320px" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" onfocus="openImpDbPicker()" oninput="renderImpDbPicker()"></div>
  <div class="row"><label title="Create the target database first if it doesn't exist"><input type="checkbox" id="impCreate"> create DB</label><label title="Disable foreign-key and unique checks during import (for out-of-order or circular tables)"><input type="checkbox" id="impFk" checked> disable FK checks</label><label title="Keep going when a file or statement fails instead of stopping (mysql --force)"><input type="checkbox" id="impForce"> continue on errors</label><label title="Required if the dump contains raw NUL bytes in binary/text columns (fixes: ASCII '\0' appeared in the statement). Safe to leave on for any dump that might contain binary data."><input type="checkbox" id="impBinary"> binary-mode</label><label title="mysql --max-allowed-packet. Raise this to match (or exceed) whatever the dump was exported with - a file created with a bumped packet size (needed for extended-insert with large rows/BLOBs) can otherwise fail to re-import with &quot;MySQL server has gone away&quot; against this client's smaller default (16M).">max packet <input id="impMaxPacket" value="1G" style="width:56px"></label></div>
  <div class="row" style="justify-content:flex-end"><button class="go" id="impGoBtn" onclick="runImport()">Run Import</button><button class="warn" id="impCancelBtn" disabled onclick="cancelJob('imp')">Cancel</button><button onclick="hide('mImport')">Close</button></div>
  <div id="impProgress" style="display:none;margin-top:8px">
@@ -544,6 +544,26 @@ function floatRestore(id){
  delete window._floatingMinimized[id];
  floatBringToFront(id);
  floatRenderTray();
+}
+// Snapshotting the exact prior inline top/left/width/height (rather than re-deriving them) means
+// restore always lands back exactly where the window was, including a size/position from a
+// manual drag-resize - not just back to the modal's hardcoded default.
+window._floatingMaxState={};
+function floatToggleMaximize(id){
+ const box=$(id).querySelector('.box');
+ if(!box)return;
+ const btn=$('maxBtn_'+id);
+ if(window._floatingMaxState[id]){
+  const s=window._floatingMaxState[id];
+  box.style.top=s.top;box.style.left=s.left;box.style.width=s.width;box.style.height=s.height;
+  delete window._floatingMaxState[id];
+  if(btn)btn.title='Maximize';
+ } else {
+  window._floatingMaxState[id]={top:box.style.top,left:box.style.left,width:box.style.width,height:box.style.height};
+  box.style.top='10px';box.style.left='10px';box.style.width='calc(100vw - 20px)';box.style.height='calc(100vh - 20px)';
+  if(btn)btn.title='Restore';
+ }
+ floatBringToFront(id);
 }
 function show(id){
  const el=$(id);
@@ -2203,14 +2223,21 @@ function switchHexTab(mode){
  _vHexState.mode=mode;updateHexTabButtons();
 }
 function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;const ta=$('vText');const sel=$('vSelect');const multi=$('vMulti');const dt=$('vDate');const hexTabs=$('vHexTabs');const img=$('vImg');
- // A date/time value only needs room for the native picker widget, not the full 780px meant for
+ // A date/time value only needs room for the native picker widget, not the full 1000px meant for
  // long text - a narrower modal reads much better for a single date/time/datetime cell. Setting
  // an explicit width (not just max-width) keeps that as the default OPEN size in both cases, but
  // max-width only capped resize-corner dragging at that same value - a long single-line value
  // (long JSON, say) could never actually be dragged any wider, only taller. Raising the ceiling
  // well past the default width (95vw for text, 600px for dates) fixes that while leaving the
- // default size unchanged; the inner textarea already tracks the box via width:100%.
- {const box=$('mView').querySelector('.box');box.style.width=opts.dateType?'380px':'780px';box.style.maxWidth=opts.dateType?'600px':'95vw';}
+ // default size unchanged; the inner textarea already tracks the box via width:100%. Skipped
+ // entirely while maximized (switching cells shouldn't silently un-maximize the window).
+ // flex:1 (the shorthand, not flex-grow alone) sets flex-basis:0% - so without an explicit box
+ // height, the growable content area (textarea/multi-select) has nothing to grow INTO by default
+ // and collapses toward the box's CSS min-height instead of filling it. Give the box an explicit
+ // default height only when a flex:1 widget is actually the one showing (plain text/hex/bit/SET) -
+ // the compact dropdown/date widgets are flex:none and would otherwise show as a small control
+ // sitting in a mostly-empty tall box.
+ if(!window._floatingMaxState||!window._floatingMaxState.mView){const box=$('mView').querySelector('.box');box.style.width=opts.dateType?'380px':'1000px';box.style.maxWidth=opts.dateType?'600px':'95vw';const growable=!opts.options&&!opts.dateType;box.style.height=growable?'640px':'';}
  ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';hexTabs.style.display='none';img.style.display='none';img.removeAttribute('src');_vHexState=null;
  // Checkbox mode: SET columns, whose valid values are any comma-joined COMBINATION of the
  // column's defined members - unlike ENUM (exactly one value), a single dropdown can't represent
