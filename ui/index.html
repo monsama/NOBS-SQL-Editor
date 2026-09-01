@@ -461,7 +461,10 @@ function floatCenterY(id){
  const h=box.getBoundingClientRect().height;
  // Biased a bit above dead-center (not a plain 50/50 split) - looks more natural than true
  // centering, and keeps tall modals (e.g. Compare Databases) from crowding the bottom edge.
- box.style.top=Math.max(0,Math.round((window.innerHeight-h)/2-window.innerHeight*0.06))+'px';
+ // Compare Databases grows tall once results load, so it gets a stronger upward bias than
+ // the rest so it doesn't visually creep back toward dead-center as it fills up.
+ const biasFrac=id==='mCompare'?0.12:0.06;
+ box.style.top=Math.max(0,Math.round((window.innerHeight-h)/2-window.innerHeight*biasFrac))+'px';
 }
 let _floatDrag=null;
 function floatDragStart(e,id){
