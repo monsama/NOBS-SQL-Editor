@@ -382,7 +382,7 @@ fn next_cursor_id() -> String {
 // Returns a receiver that fires exactly once with the result of OPENING the query (columns +
 // which are binary, or the error `conn.query_iter` failed with), and the sender used for every
 // Fetch/Close for the lifetime of the cursor.
-fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String) -> (
+fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String, request_id: Option<String>) -> (
     std::sync::mpsc::Receiver<Result<(Vec<String>, Vec<bool>), String>>,
     std::sync::mpsc::Sender<CursorCmd>,
 ) {
@@ -390,16 +390,28 @@ fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String) -> (
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CursorCmd>();
     std::thread::spawn(move || {
         let mut conn = conn;
+        // Deregisters this cursor from both cursors() and, if the caller supplied one,
+        // running_queries() - called from every exit path below. query()'s own registration of
+        // requestId -> connection id (made before the cursor ever opens, so Cancel can find it
+        // immediately) is deliberately NOT removed by query() itself once a cursor is going to
+        // outlive that call: ownership of "when is this requestId no longer cancellable" passes
+        // to the cursor thread, so Cancel keeps working against the same connection for as long
+        // as the cursor stays open - including while idle between "fetch next" calls, and while
+        // a slow fetch is in flight - not just during the very first page.
+        let cleanup = |request_id: &Option<String>| {
+            if let Ok(mut m) = cursors().lock() { m.remove(&cursor_id); }
+            if let Some(rid) = request_id { running_queries().lock().unwrap().remove(rid); }
+        };
         // Conn and its still-open QueryResult live together in this one stack frame for the
         // entire life of the cursor - the only way to avoid QueryResult's self-referential
         // borrow of Conn across separate command invocations.
         let mut result = match conn.query_iter(&sql) {
             Ok(r) => r,
-            Err(e) => { let _ = open_tx.send(Err(db_err(e))); return; }
+            Err(e) => { let _ = open_tx.send(Err(db_err(e))); cleanup(&request_id); return; }
         };
         let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
         let bin: Vec<bool> = result.columns().as_ref().iter().map(|c| is_binaryish(c)).collect();
-        if open_tx.send(Ok((cols.clone(), bin.clone()))).is_err() { return; } // caller went away
+        if open_tx.send(Ok((cols.clone(), bin.clone()))).is_err() { cleanup(&request_id); return; } // caller went away
 
         loop {
             // Idle safety net: an abandoned cursor (tab closed without the UI's cleanup call
@@ -435,7 +447,7 @@ fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String) -> (
         // Exhaustion, Close, and timeout all land here: deregister first (a stale entry would
         // make a later fetch/close look like it's still talking to a live cursor), then let
         // `result` and `conn` drop, closing the connection.
-        if let Ok(mut m) = cursors().lock() { m.remove(&cursor_id); }
+        cleanup(&request_id);
     });
     (open_rx, cmd_tx)
 }
@@ -444,10 +456,12 @@ fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String) -> (
 // button, whether or not the result ends up needing more than one page. `conn` is consumed: it
 // belongs to the cursor thread from here on, not to the caller. Returns the cursorId (only
 // meaningful if has_more is also true - see below), columns, binary-column flags, the first
-// page of rows, and has_more.
-fn open_cursor(conn: Conn, sql: String, first_n: usize) -> Result<(String, Vec<String>, Vec<bool>, Vec<Vec<Option<String>>>, bool), String> {
+// page of rows, and has_more. `request_id`, if supplied, is the same id query() registered in
+// running_queries() before calling this - handed to the cursor thread so it (not this function's
+// caller) can eventually clear that registration once the cursor genuinely closes.
+fn open_cursor(conn: Conn, sql: String, first_n: usize, request_id: Option<String>) -> Result<(String, Vec<String>, Vec<bool>, Vec<Vec<Option<String>>>, bool), String> {
     let cursor_id = next_cursor_id();
-    let (open_rx, cmd_tx) = spawn_cursor_thread(conn, sql, cursor_id.clone());
+    let (open_rx, cmd_tx) = spawn_cursor_thread(conn, sql, cursor_id.clone(), request_id);
     let (cols, bin) = match open_rx.recv() {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => return Err(e),
@@ -907,8 +921,16 @@ async fn query(req: Value) -> R {
         let page_size = req.get("pageSize").and_then(|v| v.as_u64()).unwrap_or(1000).max(1) as usize;
 
         let t = std::time::Instant::now();
-        let result = match open_cursor(c, sql, page_size) {
+        // Whether the requestId's running_queries() registration should outlive this call - true
+        // only when a cursor is left open afterward, so Cancel keeps being able to KILL QUERY the
+        // same connection while the user is idle between "fetch next" calls or waiting on a slow
+        // one. False in every other case (no result set, single-page result, or an error), where
+        // the cursor thread (if one ever ran) has already deregistered itself by the time this
+        // returns, and the removal below is what clears it otherwise.
+        let mut cursor_persists = false;
+        let result = match open_cursor(c, sql, page_size, request_id.clone()) {
             Ok((cursor_id, cols, bin, rows, has_more)) => {
+                cursor_persists = has_more;
                 if cols.is_empty() {
                     Ok(json!({"ok":true,"columns":[],"rows":[],"elapsedMs":t.elapsed().as_millis() as u64,"message":"Query OK. No result set."}))
                 } else {
@@ -928,7 +950,9 @@ async fn query(req: Value) -> R {
                 else { Ok(json!({"ok":false,"error":e})) }
             }
         };
-        if let Some(rid) = &request_id { running_queries().lock().unwrap().remove(rid); let _ = take_query_cancelled(rid); }
+        if !cursor_persists {
+            if let Some(rid) = &request_id { running_queries().lock().unwrap().remove(rid); let _ = take_query_cancelled(rid); }
+        }
         result
     }).await.map_err(|e| e.to_string())?
 }
@@ -941,6 +965,10 @@ async fn query(req: Value) -> R {
 async fn fetch_cursor_batch(req: Value) -> R {
     let cursor_id = req["cursorId"].as_str().unwrap_or("").to_string();
     let page_size = req.get("pageSize").and_then(|v| v.as_u64()).unwrap_or(1000).max(1) as usize;
+    // The same requestId query() registered under running_queries() when this cursor was opened
+    // - still valid for the cursor's whole life (see query()'s tail / the cursor thread's own
+    // cleanup), so a Cancel click reaches this fetch exactly like it reaches the first page.
+    let request_id = req["requestId"].as_str().filter(|s| !s.is_empty()).map(String::from);
     tokio::task::spawn_blocking(move || {
         let tx = cursors().lock().unwrap().get(&cursor_id).cloned();
         let Some(tx) = tx else {
@@ -958,7 +986,15 @@ async fn fetch_cursor_batch(req: Value) -> R {
                 if !batch.has_more { cursors().lock().unwrap().remove(&cursor_id); }
                 Ok(json!({"ok":true,"rows":batch.rows,"hasMore":batch.has_more}))
             }
-            Ok(Err(e)) => { cursors().lock().unwrap().remove(&cursor_id); Ok(json!({"ok":false,"error":e})) }
+            Ok(Err(e)) => {
+                cursors().lock().unwrap().remove(&cursor_id);
+                // A Cancel click KILLs the connection this fetch is blocked on, which surfaces
+                // here as an ordinary MySQL error ("Query execution was interrupted") - tell it
+                // apart from a real failure the same way query()'s own first-page fetch does.
+                let was_cancelled = request_id.as_deref().map(take_query_cancelled).unwrap_or(false);
+                if was_cancelled { Ok(json!({"ok":false,"error":"Query cancelled.","cancelled":true})) }
+                else { Ok(json!({"ok":false,"error":e})) }
+            }
             Err(_) => { cursors().lock().unwrap().remove(&cursor_id); Ok(json!({"ok":false,"error":"Cursor not found or already closed."})) }
         }
     }).await.map_err(|e| e.to_string())?
