@@ -22,7 +22,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use mysql::prelude::*;
-use mysql::{Conn, Opts, OptsBuilder, SslOpts, Value as MyValue, Column};
+use mysql::{Conn, Opts, OptsBuilder, SslOpts, Value as MyValue, Column, Row};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -311,12 +311,7 @@ fn run_select_bin(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Op
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     for r in result.by_ref() {
         let row = r.map_err(db_err)?;
-        let mut cells = Vec::with_capacity(cols.len());
-        for i in 0..cols.len() {
-            let v = row.as_ref(i).cloned().unwrap_or(MyValue::NULL);
-            cells.push(val_to_opt(&v, *bin.get(i).unwrap_or(&false)));
-        }
-        rows.push(cells);
+        rows.push(decode_row(&row, &bin));
     }
     Ok((cols, rows, bin))
 }
@@ -326,101 +321,154 @@ fn run_select(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option
     Ok((c, r))
 }
 
-// Row cap for ad-hoc queries run from the editor: without this, a query with a high or missing
-// LIMIT against a large table gets fully materialized into memory (once in the driver's row
-// buffers, again in this Vec, again in the serde_json::Value tree, again in the serialized IPC
-// payload) - on a multi-GB table that exhausts the process's memory and the allocator aborts the
-// whole app rather than returning an error. Stopping the fetch loop itself, before the extra
-// copies happen, bounds worst-case memory regardless of what the user's SQL asks for. Any rows
-// left unread when `result` drops are drained by the mysql crate's own Drop impl, one at a time
-// off the wire, so the discarded tail is never materialized either.
-const QUERY_ROW_CAP: usize = 50_000;
-
-fn run_select_bin_capped(conn: &mut Conn, sql: &str, cap: usize) -> Result<(Vec<String>, Vec<Vec<Option<String>>>, Vec<bool>, bool), String> {
-    let mut result = conn.query_iter(sql).map_err(db_err)?;
-    let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let bin: Vec<bool> = result.columns().as_ref().iter().map(|c| is_binaryish(c)).collect();
-    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
-    let mut truncated = false;
-    for r in result.by_ref() {
-        if rows.len() >= cap { truncated = true; break; }
-        let row = r.map_err(db_err)?;
-        let mut cells = Vec::with_capacity(cols.len());
-        for i in 0..cols.len() {
-            let v = row.as_ref(i).cloned().unwrap_or(MyValue::NULL);
-            cells.push(val_to_opt(&v, *bin.get(i).unwrap_or(&false)));
-        }
-        rows.push(cells);
+// Decodes one already-fetched row into the grid's Option<String> cell format. Shared by
+// run_select_bin (whole-result-set reads used everywhere except ad-hoc queries) and the cursor
+// thread below (which reads a bounded batch at a time from a query it keeps open across
+// multiple Tauri command calls). `bin` is computed once per query, not per row/batch.
+fn decode_row(row: &Row, bin: &[bool]) -> Vec<Option<String>> {
+    let mut cells = Vec::with_capacity(bin.len());
+    for i in 0..bin.len() {
+        let v = row.as_ref(i).cloned().unwrap_or(MyValue::NULL);
+        cells.push(val_to_opt(&v, *bin.get(i).unwrap_or(&false)));
     }
-    Ok((cols, rows, bin, truncated))
+    cells
 }
 
-// ---------- chunked pagination helpers ----------
-// Strips comments (block /* */, -- , #) AND quoted literals/identifiers ('...', "...", `...`)
-// from a chunk of SQL, replacing each with a single space. Mirrors sql_is_readonly's own
-// comment-stripping regexes; extended here with quote-aware stripping (backslash escapes and
-// doubled-quote escapes both honored) so a trailing-clause check can't be fooled by a
-// LIMIT-shaped token sitting inside a string literal.
-fn sql_strip_comments_and_literals(sql: &str) -> String {
-    let re_exec  = regex::Regex::new(r"(?s)/\*!\d*(.*?)\*/").unwrap();
-    let re_block = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
-    let re_dash  = regex::Regex::new(r"(?m)--.*$").unwrap();
-    let re_hash  = regex::Regex::new(r"(?m)#.*$").unwrap();
-    let unwrapped = re_exec.replace_all(sql, " $1 ");
-    let step1 = re_block.replace_all(&unwrapped, " ");
-    let step2 = re_dash.replace_all(&step1, " ");
-    let no_comments = re_hash.replace_all(&step2, " ");
+// ---------- ad-hoc query result cursors ----------
+// Ad-hoc queries from the editor (the "Run" button and "Fetch next N rows") are streamed through
+// a cursor rather than materialized in one shot: without this, a query with a high or missing
+// LIMIT against a large table gets fully read into memory (once in the driver's row buffers,
+// again in a Vec, again in the serde_json::Value tree, again in the serialized IPC payload) - on
+// a multi-GB table that exhausts the process's memory and the allocator aborts the whole app
+// rather than returning an error. A cursor only ever pulls one page's worth of rows into memory
+// at a time, regardless of how many total rows the query matches or what LIMIT (if any) the user
+// wrote, and - unlike re-running the query with an increasing OFFSET - it never makes MySQL
+// rescan and discard everything before the current page: the same open result set is read
+// incrementally across calls.
+//
+// A cursor is a live mysql::Conn + its still-open mysql::QueryResult, which cannot be split
+// across two separate Tauri command invocations without becoming a self-referential struct
+// (QueryResult borrows &mut Conn). Instead both live together in the stack frame of one
+// dedicated OS thread that outlives any single command call: the thread opens the query once,
+// then blocks on a channel between command calls, fetching another page whenever asked and
+// exiting (dropping QueryResult then Conn, closing the connection) once the result set is
+// exhausted, it's told to close, or nobody has asked for more in a while.
+enum CursorCmd {
+    Fetch { n: usize, reply: std::sync::mpsc::Sender<Result<CursorBatch, String>> },
+    Close,
+}
+struct CursorBatch {
+    rows: Vec<Vec<Option<String>>>,
+    has_more: bool,
+}
+// Registry of open cursors, keyed by a server-generated cursorId: the frontend only ever holds
+// the id, never the sender itself, and looks it up here on every subsequent fetch/close. Same
+// OnceLock<Mutex<HashMap<...>>> idiom as running_queries()/cancelled_queries() above.
+fn cursors() -> &'static Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<CursorCmd>>> {
+    static MAP: OnceLock<Mutex<std::collections::HashMap<String, std::sync::mpsc::Sender<CursorCmd>>>> = OnceLock::new();
+    MAP.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+// No uuid crate in this project's Cargo.toml, and nothing here needs global uniqueness beyond
+// "never collides with another cursor this process has open" - a monotonic counter plus the
+// wall-clock time it was minted is simpler than pulling in a dependency for it.
+fn next_cursor_id() -> String {
+    static COUNTER: OnceLock<std::sync::atomic::AtomicU64> = OnceLock::new();
+    let n = COUNTER.get_or_init(|| std::sync::atomic::AtomicU64::new(0)).fetch_add(1, Ordering::SeqCst);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    format!("cur{}_{}", now, n)
+}
 
-    let mut out = String::with_capacity(no_comments.len());
-    let chars: Vec<char> = no_comments.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\'' || c == '"' || c == '`' {
-            let quote = c;
-            out.push(' ');
-            i += 1;
-            while i < chars.len() {
-                // Backslash escaping doesn't apply inside backtick-quoted identifiers.
-                if chars[i] == '\\' && quote != '`' && i + 1 < chars.len() {
-                    i += 2;
-                    continue;
-                }
-                if chars[i] == quote {
-                    // A doubled quote ('' or ``) is an escaped literal quote, not the closer.
-                    if i + 1 < chars.len() && chars[i + 1] == quote {
-                        i += 2;
-                        continue;
+// Spawns the cursor's dedicated thread. `conn` is moved in and never touched again outside it.
+// Returns a receiver that fires exactly once with the result of OPENING the query (columns +
+// which are binary, or the error `conn.query_iter` failed with), and the sender used for every
+// Fetch/Close for the lifetime of the cursor.
+fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String) -> (
+    std::sync::mpsc::Receiver<Result<(Vec<String>, Vec<bool>), String>>,
+    std::sync::mpsc::Sender<CursorCmd>,
+) {
+    let (open_tx, open_rx) = std::sync::mpsc::channel::<Result<(Vec<String>, Vec<bool>), String>>();
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CursorCmd>();
+    std::thread::spawn(move || {
+        let mut conn = conn;
+        // Conn and its still-open QueryResult live together in this one stack frame for the
+        // entire life of the cursor - the only way to avoid QueryResult's self-referential
+        // borrow of Conn across separate command invocations.
+        let mut result = match conn.query_iter(&sql) {
+            Ok(r) => r,
+            Err(e) => { let _ = open_tx.send(Err(db_err(e))); return; }
+        };
+        let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
+        let bin: Vec<bool> = result.columns().as_ref().iter().map(|c| is_binaryish(c)).collect();
+        if open_tx.send(Ok((cols.clone(), bin.clone()))).is_err() { return; } // caller went away
+
+        loop {
+            // Idle safety net: an abandoned cursor (tab closed without the UI's cleanup call
+            // reaching the backend, app crashed, etc.) can't hold its DB connection open forever.
+            match cmd_rx.recv_timeout(std::time::Duration::from_secs(600)) {
+                Ok(CursorCmd::Fetch { n, reply }) => {
+                    // Pull n+1 so "is there more?" is answered from this same fetch, with no
+                    // separate round trip - the extra row is dropped before replying.
+                    let mut rows = Vec::new();
+                    let mut has_more = false;
+                    let mut err: Option<String> = None;
+                    let mut count = 0usize;
+                    while count < n + 1 {
+                        match result.next() {
+                            Some(Ok(row)) => {
+                                count += 1;
+                                if count <= n { rows.push(decode_row(&row, &bin)); }
+                                else { has_more = true; }
+                            }
+                            Some(Err(e)) => { err = Some(db_err(e)); break; }
+                            None => break,
+                        }
                     }
-                    i += 1;
-                    break;
+                    let done = err.is_some() || !has_more;
+                    let resp = match err { Some(e) => Err(e), None => Ok(CursorBatch { rows, has_more }) };
+                    let _ = reply.send(resp);
+                    if done { break; }
                 }
-                i += 1;
+                Ok(CursorCmd::Close) => break,
+                Err(_) => break, // idle timeout, or every Sender (incl. the registry's) was dropped
             }
-            continue;
         }
-        out.push(c);
-        i += 1;
+        // Exhaustion, Close, and timeout all land here: deregister first (a stale entry would
+        // make a later fetch/close look like it's still talking to a live cursor), then let
+        // `result` and `conn` drop, closing the connection.
+        if let Ok(mut m) = cursors().lock() { m.remove(&cursor_id); }
+    });
+    (open_rx, cmd_tx)
+}
+
+// Opens a new cursor and fetches its first page in one call - the common path for the "Run"
+// button, whether or not the result ends up needing more than one page. `conn` is consumed: it
+// belongs to the cursor thread from here on, not to the caller. Returns the cursorId (only
+// meaningful if has_more is also true - see below), columns, binary-column flags, the first
+// page of rows, and has_more.
+fn open_cursor(conn: Conn, sql: String, first_n: usize) -> Result<(String, Vec<String>, Vec<bool>, Vec<Vec<Option<String>>>, bool), String> {
+    let cursor_id = next_cursor_id();
+    let (open_rx, cmd_tx) = spawn_cursor_thread(conn, sql, cursor_id.clone());
+    let (cols, bin) = match open_rx.recv() {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err("Cursor thread failed to start.".to_string()),
+    };
+    let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+    if cmd_tx.send(CursorCmd::Fetch { n: first_n, reply: reply_tx }).is_err() {
+        return Err("Cursor closed unexpectedly.".to_string());
     }
-    out
-}
-// True if `sql` (a single statement) already ends in its own LIMIT clause - "LIMIT n",
-// "LIMIT m,n", or "LIMIT n OFFSET m" - after comments and quoted literals are stripped out
-// first. A LIMIT trapped inside a string, comment, or a non-final subquery is never mistaken
-// for the statement's own trailing clause: a subquery's LIMIT can't land at the very end of the
-// stripped text anyway, since the subquery's closing paren (or an alias/ORDER BY after it) would
-// be the last non-space token instead.
-fn sql_has_trailing_limit(sql: &str) -> bool {
-    let stripped = sql_strip_comments_and_literals(sql);
-    let t = stripped.trim().trim_end_matches(';').trim();
-    let re = regex::Regex::new(r"(?is)\bLIMIT\s+\d+\s*(,\s*\d+|OFFSET\s+\d+)?\s*$").unwrap();
-    re.is_match(t)
-}
-// The statement's leading keyword, after stripping comments/literals - used to gate pagination
-// to genuinely SELECT-shaped ad-hoc queries (SELECT / WITH ... SELECT), the same class the
-// frontend already restricts its "Run" pagination request to.
-fn sql_leading_keyword(sql: &str) -> String {
-    sql_strip_comments_and_literals(sql).trim_start().split_whitespace().next().unwrap_or("").to_uppercase()
+    let batch = match reply_rx.recv() {
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => return Err("Cursor closed unexpectedly.".to_string()),
+    };
+    // Whole result fit in one page (or there were no columns at all, e.g. a statement with no
+    // result set): the thread has already exhausted it, deregistered itself, and exited - so
+    // there is nothing left to register here, and no cursorId the frontend should hold onto.
+    if !cols.is_empty() && batch.has_more {
+        cursors().lock().unwrap().insert(cursor_id.clone(), cmd_tx);
+    }
+    Ok((cursor_id, cols, bin, batch.rows, batch.has_more))
 }
 
 // ---------- SQL text helpers (identifier + literal, Workbench-style + hex rule) ----------
@@ -848,37 +896,24 @@ async fn query(req: Value) -> R {
                 }
             }
         }
-        // Chunked pagination (Workbench-style "fetch next batch"): the frontend's main Run action
-        // sends offset/pageSize for every eligible SELECT it runs; this command decides whether to
-        // actually honor them. Only a genuinely SELECT-shaped statement (SELECT / WITH ... SELECT)
-        // that does NOT already carry its own trailing LIMIT is eligible - anything else (a query
-        // already limited by the user, or a non-SELECT like SHOW/DESCRIBE that a caller might send
-        // these fields for anyway) falls straight through to the old QUERY_ROW_CAP safety net
-        // unchanged, with no offset/pageSize/hasMore in play at all.
-        let paginate_requested = req.get("offset").is_some() || req.get("pageSize").is_some();
-        let offset = req.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
-        let page_size = req.get("pageSize").and_then(|v| v.as_u64()).unwrap_or(1000).max(1);
-        let leading_kw = sql_leading_keyword(&sql);
-        let paginate = paginate_requested
-            && (leading_kw == "SELECT" || leading_kw == "WITH")
-            && !sql_has_trailing_limit(&sql);
-        // Fetch one extra row (pageSize+1) so "is there more?" is answered from this same result
-        // set, with no separate COUNT(*) round trip - the extra row is dropped below and never
-        // reaches the frontend.
-        let fetch_sql = if paginate { format!("{} LIMIT {} OFFSET {}", sql, page_size + 1, offset) } else { sql.clone() };
-        let cap = if paginate { (page_size + 1) as usize } else { QUERY_ROW_CAP };
+        // Cursor-based streaming (Workbench-style "fetch next batch"): every ad-hoc query - with
+        // or without its own LIMIT - opens a cursor and pulls just its first page (pageSize rows,
+        // default 1000) through it. This replaces the earlier OFFSET/LIMIT rewrite, which (a)
+        // only ever kicked in for a query with no LIMIT of its own, leaving one written by the
+        // user still hitting the old hard row cap with no way to see the rest, and (b) cost a
+        // full rescan-and-discard of everything before OFFSET on every "fetch next" against a
+        // large table. A cursor sidesteps both: it applies uniformly regardless of the query's
+        // own LIMIT, and paging forward just keeps reading the same already-open result set.
+        let page_size = req.get("pageSize").and_then(|v| v.as_u64()).unwrap_or(1000).max(1) as usize;
 
         let t = std::time::Instant::now();
-        let result = match run_select_bin_capped(&mut c, &fetch_sql, cap) {
-            Ok((cols, mut rows, bin, truncated)) => {
+        let result = match open_cursor(c, sql, page_size) {
+            Ok((cursor_id, cols, bin, rows, has_more)) => {
                 if cols.is_empty() {
                     Ok(json!({"ok":true,"columns":[],"rows":[],"elapsedMs":t.elapsed().as_millis() as u64,"message":"Query OK. No result set."}))
-                } else if paginate {
-                    let has_more = rows.len() > page_size as usize;
-                    if has_more { rows.truncate(page_size as usize); }
-                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"truncated":false,"hasMore":has_more,"elapsedMs":t.elapsed().as_millis() as u64}))
                 } else {
-                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"truncated":truncated,"elapsedMs":t.elapsed().as_millis() as u64}))
+                    let cursor_id_for_response = if has_more { Some(cursor_id) } else { None };
+                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"hasMore":has_more,"cursorId":cursor_id_for_response,"elapsedMs":t.elapsed().as_millis() as u64}))
                 }
             }
             Err(e) => {
@@ -895,6 +930,53 @@ async fn query(req: Value) -> R {
         };
         if let Some(rid) = &request_id { running_queries().lock().unwrap().remove(rid); let _ = take_query_cancelled(rid); }
         result
+    }).await.map_err(|e| e.to_string())?
+}
+
+// Fetches the next page (default 1000 rows) from a cursor previously opened by `query`. Returns
+// an error if the cursorId is unknown - already exhausted, explicitly closed, or timed out from
+// 10 minutes of inactivity - which the frontend surfaces and treats as "nothing more to fetch"
+// rather than a hard failure, since all three are ordinary end states, not corruption.
+#[tauri::command]
+async fn fetch_cursor_batch(req: Value) -> R {
+    let cursor_id = req["cursorId"].as_str().unwrap_or("").to_string();
+    let page_size = req.get("pageSize").and_then(|v| v.as_u64()).unwrap_or(1000).max(1) as usize;
+    tokio::task::spawn_blocking(move || {
+        let tx = cursors().lock().unwrap().get(&cursor_id).cloned();
+        let Some(tx) = tx else {
+            return Ok(json!({"ok":false,"error":"Cursor not found or already closed."}));
+        };
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        if tx.send(CursorCmd::Fetch { n: page_size, reply: reply_tx }).is_err() {
+            cursors().lock().unwrap().remove(&cursor_id);
+            return Ok(json!({"ok":false,"error":"Cursor not found or already closed."}));
+        }
+        match reply_rx.recv_timeout(std::time::Duration::from_secs(30)) {
+            Ok(Ok(batch)) => {
+                // has_more false means the cursor thread already exhausted, deregistered, and
+                // exited on its own - nothing left here to clean up in that case.
+                if !batch.has_more { cursors().lock().unwrap().remove(&cursor_id); }
+                Ok(json!({"ok":true,"rows":batch.rows,"hasMore":batch.has_more}))
+            }
+            Ok(Err(e)) => { cursors().lock().unwrap().remove(&cursor_id); Ok(json!({"ok":false,"error":e})) }
+            Err(_) => { cursors().lock().unwrap().remove(&cursor_id); Ok(json!({"ok":false,"error":"Cursor not found or already closed."})) }
+        }
+    }).await.map_err(|e| e.to_string())?
+}
+
+// Tears down an idle-but-open cursor: sent whenever the frontend is done with one before it ran
+// out on its own (a tab closed, a new query replacing the previous one in the same tab, the app
+// quitting with results still on screen). Always succeeds, including when the cursorId is
+// already gone (already exhausted, already closed, idle-timed-out) - callers fire this
+// defensively without checking whether there is anything left to close.
+#[tauri::command]
+async fn close_cursor(req: Value) -> R {
+    let cursor_id = req["cursorId"].as_str().unwrap_or("").to_string();
+    tokio::task::spawn_blocking(move || {
+        if let Some(tx) = cursors().lock().unwrap().remove(&cursor_id) {
+            let _ = tx.send(CursorCmd::Close);
+        }
+        Ok(json!({"ok":true}))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -2813,7 +2895,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            connect, schemas, objects, ddl, pk, query, exec, rowop, script,
+            connect, schemas, objects, ddl, pk, query, exec, rowop, script, fetch_cursor_batch, close_cursor,
             import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, tools_status, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd, open_support_link
         ])
         .run(tauri::generate_context!())
