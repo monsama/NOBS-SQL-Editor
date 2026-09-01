@@ -1305,16 +1305,16 @@ function toggleOverview() {
         ov.style.display = 'none';
     }
 }
-function objOpen(db,type,name){if(type==='table'){const _id=openTab(name,'SELECT * FROM '+qid(db)+'.'+qid(name)+' LIMIT 1000;',db,false,name);openRun(_id);}else if(type==='view'){openTab(name,'SELECT * FROM '+qid(db)+'.'+qid(name)+' LIMIT 1000;',db,true,null);}else{openDdl(db,type,name);}}
+function objOpen(db,type,name){if(type==='table'){const _id=openTab(name,'SELECT * FROM '+qid(db)+'.'+qid(name)+';',db,false,name);openRun(_id);}else if(type==='view'){openTab(name,'SELECT * FROM '+qid(db)+'.'+qid(name)+';',db,true,null);}else{openDdl(db,type,name);}}
 function objMenu(e,db,type,name){const b=[];
- if(type==='table'){const isPinned=pinnedTables(db).includes(name);b.push([isPinned?'\u2605 Unpin':'\u2606 Pin to top',()=>togglePin(db,name)]);b.push(['SELECT *',()=>{const _i=openTab(name,'SELECT * FROM '+qid(db)+'.'+qid(name)+' LIMIT 1000;',db,false,name);openRun(_i);}]);b.push(['SELECT COUNT(*)',()=>openTab('count '+name,'SELECT COUNT(*) FROM '+qid(db)+'.'+qid(name)+';',db,true,null)]);b.push(['Generate SELECT/INSERT/UPDATE...',()=>genTemplate(db,name)]);
+ if(type==='table'){const isPinned=pinnedTables(db).includes(name);b.push([isPinned?'\u2605 Unpin':'\u2606 Pin to top',()=>togglePin(db,name)]);b.push(['SELECT *',()=>{const _i=openTab(name,'SELECT * FROM '+qid(db)+'.'+qid(name)+';',db,false,name);openRun(_i);}]);b.push(['SELECT COUNT(*)',()=>openTab('count '+name,'SELECT COUNT(*) FROM '+qid(db)+'.'+qid(name)+';',db,true,null)]);b.push(['Generate SELECT/INSERT/UPDATE...',()=>genTemplate(db,name)]);
   b.push(['Design / Alter...',()=>designTable(name,db)]);b.push(['Show CREATE',()=>openDdl(db,type,name)]);
   const _trigMap=(objData&&objData.r&&objData.r.triggerTables)||{};const _existingTriggers=Object.keys(_trigMap).filter(tn=>_trigMap[tn]===name);
   if(_existingTriggers.length){b.push(['Existing triggers ('+_existingTriggers.length+')',_existingTriggers.map(tn=>[tn,()=>openDdl(db,'trigger',tn)])]);}
   b.push(['New trigger on this table...',()=>newTrigger(db,name)]);b.push(['Inspect...',()=>inspect(db,name)]);b.push(['Import CSV into table...',()=>importCsv(db,name)]);b.push(['Export table to CSV (all rows)...',()=>exportFull(db,name,'csv')]);b.push(['Export table INSERTs (all rows)...',()=>exportFull(db,name,'inserts')]);b.push('-');
   b.push(['Rename...',()=>renameTable(db,name)]);b.push(['Duplicate table...',()=>duplicateTable(db,name)]);b.push(['Truncate...',()=>truncateTable(db,name)]);b.push(['Drop table...',()=>dropObject(db,type,name)]);b.push('-');
   b.push(['Optimize',()=>maint(db,name,'OPTIMIZE')]);b.push(['Analyze',()=>maint(db,name,'ANALYZE')]);b.push(['Check',()=>maint(db,name,'CHECK')]);b.push(['Repair',()=>maint(db,name,'REPAIR')]);}
- else if(type==='view'){b.push(['Open',()=>openTab(name,'SELECT * FROM '+qid(db)+'.'+qid(name)+' LIMIT 1000;',db,true,null)]);b.push(['Show CREATE / edit',()=>openDdl(db,type,name)]);b.push(['Drop view...',()=>dropObject(db,type,name)]);}
+ else if(type==='view'){b.push(['Open',()=>openTab(name,'SELECT * FROM '+qid(db)+'.'+qid(name)+';',db,true,null)]);b.push(['Show CREATE / edit',()=>openDdl(db,type,name)]);b.push(['Drop view...',()=>dropObject(db,type,name)]);}
  else {b.push(['Show CREATE / edit',()=>openDdl(db,type,name)]);b.push(['Drop '+type+'...',()=>dropObject(db,type,name)]);}
  menu(e.clientX,e.clientY,b);}
 
@@ -1596,8 +1596,9 @@ function closeTab(id){const t=T(id);if(t&&t.runningReqId){cancelQuery(id);}close
 function sessionKeyFor(){const cn=$('connlist')?$('connlist').value:'';if(cn)return 'conn:'+cn;return 'adhoc:'+($('user')?$('user').value:'')+'@'+($('host')?$('host').value:'')+':'+($('port')?$('port').value:'');}
 function saveSession(key){try{const k=key||sessionKeyFor();const arr=tabs.map(t=>({title:t.title,sql:($('ed_'+t.id)?$('ed_'+t.id).value:''),db:t.db,table:t.table}));localStorage.setItem('session:'+k,JSON.stringify(arr));}catch(e){}}
 function restoreSessionFor(key){if(tabs.length)return;let arr=[];try{const raw=localStorage.getItem('session:'+key);if(raw!=null){arr=JSON.parse(raw);}else if(!localStorage.getItem('_sessionMigrated')){const old=localStorage.getItem('session');if(old)arr=JSON.parse(old);localStorage.setItem('_sessionMigrated','1');}}catch(e){}if(Array.isArray(arr)&&arr.length){arr.forEach(t=>{
-  // Table tabs are always bounded (LIMIT 1000), so it's safe to auto-run them on restore -
-  // otherwise the tab looks silently empty even though the table has data (never actually queried).
+  // Table tabs only ever pull PAGE_BATCH rows per round trip through the cursor-streaming
+  // pipeline regardless of table size, so it's safe to auto-run them on restore - otherwise
+  // the tab looks silently empty even though the table has data (never actually queried).
   // Plain query tabs could be arbitrary/heavy, so those restore WITHOUT auto-running; a clear
   // status message replaces what would otherwise look like a blank, broken result.
   const id=openTab(t.title,t.sql,t.db,!!t.table,t.table);
@@ -1861,8 +1862,12 @@ async function cancelQuery(id){const t=T(id);if(!t)return;if(t.abortCtrl){try{t.
 function updatePager(id){const t=T(id);const p=$('pager_'+id);if(!p)return;const total=(t._total!=null?t._total:(t.rows?t.rows.length:0));if(!total){p.innerHTML='';return;}
  p.innerHTML='<span class="muted">'+fmtCount(total)+(t.hasMore?'+':'')+' row(s) loaded</span>';}
 function toggleLast(id){const t=T(id);const ta=$('ed_'+id);if(t.prevRun==null){log('No previous query to toggle to yet.');return;}ta.value=t.prevRun;if(typeof syncHl==='function')syncHl(id);runSql(id,t.prevRun);}
-function toggleAll(id){const t=T(id);if(!t.table)return;const ta=$('ed_'+id);const base='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+' LIMIT 1000;';const cur=(ta.value||'').trim();if(cur!==base.trim()){t.beforeAll=ta.value;ta.value=base;}else if(t.beforeAll!=null){ta.value=t.beforeAll;}else{ta.value=base;}if(typeof syncHl==='function')syncHl(id);runSql(id,ta.value);}
-async function openRun(id){const t=T(id);const wh=t.filter?(' WHERE '+t.filter):'';const sql='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+wh+' LIMIT 1000;';$('ed_'+id).value=sql;syncHl(id);await runSql(id,sql);updateFilterBar(id);}
+function toggleAll(id){const t=T(id);if(!t.table)return;const ta=$('ed_'+id);const base='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+';';const cur=(ta.value||'').trim();if(cur!==base.trim()){t.beforeAll=ta.value;ta.value=base;}else if(t.beforeAll!=null){ta.value=t.beforeAll;}else{ta.value=base;}if(typeof syncHl==='function')syncHl(id);runSql(id,ta.value);}
+// t.filterClauses holds every active quick-filter condition (right-click "Quick filter"), ANDed
+// together - lets you stack e.g. status='active' AND created_at>'2024-01-01' instead of the last
+// pick replacing the one before it.
+function combinedFilterWhere(t){return (t.filterClauses&&t.filterClauses.length)?t.filterClauses.join(' AND '):null;}
+async function openRun(id){const t=T(id);const where=combinedFilterWhere(t);const wh=where?(' WHERE '+where):'';const sql='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+wh+';';$('ed_'+id).value=sql;syncHl(id);await runSql(id,sql);updateFilterBar(id);}
 
 // ---- editable grid with pending changes ----
 function clip(v,n){const s=String(v);return s.length>n?s.slice(0,n)+'\u2026':s;}
@@ -2221,12 +2226,12 @@ function inlineEditIns(td,id,ii,col){const t=T(id);const cur=t.pending.ins[ii][c
  nb.addEventListener('mousedown',e=>{e.preventDefault();set(null);});
  inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();if(dirty)set(inp.value);else{done=true;renderGrid(id);}}else if(e.key==='Escape'){done=true;renderGrid(id);}});
  inp.addEventListener('blur',()=>setTimeout(()=>{if(!done){if(dirty)set(inp.value);else renderGrid(id);}},120));}
-function cellMenu(e,id,ri,ci){e.preventDefault();const t=T(id);const key=ri+':'+ci;const cur=(t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];const items=[['Copy value',()=>{navigator.clipboard.writeText(cur===null?'':String(cur));log('Copied cell value.');}],['Copy row',()=>copyRow(id,ri)],['Copy rows (selected)',()=>copySelRows(id)],['Paste row here (overwrite)',()=>pasteRowInto(id,ri)],['Paste rows as new',()=>pasteRowsAsNew(id)],['Copy column: '+t.cols[ci],()=>copyColumn(id,ci)],['Edit full row (form)...',()=>rowForm(id,ri)],'-'];if(t.table){const col=t.cols[ci];items.push(['Quick filter',qfSub(id,col,cur)]);if(t.filter)items.push(['Clear filter',()=>setFilterWhere(id,null)]);
+function cellMenu(e,id,ri,ci){e.preventDefault();const t=T(id);const key=ri+':'+ci;const cur=(t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];const items=[['Copy value',()=>{navigator.clipboard.writeText(cur===null?'':String(cur));log('Copied cell value.');}],['Copy row',()=>copyRow(id,ri)],['Copy rows (selected)',()=>copySelRows(id)],['Paste row here (overwrite)',()=>pasteRowInto(id,ri)],['Paste rows as new',()=>pasteRowsAsNew(id)],['Copy column: '+t.cols[ci],()=>copyColumn(id,ci)],['Edit full row (form)...',()=>rowForm(id,ri)],'-'];if(t.table){const col=t.cols[ci];items.push(['Quick filter',qfSub(id,col,cur)]);if(t.filterClauses&&t.filterClauses.length)items.push(['Clear filter ('+t.filterClauses.length+')',()=>clearFilters(id)]);
   const fkd=(t.fkDetails||[]).find(f=>f[0]===col);
   if(fkd&&cur!=null){items.push(['Go to referenced row ('+fkd[1]+'.'+fkd[2]+')',()=>goToFkRow(t.db,fkd[1],fkd[2],cur)]);}
   items.push('-');}items.push(['Export to CSV (all rows)...',()=>csvGrid(id)],['Export to CSV (selected rows)...',()=>csvSel(id)],['Export to INSERTs (all rows)...',()=>insGrid(id)],['Export to INSERTs (selected rows)...',()=>insSel(id)],'-',['Set NULL',()=>setUpd(id,ri,ci,null)],['Set empty',()=>setUpd(id,ri,ci,'')]);menu(e.clientX,e.clientY,items);}
 function goToFkRow(db,refTable,refCol,val){
- const _i=openTab(refTable+' (FK: '+refCol+'='+val+')','SELECT * FROM '+qid(db)+'.'+qid(refTable)+' WHERE '+qid(refCol)+'='+lit(val)+' LIMIT 1000;',db,false,refTable);
+ const _i=openTab(refTable+' (FK: '+refCol+'='+val+')','SELECT * FROM '+qid(db)+'.'+qid(refTable)+' WHERE '+qid(refCol)+'='+lit(val)+';',db,false,refTable);
  openRun(_i);
 }
 function copyRow(id,ri){const t=T(id);const vals=t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];});window._rowClipboard=vals;navigator.clipboard.writeText(vals.map(v=>v===null?'':v).join('\t')).then(()=>log('Copied 1 row (TSV, '+t.cols.length+' column(s)).'));}
@@ -2237,17 +2242,21 @@ function pasteRowInto(id,ri){const t=T(id);if(!t.pk){toast('This result is not e
 function pasteRowsAsNew(id){const t=T(id);if(!t.pending){toast('This result is not editable (no primary key detected).',true);return;}const rowsData=window._rowsClipboard;if(!rowsData||!rowsData.length){toast('Copy some rows first (Copy rows (selected)), then paste them as new rows.',true);return;}const bad=rowsData.find(vals=>vals.length!==t.cols.length);if(bad){toast('Copied row(s) have a different number of columns than this table. Cannot paste.',true);return;}rowsData.forEach(vals=>{const obj={};t.cols.forEach((c,ci)=>{obj[c]=vals[ci];});t.pending.ins.push(obj);});renderGrid(id);log('Pasted '+rowsData.length+' row(s) as new rows. Review and click Apply to commit.');}
 function copyColumn(id,ci){const t=T(id);const vals=t.rows.map((row,ri)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:row[ci];});navigator.clipboard.writeText(vals.map(v=>v===null?'':v).join('\n')).then(()=>log('Copied '+vals.length+' value(s) from column "'+t.cols[ci]+'".'));}
 function qfSub(id,col,val){const q=qid(col);const lv=lit(val);const esc=s=>String(s).replace(/([%_\\])/g,'\\$1').replace(/'/g,"''");const sub=[];
- if(val===null){sub.push([q+' IS NULL',()=>setFilterWhere(id,q+' IS NULL')]);sub.push([q+' IS NOT NULL',()=>setFilterWhere(id,q+' IS NOT NULL')]);return sub;}
+ if(val===null){sub.push([q+' IS NULL',()=>addFilterClause(id,q+' IS NULL')]);sub.push([q+' IS NOT NULL',()=>addFilterClause(id,q+' IS NOT NULL')]);return sub;}
  const sv=String(val).trim();const isNum=/^-?\d+(\.\d+)?$/.test(sv);const isDate=/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$/.test(sv);
  const like=String(val);const ld=(like.length>16?like.slice(0,16)+'\u2026':like);
  // display value for =/!= labels: truncated for readability; the actual filter still uses the full value (lv)
  const lvd="'"+(sv.length>16?sv.slice(0,16)+'\u2026':sv)+"'";const dv=isNum?lv:lvd;
- sub.push([q+' = '+dv,()=>setFilterWhere(id,q+' = '+lv)]);sub.push([q+' != '+dv,()=>setFilterWhere(id,q+' <> '+lv)]);
- if(isNum||isDate){sub.push('-');sub.push([q+' > '+dv,()=>setFilterWhere(id,q+' > '+lv)]);sub.push([q+' >= '+dv,()=>setFilterWhere(id,q+' >= '+lv)]);sub.push([q+' < '+dv,()=>setFilterWhere(id,q+' < '+lv)]);sub.push([q+' <= '+dv,()=>setFilterWhere(id,q+' <= '+lv)]);}
- if(!isNum){sub.push('-');sub.push([q+" LIKE '%"+ld+"%'",()=>setFilterWhere(id,q+" LIKE '%"+esc(like)+"%'")]);sub.push([q+" LIKE '"+ld+"%'",()=>setFilterWhere(id,q+" LIKE '"+esc(like)+"%'")]);if(!isDate)sub.push([q+" LIKE '%"+ld+"'",()=>setFilterWhere(id,q+" LIKE '%"+esc(like)+"'")]);}
- sub.push('-');sub.push([q+' IS NULL',()=>setFilterWhere(id,q+' IS NULL')]);sub.push([q+' IS NOT NULL',()=>setFilterWhere(id,q+' IS NOT NULL')]);return sub;}
-async function setFilterWhere(id,where){const t=T(id);t.filter=where;await openRun(id);if(where)log('Filter: '+where);else log('Filter cleared.');}
-function updateFilterBar(id){const t=T(id);const st=$('st_'+id);if(!st)return;st.title=t.filter?('WHERE '+t.filter):'';}
+ sub.push([q+' = '+dv,()=>addFilterClause(id,q+' = '+lv)]);sub.push([q+' != '+dv,()=>addFilterClause(id,q+' <> '+lv)]);
+ if(isNum||isDate){sub.push('-');sub.push([q+' > '+dv,()=>addFilterClause(id,q+' > '+lv)]);sub.push([q+' >= '+dv,()=>addFilterClause(id,q+' >= '+lv)]);sub.push([q+' < '+dv,()=>addFilterClause(id,q+' < '+lv)]);sub.push([q+' <= '+dv,()=>addFilterClause(id,q+' <= '+lv)]);}
+ if(!isNum){sub.push('-');sub.push([q+" LIKE '%"+ld+"%'",()=>addFilterClause(id,q+" LIKE '%"+esc(like)+"%'")]);sub.push([q+" LIKE '"+ld+"%'",()=>addFilterClause(id,q+" LIKE '"+esc(like)+"%'")]);if(!isDate)sub.push([q+" LIKE '%"+ld+"'",()=>addFilterClause(id,q+" LIKE '%"+esc(like)+"'")]);}
+ sub.push('-');sub.push([q+' IS NULL',()=>addFilterClause(id,q+' IS NULL')]);sub.push([q+' IS NOT NULL',()=>addFilterClause(id,q+' IS NOT NULL')]);return sub;}
+// Adds one more ANDed condition to the table tab's active quick filter (does not replace the
+// existing ones) - lets right-clicking two different cells build up a compound WHERE, matching
+// how Heidi's quick-filter stacking works. Re-picking the exact same condition is a no-op.
+async function addFilterClause(id,clause){const t=T(id);if(!t.filterClauses)t.filterClauses=[];if(t.filterClauses.includes(clause))return;t.filterClauses.push(clause);await openRun(id);log('Filter: '+t.filterClauses.join(' AND '));}
+async function clearFilters(id){const t=T(id);t.filterClauses=[];await openRun(id);log('Filter cleared.');}
+function updateFilterBar(id){const t=T(id);const st=$('st_'+id);if(!st)return;const w=combinedFilterWhere(t);st.title=w?('WHERE '+w):'';}
 let _rf=null;
 function rowForm(id,ri){const t=T(id);_rf={id:id,ri:ri};$('rfTitle').textContent='Edit row'+(t.table?(' - '+t.table):'');const box=$('rfFields');box.innerHTML='';
  t.cols.forEach((c,ci)=>{const key=ri+':'+ci;const cur=(t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];
