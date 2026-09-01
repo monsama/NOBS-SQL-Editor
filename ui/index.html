@@ -843,7 +843,7 @@ function disconnect(){window.mariadb=false;document.body.classList.add('disconne
  const _n=$('connlist')&&$('connlist').value;const _m=_n?(connMeta()[_n]||{}):{};renderEnvChip(_m.env||'', !!_m.readonly, _m.accent||(_n?accMap()[_n]:'')||'');
  const _sb=$('schemaBadge');if(_sb){_sb.style.display='none';_sb.textContent='';}
  document.body.classList.remove('ro');log('Disconnected.');}
-async function refreshSchemasAndTables(){await loadSchemas();if(typeof curSchema!=='undefined'&&curSchema){await loadObjects(curSchema);}}
+async function refreshSchemasAndTables(){await loadSchemas();if(typeof curSchema!=='undefined'&&curSchema){await loadObjects(curSchema,true);}}
 async function loadSchemas() {
     const r = await api('/api/schemas');
     const box = $('schemas');
@@ -966,7 +966,13 @@ async function fetchNextBatch(id){
  finally{t.fetchingMore=false;if(T(id)){t.runningReqId=null;setRunning(id,false);}}
 }
 let objData=null;
-async function loadObjects(db) {
+// force=true skips the cached sizes entirely and always re-fetches - used by the schema/table
+// list's own Refresh button, whose whole point is "show me the current state now", not "show me
+// whatever was cached up to 5 minutes ago". Every other caller (switching schemas, DDL apply,
+// drop/rename/duplicate, script runs, CSV import) omits it and keeps the cache, since those don't
+// need a fresh size for tables they didn't just touch (and several of them already invalidate
+// just the one table's cache entry via invalidateTableCache where that's the relevant case).
+async function loadObjects(db, force) {
     const r = await api('/api/objects', { db });
     if (!r.ok) { log('  ' + r.error); return; }
 
@@ -974,7 +980,7 @@ async function loadObjects(db) {
     let cachedSizes = {};
     let cachedRowCounts = {};
     let cacheValid = false;
-    try {
+    if (!force) try {
         const cacheKey = 'tableSizes_' + connKey() + '_' + db;
         const cached = localStorage.getItem(cacheKey);
         if (cached) {
