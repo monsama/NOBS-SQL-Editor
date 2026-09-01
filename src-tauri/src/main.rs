@@ -265,6 +265,18 @@ fn is_binaryish(c: &Column) -> bool {
         _ => false,
     }
 }
+// is_binaryish() above answers "does this column display/round-trip as a 0x.. hex literal" -
+// true for BOTH BIT and real binary (BLOB/VARBINARY/etc) columns, which is all display needs to
+// know. But the two have different VALID WRITE syntax in MySQL: a bare integer literal
+// (`INSERT ... VALUES (8)`) is a correct, unambiguous way to set a BIT column - MySQL treats it
+// as the bit pattern, not as text - while the same bare integer sent to a true binary/BLOB column
+// would store the bytes of the digit character itself. The editor's write-validation needs this
+// finer distinction (see applyChanges() client-side, and the bitCols field in query()'s
+// response) so it can accept a plain "0"/"1" for a BIT flag column - the overwhelmingly common
+// case - without also opening the door to that byte-corruption mistake on a real binary column.
+fn is_bit_col(c: &Column) -> bool {
+    matches!(c.column_type(), mysql::consts::ColumnType::MYSQL_TYPE_BIT)
+}
 fn val_to_opt(v: &MyValue, binaryish: bool) -> Option<String> {
     match v {
         MyValue::NULL => None,
@@ -383,10 +395,10 @@ fn next_cursor_id() -> String {
 // which are binary, or the error `conn.query_iter` failed with), and the sender used for every
 // Fetch/Close for the lifetime of the cursor.
 fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String, request_id: Option<String>) -> (
-    std::sync::mpsc::Receiver<Result<(Vec<String>, Vec<bool>), String>>,
+    std::sync::mpsc::Receiver<Result<(Vec<String>, Vec<bool>, Vec<bool>), String>>,
     std::sync::mpsc::Sender<CursorCmd>,
 ) {
-    let (open_tx, open_rx) = std::sync::mpsc::channel::<Result<(Vec<String>, Vec<bool>), String>>();
+    let (open_tx, open_rx) = std::sync::mpsc::channel::<Result<(Vec<String>, Vec<bool>, Vec<bool>), String>>();
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CursorCmd>();
     std::thread::spawn(move || {
         let mut conn = conn;
@@ -411,7 +423,8 @@ fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String, request_id: O
         };
         let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
         let bin: Vec<bool> = result.columns().as_ref().iter().map(|c| is_binaryish(c)).collect();
-        if open_tx.send(Ok((cols.clone(), bin.clone()))).is_err() { cleanup(&request_id); return; } // caller went away
+        let bit: Vec<bool> = result.columns().as_ref().iter().map(|c| is_bit_col(c)).collect();
+        if open_tx.send(Ok((cols.clone(), bin.clone(), bit.clone()))).is_err() { cleanup(&request_id); return; } // caller went away
 
         loop {
             // Idle safety net: an abandoned cursor (tab closed without the UI's cleanup call
@@ -459,10 +472,10 @@ fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String, request_id: O
 // page of rows, and has_more. `request_id`, if supplied, is the same id query() registered in
 // running_queries() before calling this - handed to the cursor thread so it (not this function's
 // caller) can eventually clear that registration once the cursor genuinely closes.
-fn open_cursor(conn: Conn, sql: String, first_n: usize, request_id: Option<String>) -> Result<(String, Vec<String>, Vec<bool>, Vec<Vec<Option<String>>>, bool), String> {
+fn open_cursor(conn: Conn, sql: String, first_n: usize, request_id: Option<String>) -> Result<(String, Vec<String>, Vec<bool>, Vec<bool>, Vec<Vec<Option<String>>>, bool), String> {
     let cursor_id = next_cursor_id();
     let (open_rx, cmd_tx) = spawn_cursor_thread(conn, sql, cursor_id.clone(), request_id);
-    let (cols, bin) = match open_rx.recv() {
+    let (cols, bin, bit) = match open_rx.recv() {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => return Err(e),
         Err(_) => return Err("Cursor thread failed to start.".to_string()),
@@ -482,7 +495,7 @@ fn open_cursor(conn: Conn, sql: String, first_n: usize, request_id: Option<Strin
     if !cols.is_empty() && batch.has_more {
         cursors().lock().unwrap().insert(cursor_id.clone(), cmd_tx);
     }
-    Ok((cursor_id, cols, bin, batch.rows, batch.has_more))
+    Ok((cursor_id, cols, bin, bit, batch.rows, batch.has_more))
 }
 
 // ---------- SQL text helpers (identifier + literal, Workbench-style + hex rule) ----------
@@ -944,13 +957,13 @@ async fn query(req: Value) -> R {
         // returns, and the removal below is what clears it otherwise.
         let mut cursor_persists = false;
         let result = match open_cursor(c, sql, page_size, request_id.clone()) {
-            Ok((cursor_id, cols, bin, rows, has_more)) => {
+            Ok((cursor_id, cols, bin, bit, rows, has_more)) => {
                 cursor_persists = has_more;
                 if cols.is_empty() {
                     Ok(json!({"ok":true,"columns":[],"rows":[],"elapsedMs":t.elapsed().as_millis() as u64,"message":"Query OK. No result set."}))
                 } else {
                     let cursor_id_for_response = if has_more { Some(cursor_id) } else { None };
-                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"hasMore":has_more,"cursorId":cursor_id_for_response,"elapsedMs":t.elapsed().as_millis() as u64}))
+                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"bitCols":bit,"hasMore":has_more,"cursorId":cursor_id_for_response,"elapsedMs":t.elapsed().as_millis() as u64}))
                 }
             }
             Err(e) => {
@@ -3383,9 +3396,16 @@ mod binary_col_tests {
                              "conn":conn,"db":"nobs_test"})).await.unwrap();
         let cols: Vec<String> = r["columns"].as_array().unwrap().iter().map(|v| v.as_str().unwrap().to_string()).collect();
         let bin: Vec<bool> = r["binaryCols"].as_array().expect("binaryCols missing").iter().map(|v| v.as_bool().unwrap()).collect();
-        for (c, b) in cols.iter().zip(bin.iter()) { println!("  {:<10} binary={}", c, b); }
+        let bit: Vec<bool> = r["bitCols"].as_array().expect("bitCols missing").iter().map(|v| v.as_bool().unwrap()).collect();
+        for ((c, b), t) in cols.iter().zip(bin.iter()).zip(bit.iter()) { println!("  {:<10} binary={} bit={}", c, b, t); }
         assert_eq!(bin, vec![false, false, true, true, true, true],
                    "id and emoji are text; bin_col, blob_col and both BIT columns are binary");
+        // bitCols narrows binaryCols to just the BIT(n) columns: bin_col/blob_col are real
+        // binary data (only a 0x.. hex literal is safe there) but not BIT, so a bare integer
+        // literal sent to them would store the bytes of its digit character, not a number -
+        // unlike bit_col/bit8, where MySQL accepts a bare integer as the correct bit pattern.
+        assert_eq!(bit, vec![false, false, false, false, true, true],
+                   "only bit_col and bit8 are BIT columns; bin_col/blob_col are binary but not BIT");
     }
 }
 
