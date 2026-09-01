@@ -326,6 +326,35 @@ fn run_select(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option
     Ok((c, r))
 }
 
+// Row cap for ad-hoc queries run from the editor: without this, a query with a high or missing
+// LIMIT against a large table gets fully materialized into memory (once in the driver's row
+// buffers, again in this Vec, again in the serde_json::Value tree, again in the serialized IPC
+// payload) - on a multi-GB table that exhausts the process's memory and the allocator aborts the
+// whole app rather than returning an error. Stopping the fetch loop itself, before the extra
+// copies happen, bounds worst-case memory regardless of what the user's SQL asks for. Any rows
+// left unread when `result` drops are drained by the mysql crate's own Drop impl, one at a time
+// off the wire, so the discarded tail is never materialized either.
+const QUERY_ROW_CAP: usize = 50_000;
+
+fn run_select_bin_capped(conn: &mut Conn, sql: &str, cap: usize) -> Result<(Vec<String>, Vec<Vec<Option<String>>>, Vec<bool>, bool), String> {
+    let mut result = conn.query_iter(sql).map_err(db_err)?;
+    let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
+    let bin: Vec<bool> = result.columns().as_ref().iter().map(|c| is_binaryish(c)).collect();
+    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+    let mut truncated = false;
+    for r in result.by_ref() {
+        if rows.len() >= cap { truncated = true; break; }
+        let row = r.map_err(db_err)?;
+        let mut cells = Vec::with_capacity(cols.len());
+        for i in 0..cols.len() {
+            let v = row.as_ref(i).cloned().unwrap_or(MyValue::NULL);
+            cells.push(val_to_opt(&v, *bin.get(i).unwrap_or(&false)));
+        }
+        rows.push(cells);
+    }
+    Ok((cols, rows, bin, truncated))
+}
+
 // ---------- SQL text helpers (identifier + literal, Workbench-style + hex rule) ----------
 fn sql_id(name: &str) -> String { format!("`{}`", name.replace('`', "``")) }
 // Mirrors the PowerShell version's Test-SqlReadOnly: strips /* */, --, and # comments, then
@@ -752,14 +781,12 @@ async fn query(req: Value) -> R {
             }
         }
         let t = std::time::Instant::now();
-        let result = match run_select_bin(&mut c, &sql) {
-            Ok((cols, rows, bin)) => {
+        let result = match run_select_bin_capped(&mut c, &sql, QUERY_ROW_CAP) {
+            Ok((cols, rows, bin, truncated)) => {
                 if cols.is_empty() {
                     Ok(json!({"ok":true,"columns":[],"rows":[],"elapsedMs":t.elapsed().as_millis() as u64,"message":"Query OK. No result set."}))
                 } else {
-                    // No artificial row cap here - the query's own LIMIT is what bounds the result;
-                    // paging through what's returned is handled client-side (matches the PS version).
-                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"elapsedMs":t.elapsed().as_millis() as u64}))
+                    Ok(json!({"ok":true,"columns":cols,"rows":rows,"binaryCols":bin,"truncated":truncated,"elapsedMs":t.elapsed().as_millis() as u64}))
                 }
             }
             Err(e) => {

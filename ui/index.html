@@ -915,7 +915,8 @@ function updateStatusLine(id){const t=T(id);if(!t||!t.rows)return;const st=$('st
   const viewLabel=(t.rows.length>0)?(' View shows '+viewRangeLabel(id)+'.'):'';
   const ms=(t.lastElapsedMs!=null)?(' '+t.lastElapsedMs+' ms'):'';
   st.className='status';
-  st.textContent=rowLabel+viewLabel+ms+(t.pk?('  |  editable PK: '+t.pk.join(', ')):'');
+  const truncLabel=t.truncated?'  |  truncated - add a LIMIT to see more':'';
+  st.textContent=rowLabel+viewLabel+ms+truncLabel+(t.pk?('  |  editable PK: '+t.pk.join(', ')):'');
 }
 let objData=null;
 async function loadObjects(db) {
@@ -1728,7 +1729,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     if(r.aborted){if(T(id)){st.className='status';st.textContent='Query cancelled.';}return;}
     if(!T(id))return;
     if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));return;}
-    t.cols=r.columns;t.binCols=r.binaryCols||[];t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
+    t.cols=r.columns;t.binCols=r.binaryCols||[];t.rows=r.rows;t.truncated=!!r.truncated;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
     if(!r.columns.length){st.textContent=r.message||'Query OK.';$('res_'+id).innerHTML='';updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';return;}
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
     if(t.table){const pk=await api('/api/pk',{db:t.db,table:t.table});if(pk.ok&&pk.pk.length){t.pk=pk.pk;t.pending={upd:{},del:new Set(),ins:[]};}
@@ -1742,6 +1743,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     if(!T(id))return;
     t.lastElapsedMs=r.elapsedMs;
     if(r.fetchMs!=null&&r.jsonMs!=null&&r.elapsedMs>=300){log(fmtCount(t.rows.length)+' row(s) fetched in '+fmtMs(r.elapsedMs)+' (parse '+fmtMs(r.fetchMs)+', JSON '+fmtMs(r.jsonMs)+').');}
+    if(t.truncated)log('Result truncated at '+fmtCount(t.rows.length)+' rows to avoid running out of memory - add a LIMIT to your query to see a specific range.');
     renderGrid(id);updatePager(id);
     updateStatusLine(id);
     updateSchemaBadge(id);
