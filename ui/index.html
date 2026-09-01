@@ -177,7 +177,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 <div id="objTypePicker"></div>
 <div id="copyMenu"></div>
 <div id="acx"></div>
-<div class="modal floating" id="mBrowse"><div class="box" style="max-width:660px;top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mBrowse')" title="Drag to move"><h3 id="brTitle" style="margin:0 0 10px">Browse</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mBrowse')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
+<div class="modal floating" id="mBrowse"><div class="box" style="width:660px;max-width:95vw;top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mBrowse')" title="Drag to move"><h3 id="brTitle" style="margin:0 0 10px">Browse</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mBrowse')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="row"><button class="sm" onclick="brUp()">&#8593; Up</button> <b id="brPath" style="font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px"></b></div>
  <div id="brList" style="height:340px;overflow:auto;border:1px solid var(--bd2);padding:2px"></div>
  <div class="row"><span id="brActions"></span><span style="flex:1"></span><button onclick="brClose()">Cancel</button></div></div></div>
@@ -192,7 +192,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
   <div id="vHexTabs" style="display:none;gap:6px;margin-right:auto"><button id="vTabText" onclick="switchHexTab('text')">Text</button><button id="vTabHex" onclick="switchHexTab('hex')">Hex</button></div>
   <div class="row" id="vActions"></div>
  </div></div></div>
-<div class="modal floating" id="mCsv"><div class="box" style="top:70px;left:140px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mCsv')" title="Drag to move"><h3 id="csvTitle" style="margin:0 0 10px">Import CSV into table</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCsv')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
+<div class="modal floating" id="mCsv"><div class="box" style="width:900px;max-width:95vw;top:70px;left:140px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mCsv')" title="Drag to move"><h3 id="csvTitle" style="margin:0 0 10px">Import CSV into table</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCsv')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="row">CSV file <input id="csvFile" style="flex:1"><button onclick="browse({title:'Select CSV file',filter:'*.csv',mode:'file',onPick:pp=>$('csvFile').value=pp})">Browse...</button></div>
  <div class="row"><label title="The first row of the CSV contains the column names"><input type="checkbox" id="csvHeader" checked> first row is header</label>
   <span style="margin-left:12px">Mode:</span>
@@ -201,7 +201,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="muted" style="font-size:11px">Columns are matched to the table by header name; unmatched CSV columns are ignored. A cell equal to the NULL value below is imported as NULL; an empty cell is imported as an empty string. Clear the NULL value to import empty cells as NULL instead, which is usually what a spreadsheet means. For an exact restore of a whole database, prefer Export/Import (mysqldump).</div>
  <div class="row" style="justify-content:flex-end"><button class="go" onclick="runCsvImport()">Import</button><button onclick="hide('mCsv')">Close</button></div>
  <div id="csvLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:200px;overflow:auto;margin-top:6px"></div></div></div>
-<div class="modal floating" id="mExport"><div class="box" style="top:80px;left:120px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mExport')" title="Drag to move"><h3 style="margin:0 0 10px">Data Export</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mExport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
+<div class="modal floating" id="mExport"><div class="box" style="width:900px;max-width:95vw;top:80px;left:120px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mExport')" title="Drag to move"><h3 style="margin:0 0 10px">Data Export</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mExport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="row"><b>Databases</b> <button onclick="expAll(true)">All</button><button onclick="expAll(false)">None</button></div>
  <div id="expDbs" style="max-height:150px;overflow:auto;border:1px solid var(--bd2);padding:6px"></div>
  <div class="row"><b>Options</b></div><div class="grid2" id="expOpts"></div>
@@ -218,7 +218,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  </div>
  <div id="expLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:220px;overflow:auto;margin-top:6px"></div></div></div>
 
-<div class="modal floating" id="mImport"><div class="box" style="top:80px;left:200px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mImport')" title="Drag to move"><h3 style="margin:0 0 10px">Data Import</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mImport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div><div class="row">SQL file paths (one per line):</div>
+<div class="modal floating" id="mImport"><div class="box" style="width:900px;max-width:95vw;top:80px;left:200px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mImport')" title="Drag to move"><h3 style="margin:0 0 10px">Data Import</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mImport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div><div class="row">SQL file paths (one per line):</div>
  <textarea id="impFiles" style="width:100%;height:90px;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;white-space:pre;overflow:auto"></textarea>
  <div class="row"><button onclick="impAddFiles()">Add files...</button><button onclick="impAddFolder()">Add folder (all .sql)...</button><button class="sm" onclick="$('impFiles').value=''">Clear</button></div>
  <div class="row">Target DB <input id="impDb" list="impDbList" placeholder="(blank if dump has CREATE DATABASE)" style="width:320px"><datalist id="impDbList"></datalist></div>
@@ -314,7 +314,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row" style="justify-content:flex-end"><button onclick="hide('mErd')">Close</button></div>
 </div></div>
 
-<div class="modal floating" id="mHist"><div class="box" style="top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mHist')" title="Drag to move"><h3 style="margin:0 0 10px">Query History</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mHist')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
+<div class="modal floating" id="mHist"><div class="box" style="width:900px;max-width:95vw;top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mHist')" title="Drag to move"><h3 style="margin:0 0 10px">Query History</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mHist')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div id="histList" style="max-height:400px;overflow:auto"></div>
  <div class="row" style="justify-content:flex-end"><button class="warn" onclick="clearHistory()">Clear history</button><button onclick="hide('mHist')">Close</button></div></div></div>
 <div class="modal floating" id="mRowForm"><div class="box" style="width:560px;max-width:94vw;top:70px;left:160px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mRowForm')" title="Drag to move"><h3 id="rfTitle" style="margin:0 0 10px">Edit row</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mRowForm')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
@@ -379,7 +379,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div id="libList" style="max-height:380px;overflow:auto;border:1px solid var(--bd);border-radius:4px"></div>
  <div class="row"><button class="warn" onclick="libClearAll()" title="Delete all saved queries">Clear all</button><button onclick="libExport()" title="Download the whole library as a JSON file">Export library</button><button onclick="$('libFile').click()" title="Load a query-library.json from another machine (merges)">Import library</button><input type="file" id="libFile" accept="application/json,.json" style="display:none" onchange="libImportFile(event)"><span style="flex:1"></span><button onclick="hide('mLib')">Close</button></div></div></div>
 
-<div class="modal floating" id="mDesign"><div class="box" style="max-width:960px;top:40px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mDesign')" title="Drag to move"><h3 id="dTitle" style="margin:0 0 10px">Table designer</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mDesign')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
+<div class="modal floating" id="mDesign"><div class="box" style="width:960px;max-width:95vw;top:40px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mDesign')" title="Drag to move"><h3 id="dTitle" style="margin:0 0 10px">Table designer</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mDesign')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="row">Schema <input id="dSchema" style="width:180px"> Table <input id="dName" style="width:220px"> <span id="dMode" class="muted"></span></div>
  <table class="dz"><thead><tr><th>Column</th><th>Type</th><th>Length</th><th title="NOT NULL">NN</th><th title="AUTO_INCREMENT">AI</th><th title="PRIMARY KEY">PK</th><th>Default</th><th>Comment</th><th></th></tr></thead><tbody id="dCols"></tbody></table>
  <div class="row"><button onclick="dAddCol()">+ Column</button></div>
@@ -2203,8 +2203,13 @@ function switchHexTab(mode){
 }
 function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;const ta=$('vText');const sel=$('vSelect');const multi=$('vMulti');const dt=$('vDate');const hexTabs=$('vHexTabs');const img=$('vImg');
  // A date/time value only needs room for the native picker widget, not the full 780px meant for
- // long text - a narrower modal reads much better for a single date/time/datetime cell.
- $('mView').querySelector('.box').style.maxWidth=opts.dateType?'380px':'780px';
+ // long text - a narrower modal reads much better for a single date/time/datetime cell. Setting
+ // an explicit width (not just max-width) keeps that as the default OPEN size in both cases, but
+ // max-width only capped resize-corner dragging at that same value - a long single-line value
+ // (long JSON, say) could never actually be dragged any wider, only taller. Raising the ceiling
+ // well past the default width (95vw for text, 600px for dates) fixes that while leaving the
+ // default size unchanged; the inner textarea already tracks the box via width:100%.
+ {const box=$('mView').querySelector('.box');box.style.width=opts.dateType?'380px':'780px';box.style.maxWidth=opts.dateType?'600px':'95vw';}
  ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';hexTabs.style.display='none';img.style.display='none';img.removeAttribute('src');_vHexState=null;
  // Checkbox mode: SET columns, whose valid values are any comma-joined COMBINATION of the
  // column's defined members - unlike ENUM (exactly one value), a single dropdown can't represent
