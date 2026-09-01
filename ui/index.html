@@ -93,6 +93,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  .modal.show{display:flex} .box{background:var(--bg);color:var(--fg);border-radius:6px;padding:16px;max-width:900px;width:94%;max-height:92%;overflow:auto;box-shadow:0 10px 40px rgba(0,0,0,.4)}
  .box h3{margin:0 0 10px} .grid2{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px}
  label.ck{display:block;padding:2px 0} .row{display:flex;gap:8px;align-items:center;margin:6px 0;flex-wrap:wrap} .muted{color:var(--muted);font-size:12px}
+ #vActions{justify-content:flex-end}
  #ctx{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:180px}
  #colPicker{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
  #copyMenu{position:fixed;background:var(--bg);border:1px solid var(--bd);box-shadow:0 4px 14px rgba(0,0,0,.3);z-index:9500;display:none;min-width:200px;max-height:320px;overflow:auto;padding:6px 0}
@@ -188,7 +189,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
   <label title="Add the CSV rows to the existing table (does not delete anything)"><input type="radio" name="csvmode" id="csvAppend" checked> Append</label>
   <label title="Empty the table first, then load (use this to restore a table from its own export)"><input type="radio" name="csvmode" id="csvReplace"> Replace (truncate first)</label><label style="margin-left:14px" title="A cell holding exactly this is imported as NULL. Clear it to treat empty cells as NULL instead.">NULL value <input id="csvNullVal" value="\N" style="width:52px;font-family:Consolas,monospace"></label></div>
  <div class="muted" style="font-size:11px">Columns are matched to the table by header name; unmatched CSV columns are ignored. A cell equal to the NULL value below is imported as NULL; an empty cell is imported as an empty string. Clear the NULL value to import empty cells as NULL instead, which is usually what a spreadsheet means. For an exact restore of a whole database, prefer Export/Import (mysqldump).</div>
- <div class="row"><button class="go" onclick="runCsvImport()">Import</button><button onclick="hide('mCsv')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button class="go" onclick="runCsvImport()">Import</button><button onclick="hide('mCsv')">Close</button></div>
  <div id="csvLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:200px;overflow:auto;margin-top:6px"></div></div></div>
 <div class="modal floating" id="mExport"><div class="box" style="top:80px;left:120px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mExport')" title="Drag to move"><h3 style="margin:0">Data Export</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mExport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="row"><b>Databases</b> <button onclick="expAll(true)">All</button><button onclick="expAll(false)">None</button></div>
@@ -200,7 +201,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
   <label title="mysqldump --max-allowed-packet. Raise this for very large rows or BLOBs (e.g. 1G).">max packet <input id="expMaxPacket" value="1G" style="width:56px"></label>
   <label id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none">filename <input id="expFilename" placeholder="all_selected" style="width:120px"></label></div>
  <div class="row">Folder <input id="expFolder" style="flex:1" value="C:\temp"><button onclick="browse({title:'Select export folder',mode:'folder',start:$('expFolder').value,onPick:pp=>$('expFolder').value=pp})">Browse...</button></div>
- <div class="row"><button class="go" id="expGoBtn" onclick="runExport()">Start Export</button><button class="warn" id="expCancelBtn" disabled onclick="cancelJob('exp')">Cancel</button><button onclick="hide('mExport')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button class="go" id="expGoBtn" onclick="runExport()">Start Export</button><button class="warn" id="expCancelBtn" disabled onclick="cancelJob('exp')">Cancel</button><button onclick="hide('mExport')">Close</button></div>
  <div id="expProgress" style="display:none;margin-top:8px">
    <div style="height:6px;border-radius:3px;background:var(--panel2);overflow:hidden"><div id="expBar" style="height:100%;width:40%;background:var(--accent);animation:expmove 1.1s ease-in-out infinite"></div></div>
    <div id="expProgLabel" class="muted" style="font-size:11px;margin-top:4px"></div>
@@ -212,7 +213,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row"><button onclick="impAddFiles()">Add files...</button><button onclick="impAddFolder()">Add folder (all .sql)...</button><button class="sm" onclick="$('impFiles').value=''">Clear</button></div>
  <div class="row">Target DB <input id="impDb" list="impDbList" placeholder="(blank if dump has CREATE DATABASE)" style="width:320px"><datalist id="impDbList"></datalist></div>
  <div class="row"><label title="Create the target database first if it doesn't exist"><input type="checkbox" id="impCreate"> create DB</label><label title="Disable foreign-key and unique checks during import (for out-of-order or circular tables)"><input type="checkbox" id="impFk" checked> disable FK checks</label><label title="Keep going when a file or statement fails instead of stopping (mysql --force)"><input type="checkbox" id="impForce"> continue on errors</label><label title="Required if the dump contains raw NUL bytes in binary/text columns (fixes: ASCII '\0' appeared in the statement). Safe to leave on for any dump that might contain binary data."><input type="checkbox" id="impBinary"> binary-mode</label><label title="mysql --max-allowed-packet. Raise this to match (or exceed) whatever the dump was exported with - a file created with a bumped packet size (needed for extended-insert with large rows/BLOBs) can otherwise fail to re-import with &quot;MySQL server has gone away&quot; against this client's smaller default (16M).">max packet <input id="impMaxPacket" value="1G" style="width:56px"></label></div>
- <div class="row"><button class="go" id="impGoBtn" onclick="runImport()">Run Import</button><button class="warn" id="impCancelBtn" disabled onclick="cancelJob('imp')">Cancel</button><button onclick="hide('mImport')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button class="go" id="impGoBtn" onclick="runImport()">Run Import</button><button class="warn" id="impCancelBtn" disabled onclick="cancelJob('imp')">Cancel</button><button onclick="hide('mImport')">Close</button></div>
  <div id="impProgress" style="display:none;margin-top:8px">
    <div style="height:6px;border-radius:3px;background:var(--panel2);overflow:hidden"><div id="impBar" style="height:100%;width:40%;background:var(--accent);animation:expmove 1.1s ease-in-out infinite"></div></div>
    <div id="impProgLabel" class="muted" style="font-size:11px;margin-top:4px"></div>
@@ -278,7 +279,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row"><b>Exclude these accounts</b> <input id="utExclude" style="flex:1" value="mysql.sys,root,debian-sys-maint,mariadb.sys,healthcheck,mariabackup,galera,replica,PUBLIC"></div>
  <div class="row"><button class="go" onclick="genUserTransfer()">Generate</button><span id="utStatus" class="muted" style="margin-left:8px"></span></div>
  <textarea id="utResult" readonly style="width:100%;height:340px;box-sizing:border-box;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px;margin-top:8px"></textarea>
- <div class="row"><button onclick="copyUserTransfer()">Copy</button><button onclick="saveUserTransferFile()">Save to file...</button><button onclick="hide('mUserTransfer')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button onclick="copyUserTransfer()">Copy</button><button onclick="saveUserTransferFile()">Save to file...</button><button onclick="hide('mUserTransfer')">Close</button></div>
 </div></div>
 
 <div class="modal floating" id="mProcessList"><div class="box" style="width:900px;max-width:96vw;top:40px;left:140px" id="mProcessListBox"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mProcessList')" title="Drag to move"><h3 style="margin:0">Server Processes</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mProcessList')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
@@ -305,7 +306,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 
 <div class="modal floating" id="mHist"><div class="box" style="top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mHist')" title="Drag to move"><h3 style="margin:0">Query History</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mHist')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div id="histList" style="max-height:400px;overflow:auto"></div>
- <div class="row"><button class="warn" onclick="clearHistory()">Clear history</button><button onclick="hide('mHist')">Close</button></div></div></div>
+ <div class="row" style="justify-content:flex-end"><button class="warn" onclick="clearHistory()">Clear history</button><button onclick="hide('mHist')">Close</button></div></div></div>
 <div class="modal floating" id="mRowForm"><div class="box" style="width:560px;max-width:94vw;top:70px;left:160px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mRowForm')" title="Drag to move"><h3 id="rfTitle" style="margin:0">Edit row</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mRowForm')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div id="rfFields" style="max-height:60vh;overflow:auto"></div>
  <div class="row" style="justify-content:flex-end;margin-top:6px"><button class="go" onclick="rfSave()">Save to pending</button><button onclick="hide('mRowForm')">Cancel</button></div></div></div>
@@ -372,7 +373,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <table class="dz"><thead><tr><th>Column</th><th>Type</th><th>Length</th><th title="NOT NULL">NN</th><th title="AUTO_INCREMENT">AI</th><th title="PRIMARY KEY">PK</th><th>Default</th><th>Comment</th><th></th></tr></thead><tbody id="dCols"></tbody></table>
  <div class="row"><button onclick="dAddCol()">+ Column</button></div>
  <div class="row">Generated SQL: <span id="dEditNote" class="muted" style="color:#b26a00"></span></div><textarea id="dSql" oninput="dMark()" style="width:100%;height:120px;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace"></textarea>
- <div class="row"><button title="Rebuild the SQL from the column grid (discards manual edits in the box)" onclick="dGen(true)">Regenerate from columns</button><button class="go write" title="Run the SQL shown above against the database - creates the table if it's new, or alters it if it already exists" onclick="dApply()">Apply</button><button onclick="hide('mDesign')">Close</button></div>
+ <div class="row" style="justify-content:flex-end"><button title="Rebuild the SQL from the column grid (discards manual edits in the box)" onclick="dGen(true)">Regenerate from columns</button><button class="go write" title="Run the SQL shown above against the database - creates the table if it's new, or alters it if it already exists" onclick="dApply()">Apply</button><button onclick="hide('mDesign')">Close</button></div>
  <div id="dLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:220px;overflow:auto;margin-top:6px"></div></div></div>
 
 <script>
@@ -1904,7 +1905,7 @@ function decodeCtrlCharCell(hexStr,maxChars){
  if(truncated)html+='\u2026';
  return html;
 }
-function cellHtml(v){if(v===null)return '<span style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return decodeCtrlCharCell(v,300);return esc(clip(v,300));}
+function cellHtml(v,isBit){if(v===null)return '<span style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return isBit?esc(hexToBitNumber(v)):decodeCtrlCharCell(v,300);return esc(clip(v,300));}
 function colgroupHtml(id){const t=T(id);const ed=!!t.pk;const hidden=t.hiddenCols||new Set();let h='<colgroup><col style="width:30px">'+(ed?'<col style="width:34px">':'');t.cols.forEach((c,ci)=>{h+='<col style="width:150px'+(hidden.has(ci)?';display:none':'')+'">';});return h+'<col></colgroup>';}
 // wireColResize(): drag a column edge to resize, double-click to auto-fit (widths saved per table).
 function wireColResize(id){const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const t=T(id);const off=(!!t.pk)?2:1;
@@ -2036,10 +2037,10 @@ function renderBody(id){const t=T(id);const ed=!!t.pk;if(!t.selected)t.selected=
   if(ed)h+='<td class="delcell" onclick="toggleDel(\''+id+'\','+ri+')">'+(del?'\u21A9':'\u00D7')+'</td>';
   row.forEach((v,ci)=>{const key=ri+':'+ci;const pend=t.pending&&(key in t.pending.upd);const val=pend?t.pending.upd[key]:v;
    const attr=(ed?'class="editable'+(pend?' dirty':'')+'" onclick="cellClick(this,\''+id+'\','+ri+','+ci+')" ondblclick="editCell(this,\''+id+'\','+ri+','+ci+')" ':'')+'oncontextmenu="cellMenu(event,\''+id+'\','+ri+','+ci+')"';
-   h+='<td '+attr+' title="'+esc(clip(val,300))+'">'+cellHtml(val)+'</td>';});h+='</tr>';});
+   h+='<td '+attr+' title="'+esc(clip(val,300))+'">'+cellHtml(val,t.bitCols&&t.bitCols[ci])+'</td>';});h+='</tr>';});
  if(botH>0)h+='<tr class="vpad" style="height:'+botH+'px"><td colspan="'+nCols+'" style="padding:0;border:none"></td></tr>';
  if(ed)t.pending.ins.forEach((row,ii)=>{h+='<tr class="insrow"><td></td><td class="delcell" onclick="delIns(\''+id+'\','+ii+')">\u00D7</td>';
-   t.cols.forEach((c,ci)=>{const v=row[c];h+='<td class="editable" onclick="insClick(this,\''+id+'\','+ii+',\''+c.replace(/'/g,"\\'")+'\')" ondblclick="editIns(this,\''+id+'\','+ii+',\''+c.replace(/'/g,"\\'")+'\')" oncontextmenu="insCellMenu(event,\''+id+'\','+ii+',\''+c.replace(/'/g,"\\'")+'\')" title="'+esc(v)+'">'+cellHtml(v===undefined?null:v)+'</td>';});h+='</tr>';});
+   t.cols.forEach((c,ci)=>{const v=row[c];h+='<td class="editable" onclick="insClick(this,\''+id+'\','+ii+',\''+c.replace(/'/g,"\\'")+'\')" ondblclick="editIns(this,\''+id+'\','+ii+',\''+c.replace(/'/g,"\\'")+'\')" oncontextmenu="insCellMenu(event,\''+id+'\','+ii+',\''+c.replace(/'/g,"\\'")+'\')" title="'+esc(v)+'">'+cellHtml(v===undefined?null:v,t.bitCols&&t.bitCols[ci])+'</td>';});h+='</tr>';});
  $('tbody_'+id).innerHTML=h;
  if(wrap&&slice.length){const sampleTr=wrap.querySelector('tbody tr[data-r]');if(sampleTr){const mh=sampleTr.getBoundingClientRect().height;if(mh>4)t._rowH=mh;}}
  updateEditBar(id);}
@@ -2097,7 +2098,15 @@ function detectImageMime(bytes){
  if(bytes.length>=12&&bytes[0]===0x52&&bytes[1]===0x49&&bytes[2]===0x46&&bytes[3]===0x46&&bytes[8]===0x57&&bytes[9]===0x45&&bytes[10]===0x42&&bytes[11]===0x50)return 'image/webp'; // 'RIFF'....'WEBP'
  return null;
 }
-let _vHexState=null; // {mode:'text'|'hex'} for the modal currently open on a binary cell - null otherwise
+// BIT columns get the same Text/Hex-shaped toggle, but relabelled "Number"/Hex and converting
+// decimal<->hex instead of UTF8-text<->hex - matching how Heidi/Workbench display BIT values
+// (as their plain numeric value, not a byte dump), while still leaving Hex available for anyone
+// who wants to see/set the exact bit pattern. Unlike the binary Text/Hex case, this conversion
+// is ALWAYS lossless both ways (a fixed-width integer has exactly one hex and one decimal
+// representation), so there's no round-trip validity check needed here - only input validation.
+function hexToBitNumber(hexStr){const bytes=hexToBytes(hexStr||'0x0');let n=0n;for(let i=0;i<bytes.length;i++)n=(n<<8n)|BigInt(bytes[i]);return n.toString();}
+function bitNumberToHex(decStr){return '0x'+BigInt(decStr).toString(16);}
+let _vHexState=null; // {kind:'binText'|'bitNum', mode:'text'|'hex'} for the modal currently open on a binary/BIT cell - null otherwise
 function updateHexTabButtons(){
  const bt=$('vTabText'),bh=$('vTabHex');if(!bt||!bh||!_vHexState)return;
  const on='font-weight:700;text-decoration:underline',off='';
@@ -2106,7 +2115,15 @@ function updateHexTabButtons(){
 function switchHexTab(mode){
  if(!_vHexState||_vHexState.mode===mode)return;
  const ta=$('vText');
- if(mode==='text'){
+ if(_vHexState.kind==='bitNum'){
+  if(mode==='text'){
+   if(!/^0x[0-9A-Fa-f]*$/.test(ta.value.trim())){toast('Enter valid hex (0x...) first.',true);return;}
+   ta.value=hexToBitNumber(ta.value.trim());
+  } else {
+   if(!/^\d+$/.test(ta.value.trim())){toast('Enter a whole, non-negative number first.',true);return;}
+   ta.value=bitNumberToHex(ta.value.trim());
+  }
+ } else if(mode==='text'){
   const decoded=hexToStrictText(ta.value); // leaving hex mode, so the box currently holds hex
   if(decoded==null){toast('This value is not valid UTF-8 text - edit it as Hex instead.',true);return;}
   ta.value=decoded;
@@ -2142,13 +2159,22 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
  } else if(opts.dateType){
   dt.type=opts.dateType;dt.style.display='block';
   dt.value=mysqlToNativeDate(text,opts.dateType);
+ // BIT column: offer Number/Hex, defaulting to Number (Heidi/Workbench-style) - see the block
+ // comment above hexToBitNumber for why this conversion needs no round-trip validity check.
+ } else if(opts.bitNumeric){
+  ta.style.display='block';hexTabs.style.display='flex';hexTabs.style.cssText='display:flex;gap:6px;margin-bottom:6px';
+  $('vTabText').textContent='Number';
+  _vHexState={kind:'bitNum',mode:'text'};
+  ta.value=hexToBitNumber(text==null?'0x0':text);
+  updateHexTabButtons();
  // Binary/BLOB column (not BIT): offer both Text and Hex as explicit edit modes - see the block
  // comment above hexToStrictText for why Text is only ever offered when provably lossless.
  } else if(opts.hexText){
   ta.style.display='block';hexTabs.style.display='flex';hexTabs.style.cssText='display:flex;gap:6px;margin-bottom:6px';
+  $('vTabText').textContent='Text';
   const rawHex=(text==null?'0x':text);
   const decoded=hexToStrictText(rawHex);
-  _vHexState={mode:decoded!=null?'text':'hex'};
+  _vHexState={kind:'binText',mode:decoded!=null?'text':'hex'};
   ta.value=decoded!=null?decoded:rawHex;
   updateHexTabButtons();
   const bytes=hexToBytes(rawHex);
@@ -2164,6 +2190,10 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
  const getVal=()=>{
   if(opts.multiOptions&&opts.multiOptions.length)return [...multi.querySelectorAll('input:checked')].map(cb=>cb.value).join(',');
   if(opts.dateType)return nativeDateToMysql(dt.value,opts.dateType);
+  // bitNumeric: both tabs pass their box content straight through unconverted - a plain decimal
+  // string goes unquoted via litForCol's existing BIT-integer path, a "0x.." string goes unquoted
+  // via lit()'s existing hex-literal passthrough. Neither needs re-encoding here.
+  if(opts.bitNumeric)return ta.value;
   if(opts.hexText)return _vHexState.mode==='text'?textToHex(ta.value):ta.value;
   return opts.options?sel.value:ta.value;
  };
@@ -2171,12 +2201,16 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
   add('Copy','',()=>{navigator.clipboard.writeText(ta.value);log('Copied to clipboard.');});
   // Offer to pretty-print, but only when the content genuinely parses as a JSON object/array -
   // a bare number or quoted string technically "parses" too, but reformatting those does nothing
-  // useful, so they're excluded. Not offered for binary cells - decoded/hex content is never JSON.
-  if(!opts.hexText){
+  // useful, so they're excluded. Not offered for binary/BIT cells - decoded/hex/numeric content
+  // is never JSON.
+  if(!opts.hexText&&!opts.bitNumeric){
    let isJson=false;try{const p=JSON.parse(ta.value);isJson=(p!==null&&typeof p==='object');}catch(e){}
    if(isJson&&!opts.readonly)add('Format JSON','',()=>{try{ta.value=JSON.stringify(JSON.parse(ta.value),null,2);}catch(e){}});
   }
  }
+ // Order: utility actions, then Set NULL, then Save, then Close last - matching every other
+ // modal's own action-row convention in this app (Save/Apply/Import/Run.../then Close), not a
+ // one-off choice for just this dialog.
  if(opts.onNull)add('Set NULL','',()=>{opts.onNull();hide('mView');});
  if(opts.onSave)add('Save','go',()=>{opts.onSave(getVal());hide('mView');});
  add('Close','',()=>hide('mView'));
@@ -2244,6 +2278,9 @@ async function editWidgetFor(id,colName,curVal){
  // stays available (and is all that's offered) for genuinely non-text bytes like images.
  const ci=t&&t.cols?t.cols.indexOf(colName):-1;
  const bitCol=ci>=0&&t.bitCols&&t.bitCols[ci];
+ // BIT columns get their own Number/Hex toggle (Heidi/Workbench show these as a plain numeric
+ // value, not a byte dump) - see the block comment above hexToBitNumber.
+ if(bitCol)return {bitNumeric:true};
  const flaggedBinary=ci>=0&&t.binCols&&t.binCols[ci];
  // A column that ISN'T declared VARBINARY/BLOB (so binCols says false) can still arrive here as
  // "0x.." hex: the backend's val_to_opt() falls back to hex for ANY value whose bytes fail a
@@ -2253,7 +2290,7 @@ async function editWidgetFor(id,colName,curVal){
  // Text/Hex tabs still show up for it instead of silently falling through to plain-text mode
  // with an unexplained raw hex blob.
  const looksHex=typeof curVal==='string'&&/^0x[0-9A-Fa-f]+$/.test(curVal);
- if(!bitCol&&(flaggedBinary||looksHex))return {hexText:true};
+ if(flaggedBinary||looksHex)return {hexText:true};
  return {};
 }
 async function editCell(td,id,ri,ci){clearTimeout(clickTimer);const t=T(id);const key=ri+':'+ci;const cur=(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci];
