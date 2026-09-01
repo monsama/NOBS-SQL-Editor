@@ -56,6 +56,10 @@
  .tab.dragover{box-shadow:inset 2px 0 0 var(--accent)}
  .runningdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;animation:rundotpulse 1s ease-in-out infinite}
  @keyframes rundotpulse{0%,100%{opacity:1}50%{opacity:.25}}
+ @keyframes recheckspin{to{transform:rotate(360deg)}}
+ #cfgRecheckIcon{display:inline-block}
+ #cfgRecheckIcon.spinning{animation:recheckspin .6s linear infinite}
+ .cplink.disabled{pointer-events:none;opacity:.6}
  .tabpane{flex:1;display:none;flex-direction:column;min-height:0} .tabpane.active{display:flex}
  .edwrap{position:relative;height:calc(50% - 34px);min-height:44px;border-bottom:1px solid var(--bd);overflow:hidden}
  .edwrap.big{height:280px}
@@ -318,7 +322,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row" style="justify-content:flex-end;margin-top:6px"><button class="go" onclick="rfSave()">Save to pending</button><button onclick="hide('mRowForm')">Cancel</button></div></div></div>
 <div class="modal floating" id="mSettings"><div class="box" style="width:860px;max-width:94vw;top:40px;left:80px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mSettings')" title="Drag to move"><h3 style="margin:0 0 10px">Client tools</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mSettings')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
  <div class="muted" style="font-size:12px">Export and Import use the MySQL/MariaDB command-line tools.<br>They are not bundled - point to an existing install, or download them automatically.<br>Running SQL, including multi-statement scripts with DELIMITER, does not need them.</div>
- <div style="margin:10px 0 4px;font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--muted)">STATUS</div>
+ <div style="display:flex;justify-content:space-between;align-items:center;margin:10px 0 4px"><span style="font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--muted)">STATUS</span><span class="cplink" id="cfgRecheckBtn" title="Re-run detection without closing this window - useful right after installing the tools elsewhere" onclick="refreshToolsStatus(true)"><span id="cfgRecheckIcon">&#8635;</span> Recheck</span></div>
  <div id="cfgStatus" style="background:var(--panel2);border:1px solid var(--bd);border-radius:6px;padding:8px 12px;font-size:12px"></div>
  <div style="margin:12px 0 4px;font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--muted)">PATHS</div>
  <div class="muted" style="font-size:11px;line-height:1.5;margin-bottom:6px">Auto-detection checks, in order: saved configuration &rarr; MYSQL_BIN / MYSQLDUMP_BIN environment variable &rarr; common install folders (Program Files\MariaDB*, Program Files\MySQL*, WAMP, XAMPP) &rarr; system PATH.</div>
@@ -634,10 +638,18 @@ async function openAbout(){
  show('mAbout');
  try{const r=await api('/api/app-info');if(r&&r.ok&&r.version)$('aboutTitle').textContent='NOBS SQL Editor '+r.version;}catch(e){}
 }
-async function refreshToolsStatus(){const el=$('cfgStatus');if(!el)return;el.innerHTML='Checking...';try{const r=await api('/api/tools-status');if(!r||!r.ok){el.textContent='';return;}const row=(name,path,src)=>{const ok=path&&path!=='(not found)';return '<div style="margin:2px 0"><b>'+name+':</b> <span style="font-family:Consolas,monospace">'+esc(path)+'</span> '+(ok?'<span style="color:#3fb950">&#10003;</span>':'<span style="color:#e5534b">&#10007; not found</span>')+(ok&&src?'<div class="muted" style="font-size:11px;margin-left:2px">'+esc(src)+'</div>':'')+'</div>';};el.innerHTML=row('mysql',r.mysql,r.mysql_source)+row('mysqldump',r.mysqldump,r.mysqldump_source);
+// manual=true when the user clicked "Recheck" (vs. the automatic call on opening Settings or
+// after saving/downloading) - only then do we spin the icon and toast a result, so re-detection
+// on open doesn't flash a spinner the user never asked to see.
+async function refreshToolsStatus(manual){const el=$('cfgStatus');if(!el)return;el.innerHTML='Checking...';
+ const icon=$('cfgRecheckIcon'),btn=$('cfgRecheckBtn');
+ if(manual&&icon){icon.classList.add('spinning');btn.classList.add('disabled');}
+ try{const r=await api('/api/tools-status');if(!r||!r.ok){el.textContent='';return;}const row=(name,path,src)=>{const ok=path&&path!=='(not found)';return '<div style="margin:2px 0"><b>'+name+':</b> <span style="font-family:Consolas,monospace">'+esc(path)+'</span> '+(ok?'<span style="color:#3fb950">&#10003;</span>':'<span style="color:#e5534b">&#10007; not found</span>')+(ok&&src?'<div class="muted" style="font-size:11px;margin-left:2px">'+esc(src)+'</div>':'')+'</div>';};el.innerHTML=row('mysql',r.mysql,r.mysql_source)+row('mysqldump',r.mysqldump,r.mysqldump_source);
  if(r.mysql&&r.mysql!=='(not found)'&&!$('cfgMysql').value)$('cfgMysql').value=r.mysql;
  if(r.mysqldump&&r.mysqldump!=='(not found)'&&!$('cfgDump').value)$('cfgDump').value=r.mysqldump;
- const pe=$('cfgPaths');if(pe)pe.innerHTML='Downloads: '+esc(r.download_dir)+'<br>Config: '+esc(r.config_file);}catch(e){el.textContent='';}}
+ const pe=$('cfgPaths');if(pe)pe.innerHTML='Downloads: '+esc(r.download_dir)+'<br>Config: '+esc(r.config_file);
+ if(manual){const bothOk=r.mysql&&r.mysql!=='(not found)'&&r.mysqldump&&r.mysqldump!=='(not found)';toast(bothOk?'Both tools found.':'Still missing one or both tools.',!bothOk);}}catch(e){el.textContent='';}
+ finally{if(manual&&icon){icon.classList.remove('spinning');btn.classList.remove('disabled');}}}
 async function saveSettings(){try{const r=await api('/api/save-config',{config:{mysql_bin:$('cfgMysql').value.trim(),mysqldump_bin:$('cfgDump').value.trim(),mariadb_download_url_template:$('cfgDownloadUrl').value.trim()}});if(r&&r.ok){log('Saved client-tool paths.');refreshToolsStatus();hide('mSettings');}else toast('Save failed: '+(r?r.error:''),true);}catch(e){toast('Save failed: '+e,true);}}
 // Persists the download URL field first - otherwise editing it and clicking Download directly
 // (without a separate Save click first) would silently use whatever was last saved instead of
