@@ -564,7 +564,12 @@ function floatTrayLabel(id){
  // (the ER diagram's "ER Diagram - schemaname") shows correctly on the chip even if it changed
  // after the modal was minimized, not a stale snapshot from whenever minimize was first clicked.
  const titleEl=$(id).querySelector('h3');
- return titleEl?titleEl.textContent:id;
+ if(!titleEl)return id;
+ // .textContent would also pull in a nested info-tooltip icon's own text (e.g. Compare Databases'
+ // "connects to both sides independently..." (?) span) - only the title's own direct text nodes
+ // belong on the tray chip.
+ const own=[...titleEl.childNodes].filter(n=>n.nodeType===Node.TEXT_NODE).map(n=>n.textContent).join('').trim();
+ return own||titleEl.textContent;
 }
 function floatRenderTray(){
  const tray=$('minimizedTray');
@@ -2369,6 +2374,10 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
   // picker's actual content (label + one input + one button row) is well under that, leaving a
   // dead gap below the buttons. Only the date picker gets its floor dropped to fit its content.
   box.style.minHeight=opts.dateType?'0':'';
+  // The native date/time widget has one fixed-size input and two buttons - nothing inside it can
+  // use extra room, so a drag-to-resize handle here only invites an empty box (or one that clips
+  // the widget if dragged smaller). Every other mView mode still needs it (long text, SET/BLOB).
+  box.style.resize=opts.dateType?'none':'';
  }
  ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';hexTabs.style.display='none';img.style.display='none';img.removeAttribute('src');_vHexState=null;
  // Checkbox mode: SET columns, whose valid values are any comma-joined COMBINATION of the
