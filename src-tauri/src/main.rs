@@ -192,7 +192,7 @@ fn running_compare_conns() -> &'static Mutex<std::collections::HashMap<String, V
 fn register_compare_conn(rid: &Option<String>, conn: &mut Conn, connj: &Value) {
     let Some(r) = rid else { return };
     if let Ok((_c, rows)) = run_select(conn, "SELECT CONNECTION_ID()") {
-        if let Some(cid) = rows.get(0).and_then(|row| row.get(0)).cloned().flatten().and_then(|s| s.parse::<u64>().ok()) {
+        if let Some(cid) = rows.first().and_then(|row| row.first()).cloned().flatten().and_then(|s| s.parse::<u64>().ok()) {
             running_compare_conns().lock().unwrap().entry(r.clone()).or_default().push((cid, connj.clone()));
         }
     }
@@ -319,7 +319,7 @@ fn db_err(e: impl std::string::ToString) -> String {
 fn run_select_bin(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option<String>>>, Vec<bool>), String> {
     let mut result = conn.query_iter(sql).map_err(db_err)?;
     let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
-    let bin: Vec<bool> = result.columns().as_ref().iter().map(|c| is_binaryish(c)).collect();
+    let bin: Vec<bool> = result.columns().as_ref().iter().map(is_binaryish).collect();
     let mut rows: Vec<Vec<Option<String>>> = Vec::new();
     for r in result.by_ref() {
         let row = r.map_err(db_err)?;
@@ -422,8 +422,8 @@ fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String, request_id: O
             Err(e) => { let _ = open_tx.send(Err(db_err(e))); cleanup(&request_id); return; }
         };
         let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
-        let bin: Vec<bool> = result.columns().as_ref().iter().map(|c| is_binaryish(c)).collect();
-        let bit: Vec<bool> = result.columns().as_ref().iter().map(|c| is_bit_col(c)).collect();
+        let bin: Vec<bool> = result.columns().as_ref().iter().map(is_binaryish).collect();
+        let bit: Vec<bool> = result.columns().as_ref().iter().map(is_bit_col).collect();
         if open_tx.send(Ok((cols.clone(), bin.clone(), bit.clone()))).is_err() { cleanup(&request_id); return; } // caller went away
 
         loop {
@@ -533,7 +533,12 @@ fn strip_parens(s: &str) -> String {
         match c {
             '\'' | '"' | '`' => { quote = Some(c); }
             '(' => { if depth == 0 { out.push(' '); } depth += 1; }
-            ')' => { if depth > 0 { depth -= 1; } if depth == 0 { out.push(' '); } }
+            ')' => {
+                // Two separate checks, not one if/else-if: decrement first, THEN test the new
+                // depth - closing the outermost paren needs both to run in that order.
+                if depth > 0 { depth -= 1; }
+                if depth == 0 { out.push(' '); }
+            }
             _ => { if depth == 0 { out.push(c); } }
         }
     }
@@ -589,11 +594,11 @@ fn sql_is_readonly(sql: &str) -> bool {
             }
         }
         if w == "ANALYZE" {
-            let rest = t.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim_start();
+            let rest = t.split_once(char::is_whitespace).map(|x| x.1).unwrap_or("").trim_start();
             let is_analyze_table = rest.split_whitespace().next().map(|f| f.eq_ignore_ascii_case("TABLE")).unwrap_or(false);
             if !is_analyze_table {
                 let inner = re_analyze_fmt.replace(rest, "");
-                let inner_w = inner.trim().split_whitespace().next().unwrap_or("").to_uppercase();
+                let inner_w = inner.split_whitespace().next().unwrap_or("").to_uppercase();
                 if inner_w != "SELECT" { return false; }
             }
         }
@@ -649,7 +654,7 @@ fn ver_key(s: &str) -> Vec<u64> {
 fn resolve_tool(app: &tauri::AppHandle, base: &str, names: &[&str], env_key: &str) -> Result<String, String> {
     // 0) user-configured path (Settings / downloaded tools) wins
     let cfg = load_cfg();
-    if let Some(pth) = cfg.get(&format!("{}_bin", base)).and_then(|v| v.as_str()) {
+    if let Some(pth) = cfg.get(format!("{}_bin", base)).and_then(|v| v.as_str()) {
         if !pth.is_empty() && std::path::Path::new(pth).exists() { return Ok(pth.to_string()); }
     }
     // 1) prefer a binary bundled with the app (src-tauri/binaries)
@@ -819,7 +824,7 @@ async fn objects(req: Value) -> R {
         let (mut tables, mut views, mut procedures, mut functions, mut triggers, mut events) =
             (vec![], vec![], vec![], vec![], vec![], vec![]);
         for r in rows {
-            let t = r.get(0).cloned().flatten().unwrap_or_default();
+            let t = r.first().cloned().flatten().unwrap_or_default();
             let n = r.get(1).cloned().flatten().unwrap_or_default();
             match t.as_str() {
                 "table" => tables.push(n), "view" => views.push(n),
@@ -835,7 +840,7 @@ async fn objects(req: Value) -> R {
         if !triggers.is_empty() {
             if let Ok((_tc, trows)) = run_select(&mut c, &format!("SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA={}", db)) {
                 for tr in trows {
-                    let tname = tr.get(0).cloned().flatten().unwrap_or_default();
+                    let tname = tr.first().cloned().flatten().unwrap_or_default();
                     let ttable = tr.get(1).cloned().flatten().unwrap_or_default();
                     if !tname.is_empty() { trigger_tables.insert(tname, ttable); }
                 }
@@ -998,7 +1003,7 @@ async fn query(req: Value) -> R {
         let request_id = req["requestId"].as_str().filter(|s| !s.is_empty()).map(String::from);
         if let Some(rid) = &request_id {
             if let Ok((_cols, rows)) = run_select(&mut c, "SELECT CONNECTION_ID()") {
-                if let Some(cid) = rows.get(0).and_then(|r| r.get(0)).cloned().flatten().and_then(|s| s.parse::<u64>().ok()) {
+                if let Some(cid) = rows.first().and_then(|r| r.first()).cloned().flatten().and_then(|s| s.parse::<u64>().ok()) {
                     running_queries().lock().unwrap().insert(rid.clone(), (cid, req["conn"].clone()));
                 }
             }
@@ -1244,7 +1249,7 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
         chars[pos..pos + needle.len()]
             .iter()
             .zip(needle.iter())
-            .all(|(a, b)| a.to_ascii_uppercase() == b.to_ascii_uppercase())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
     }
     fn find_char(chars: &[char], from: usize, target: char) -> Option<usize> {
         let mut k = from;
@@ -1565,8 +1570,8 @@ fn table_filter_args(d: &str, excl: &std::collections::HashSet<String>, conn_req
     let mut conn = build_conn(conn_req)?;
     let sql = format!("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA={} ORDER BY TABLE_NAME", sql_lit(d));
     let (_cols, rows) = run_select(&mut conn, &sql)?;
-    let excl_names: std::collections::HashSet<&str> = this_excl.iter().map(|k| k.splitn(2, '.').nth(1).unwrap_or("")).collect();
-    let included: Vec<String> = rows.iter().filter_map(|r| r.get(0).cloned().flatten())
+    let excl_names: std::collections::HashSet<&str> = this_excl.iter().map(|k| k.split_once('.').map(|x| x.1).unwrap_or("")).collect();
+    let included: Vec<String> = rows.iter().filter_map(|r| r.first().cloned().flatten())
         .filter(|t| !excl_names.contains(t.as_str())).collect();
     if this_excl.len() <= included.len() {
         Ok((this_excl.iter().map(|k| format!("--ignore-table={}", k)).collect(), vec![]))
@@ -1746,7 +1751,7 @@ async fn export_run(req: Value, dbin: String) -> R {
                 let mut conn = match build_conn(&req["conn"]) { Ok(c) => c, Err(e) => { log.push(format!("FAILED (connect) {} : {}", d, e)); continue; } };
                 let sql = format!("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA={} ORDER BY TABLE_NAME", sql_lit(d));
                 let tabs: Vec<String> = match run_select(&mut conn, &sql) {
-                    Ok((_cols, rows)) => rows.iter().filter_map(|r| r.get(0).cloned().flatten()).collect(),
+                    Ok((_cols, rows)) => rows.iter().filter_map(|r| r.first().cloned().flatten()).collect(),
                     Err(e) => { log.push(format!("FAILED (list tables) {} : {}", d, e)); continue; }
                 };
                 if tabs.is_empty() { log.push(format!("(no tables) {}", d)); }
@@ -2021,7 +2026,7 @@ fn get_schema_columns(conn: &mut Conn, db: &str) -> Result<std::collections::BTr
     let (_cols, rows) = run_select(conn, &sql)?;
     let mut map: std::collections::BTreeMap<String, Vec<ColumnDef>> = std::collections::BTreeMap::new();
     for r in rows {
-        let t = r.get(0).cloned().flatten().unwrap_or_default();
+        let t = r.first().cloned().flatten().unwrap_or_default();
         let cd = ColumnDef {
             name: r.get(1).cloned().flatten().unwrap_or_default(),
             ctype: r.get(2).cloned().flatten().unwrap_or_default(),
@@ -2029,7 +2034,7 @@ fn get_schema_columns(conn: &mut Conn, db: &str) -> Result<std::collections::BTr
             default: r.get(4).cloned().flatten(),
             extra: r.get(5).cloned().flatten().unwrap_or_default(),
         };
-        map.entry(t).or_insert_with(Vec::new).push(cd);
+        map.entry(t).or_default().push(cd);
     }
     Ok(map)
 }
@@ -2212,13 +2217,13 @@ async fn gen_user_transfer(req: Value) -> R {
         let mut grant_lines: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
         for row in &user_rows {
-            let u = row.get(0).cloned().flatten().unwrap_or_default();
+            let u = row.first().cloned().flatten().unwrap_or_default();
             let h = row.get(1).cloned().flatten().unwrap_or_default();
             let uq = sql_str_lit(&u);
             let hq = sql_str_lit(&h);
             match run_select(&mut conn, &format!("SHOW CREATE USER {}@{}", uq, hq)) {
                 Ok((_c, rows)) => {
-                    if let Some(first) = rows.get(0).and_then(|r| r.get(0)).cloned().flatten() {
+                    if let Some(first) = rows.first().and_then(|r| r.first()).cloned().flatten() {
                         create_lines.push(format!("{};", first));
                     } else {
                         errors.push(format!("SHOW CREATE USER for '{}'@'{}': no result returned", u, h));
@@ -2229,7 +2234,7 @@ async fn gen_user_transfer(req: Value) -> R {
             match run_select(&mut conn, &format!("SHOW GRANTS FOR {}@{}", uq, hq)) {
                 Ok((_c, rows)) => {
                     for r in rows {
-                        if let Some(v) = r.get(0).cloned().flatten() { grant_lines.push(format!("{};", v)); }
+                        if let Some(v) = r.first().cloned().flatten() { grant_lines.push(format!("{};", v)); }
                     }
                 }
                 Err(e) => errors.push(format!("SHOW GRANTS for '{}'@'{}': {}", u, h, e)),
@@ -2245,7 +2250,7 @@ async fn gen_user_transfer(req: Value) -> R {
         for l in &grant_lines { out.push_str(l); out.push('\n'); }
         if !errors.is_empty() {
             out.push_str(&format!("\n-- ===== {} account(s) could not be read (the script above is complete for everyone else) =====\n", errors.len()));
-            for e in &errors { out.push_str("-- "); out.push_str(&e.replace('\n', " ").replace('\r', " ")); out.push('\n'); }
+            for e in &errors { out.push_str("-- "); out.push_str(&e.replace(['\n', '\r'], " ")); out.push('\n'); }
         }
         Ok(json!({"ok":true,"sql":out,"userCount":user_rows.len(),"errorCount":errors.len()}))
     }).await.map_err(|e| e.to_string())?
@@ -2283,7 +2288,7 @@ async fn compare_rows(req: Value) -> R {
         let _guard = CompareConnGuard(rid.clone());
         let pk = get_table_pk_cols(&mut src_conn, &src_db, &table)?;
         if pk.is_empty() { return Ok(json!({"ok":false,"error":"Table has no primary key - cannot compare rows."})); }
-        let fk = get_table_fk_cols(&mut src_conn, &src_db, &table).unwrap_or_default();
+        let _fk = get_table_fk_cols(&mut src_conn, &src_db, &table).unwrap_or_default();
         let pk_list = pk.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
         let (_c1, src_pk_rows) = match run_select(&mut src_conn, &format!("SELECT {} FROM {}.{}", pk_list, sql_id(&src_db), sql_id(&table))) {
             Ok(v) => v,
@@ -2384,7 +2389,7 @@ async fn compare_rows_diff(req: Value) -> R {
             }
         };
         let tgt_pk_set: std::collections::HashSet<String> = tgt_pk_rows.iter().map(|r| row_key(r)).collect();
-        let common: Vec<&Vec<Option<String>>> = src_pk_rows.iter().filter(|r| tgt_pk_set.contains(&row_key(*r))).collect();
+        let common: Vec<&Vec<Option<String>>> = src_pk_rows.iter().filter(|r| tgt_pk_set.contains(&row_key(r))).collect();
         let common_total = common.len();
         const CAP: usize = 500;
         let truncated = common_total > CAP;
@@ -2476,7 +2481,7 @@ async fn compare_rows_apply_diff(req: Value) -> R {
                 let val = match &cd["src"] {
                     Value::Null => "NULL".to_string(),
                     Value::String(s) => sql_val_lit(s),
-                    other => sql_lit(&other.to_string().trim_matches('"').to_string()),
+                    other => sql_lit(other.to_string().trim_matches('"')),
                 };
                 format!("{}={}", sql_id(col), val)
             }).collect::<Vec<_>>().join(",");
@@ -2484,7 +2489,7 @@ async fn compare_rows_apply_diff(req: Value) -> R {
                 let val = match v {
                     Value::Null => "NULL".to_string(),
                     Value::String(s) => sql_val_lit(s),
-                    other => sql_lit(&other.to_string().trim_matches('"').to_string()),
+                    other => sql_lit(other.to_string().trim_matches('"')),
                 };
                 format!("{}={}", sql_id(col), val)
             }).collect::<Vec<_>>().join(" AND ");
@@ -2612,7 +2617,7 @@ async fn compare_rows_apply(req: Value) -> R {
                 let vs = row.iter().map(|v| match v {
                     Value::Null => "NULL".to_string(),
                     Value::String(s) => sql_val_lit(s),
-                    other => sql_lit(&other.to_string().trim_matches('"').to_string()),
+                    other => sql_lit(other.to_string().trim_matches('"')),
                 }).collect::<Vec<_>>().join(",");
                 format!("({})", vs)
             }).collect::<Vec<_>>().join(",");
@@ -2793,7 +2798,7 @@ async fn search_all_schemas(req: Value) -> R {
         match run_select(&mut c, &sql) {
             Ok((_cols, rows)) => {
                 let items: Vec<Value> = rows.iter().map(|r| json!({
-                    "schema": r.get(0).cloned().flatten(),
+                    "schema": r.first().cloned().flatten(),
                     "type": r.get(1).cloned().flatten(),
                     "name": r.get(2).cloned().flatten()
                 })).collect();
@@ -2840,17 +2845,15 @@ async fn browse(req: Value) -> R {
                 let name = e.file_name().to_string_lossy().to_string();
                 if p.is_dir() {
                     dirs.push(json!({"name": name, "path": p.to_string_lossy()}));
-                } else if !dirs_only {
-                    if filter == "*" || filter.is_empty() || name.to_lowercase().ends_with(&format!(".{}", ext)) {
-                        files.push(json!({"path": p.to_string_lossy(), "name": name, "dir": false}));
-                    }
+                } else if !dirs_only && (filter == "*" || filter.is_empty() || name.to_lowercase().ends_with(&format!(".{}", ext))) {
+                    files.push(json!({"path": p.to_string_lossy(), "name": name, "dir": false}));
                 }
             }
             dirs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
             files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
             // "parent": the containing directory, or "ROOT" if we're already at a drive/filesystem root.
             let parent = match dir.parent() {
-                Some(pp) if pp.as_os_str().len() > 0 && pp != dir => json!(pp.to_string_lossy()),
+                Some(pp) if !pp.as_os_str().is_empty() && pp != dir => json!(pp.to_string_lossy()),
                 _ => json!("ROOT"),
             };
             Ok(json!({"ok":true,"path":dir.to_string_lossy(),"parent":parent,"dirs":dirs,"files":files}))
@@ -2909,7 +2912,7 @@ async fn export_table_run(app: Option<tauri::AppHandle>, req: Value) -> R {
             let cs = result.columns();
             let sl: &[Column] = cs.as_ref();
             (sl.iter().map(|c| c.name_str().to_string()).collect(),
-             sl.iter().map(|c| is_binaryish(c)).collect())
+             sl.iter().map(is_binaryish).collect())
         };
         let collist = cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
         // A NULL and an empty string both used to come out as an empty field, so the two were
@@ -2949,7 +2952,7 @@ async fn export_table_run(app: Option<tauri::AppHandle>, req: Value) -> R {
                 w.write_all(line.as_bytes()).map_err(|e| e.to_string())?; w.write_all(b"\n").map_err(|e| e.to_string())?;
             }
             n += 1;
-            if n % 2000 == 0 { if let Some(a) = &app { let _ = a.emit("export_progress", json!({"rows": n})); } }
+            if n.is_multiple_of(2000) { if let Some(a) = &app { let _ = a.emit("export_progress", json!({"rows": n})); } }
         }
         if fmt == "inserts" && !batch.is_empty() && !cancelled {
             w.write_all(format!("INSERT IGNORE INTO {} ({}) VALUES {};\n", tbl, collist, batch.join(",")).as_bytes()).map_err(|e| e.to_string())?;
@@ -2984,7 +2987,7 @@ fn tools_status(app: tauri::AppHandle) -> R {
     if let Some(cached) = tools_status_cache().lock().unwrap().clone() { return Ok(cached); }
     fn describe(app: &tauri::AppHandle, base: &str, names: &[&str], env_key: &str) -> (String, String) {
         let cfg = load_cfg();
-        if let Some(p) = cfg.get(&format!("{}_bin", base)).and_then(|v| v.as_str()) {
+        if let Some(p) = cfg.get(format!("{}_bin", base)).and_then(|v| v.as_str()) {
             if !p.is_empty() && std::path::Path::new(p).exists() { return (p.to_string(), "configured / downloaded".into()); }
         }
         if let Ok(p) = std::env::var(env_key) { if !p.is_empty() && std::path::Path::new(&p).exists() { return (p, format!("env {}", env_key)); } }
