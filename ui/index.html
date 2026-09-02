@@ -231,7 +231,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  </div>
  <div id="impLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:220px;overflow:auto;margin-top:6px"></div></div></div>
 
-<div class="modal floating" id="mCompare"><div class="box" style="width:820px;max-width:94vw;top:50px;left:90px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mCompare')" title="Drag to move"><h3 style="margin:0 0 10px">Compare Databases <span class="muted" style="font-size:13px;cursor:help;font-weight:400" title="Connects to both sides independently of whatever's currently active, using each saved connection's stored password - so both the source and target connection need &quot;Save password&quot; checked (Edit... on the connection) or this will fail to log in.">&#9432;</span></h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompare')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
+<div class="modal floating" id="mCompare"><div class="box" style="width:820px;max-width:94vw;top:50px;left:90px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mCompare')" title="Drag to move"><h3 style="margin:0 0 10px">Compare Databases <span class="muted" style="font-size:13px;cursor:help;font-weight:400" title="Connects to both sides independently of whatever's currently active, using each saved connection's stored password - so both the source and target connection need &quot;Save password&quot; checked (Edit... on the connection) or this will fail to log in.">&#9432;</span></h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mCompare')" title="Maximize" id="maxBtn_mCompare" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompare')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
  <div class="row" style="display:flex;gap:10px">
    <div style="flex:1"><div class="muted" style="font-size:11px;margin-bottom:3px">Source</div>
      <select id="cmpSrcConn" style="width:100%" onchange="cmpResetResults();cmpLoadDbs('src')"></select>
@@ -697,6 +697,23 @@ function buildMenuItems(container,items){items.forEach(it=>{if(it==='-'){const s
  }else{d.onclick=()=>{$('ctx').style.display='none';it[1]();};}
  container.appendChild(d);});}
 document.addEventListener('click',(e)=>{$('ctx').style.display='none';const cp=$('colPicker');if(cp&&cp.style.display==='block'&&!cp.contains(e.target))cp.style.display='none';const cm=$('copyMenu');if(cm&&cm.style.display==='block'&&!cm.contains(e.target))cm.style.display='none';const otp=$('objTypePicker');if(otp&&otp.style.display==='block'&&!otp.contains(e.target)&&e.target.id!=='objTypeBtn')otp.style.display='none';const idp=$('impDbPicker');if(idp&&idp.style.display==='block'&&!idp.contains(e.target)&&e.target.id!=='impDb')idp.style.display='none';});
+// Ctrl+mouse-wheel font zoom on any textarea, same convention as Workbench - delegated on
+// document so it works on every SQL query tab's editor (created dynamically per tab) and the
+// cell-edit textarea alike, without wiring a listener onto each one individually. The SQL editor
+// is actually TWO stacked elements sharing one font-size (an invisible <textarea> for input/
+// caret, and a <pre> underneath rendering the syntax-highlighted text) - both have to change
+// together, in lockstep, or the highlighted text drifts out of alignment with the real cursor.
+document.addEventListener('wheel',(e)=>{
+ if(!e.ctrlKey)return;
+ const ta=e.target.closest('textarea');
+ if(!ta)return;
+ e.preventDefault();
+ const cur=parseFloat(getComputedStyle(ta).fontSize)||13;
+ const next=Math.max(9,Math.min(28,Math.round(cur+(e.deltaY<0?1:-1))));
+ if(next===cur)return;
+ ta.style.fontSize=next+'px';
+ if(ta.id.indexOf('ed_')===0){const hl=$('hl_'+ta.id.slice(3));if(hl)hl.style.fontSize=next+'px';}
+},{passive:false});
 
 // syntax highlight (single-pass tokenizer)
 const KW=RESERVED;
