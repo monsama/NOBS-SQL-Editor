@@ -85,7 +85,12 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  table.grid tr.insrow td.delcell{color:#7ee0a0}
  table.grid td.kbfocus{outline:2px solid var(--accent);outline-offset:-2px}
  td.dirty{background:var(--dirty)!important} tr.del td{background:var(--del)!important;text-decoration:line-through}
- table.grid td input{width:100%;border:1px solid var(--accent);font:inherit;padding:1px 3px;background:var(--in);color:var(--fg)} input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none}
+ /* Inline cell-edit input: kept visually close to the plain cell text it replaces (matching
+    padding, no border/background box) rather than looking like a distinct form control - just a
+    faint tint so it's still clear the cell is being edited. */
+ table.grid td input{width:100%;border:1px solid transparent;font:inherit;padding:1px 7px;background:transparent;color:var(--fg);border-radius:2px}
+ table.grid td input:focus{background:var(--hover);border-color:transparent;outline:none}
+ input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none}
  .delcell{color:#c00;cursor:pointer;text-align:center;width:22px}
  .status{padding:3px 8px;font-size:12px;color:var(--fg);border-top:1px solid var(--bd2);background:var(--panel)} .status.err{color:#e06}
  #loghdr{background:#333;color:#ddd;padding:2px 8px;font-size:11px;display:flex;justify-content:space-between}
@@ -2474,7 +2479,10 @@ async function inlineEdit(td,id,ri,ci){const t=T(id);const key=ri+':'+ci;const c
  // let you type a value the column can't actually hold, which the double-click path already avoids.
  const colType=await getColType(id,t.cols[ci]);
  if(colType&&(/^enum\(/i.test(colType)||/^tinyint\(1\)/i.test(colType))){editCell(td,id,ri,ci);return;}
- td.innerHTML='<input><button tabindex="-1" title="Set NULL" style="padding:0 4px">&empty;</button>';const inp=td.querySelector('input');const nb=td.querySelector('button');inp.value=(cur===null?'':cur);inp.focus();inp.select();let done=false,dirty=false;
+ // No inp.select() here on purpose - auto-selecting the whole value made entering edit mode look
+ // like a big blue highlight box instead of just dropping into the text, so the cursor is placed
+ // at the end of the existing value instead (still lets you type to replace via Home+shift, etc).
+ td.innerHTML='<input><button tabindex="-1" title="Set NULL" style="padding:0 4px">&empty;</button>';const inp=td.querySelector('input');const nb=td.querySelector('button');inp.value=(cur===null?'':cur);inp.focus();const vlen=inp.value.length;inp.setSelectionRange(vlen,vlen);let done=false,dirty=false;
  const set=v=>{done=true;setUpd(id,ri,ci,v);};
  inp.addEventListener('input',()=>dirty=true);
  nb.addEventListener('mousedown',e=>{e.preventDefault();set(null);});
@@ -3275,7 +3283,10 @@ if(preselect&&preselect.db){
   }
 }
 show('mExport');}
-function expAll(v){[...document.querySelectorAll('.expdb')].forEach(c=>c.checked=v);}
+// Setting a db checkbox's .checked here doesn't fire its onchange (that's a real user click's job),
+// so any table list already expanded before "All"/"None" is clicked was left stuck at its old
+// checked state - cascading into .exptbl directly here (same as expDbToggle does per-db) fixes that.
+function expAll(v){[...document.querySelectorAll('.expdb')].forEach(c=>c.checked=v);[...document.querySelectorAll('.exptbl')].forEach(c=>c.checked=v);}
 function expSyncFilenameField(){const row=$('expFilenameRow');if(row)row.style.display=$('expSingle').checked?'inline-flex':'none';}
 // A few export options only exist on one mysqldump flavor: --set-gtid-purged is MySQL 5.6+
 // only, --column-statistics is MySQL 8+ only - MariaDB's mysqldump has neither, and checking
