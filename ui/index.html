@@ -3427,23 +3427,24 @@ function cmpRenderResults(){const box=$('cmpResults');const sr=$('cmpResultsSear
  if(rsr)rsr.style.display=_cmpTables.some(t=>t.status==='same')?'block':'none';
  cmpTally();
  let h='<table style="width:100%;border-collapse:collapse;font-size:12px"><tr class="muted" style="text-align:left;font-size:11px"><th style="padding:4px 6px"></th><th style="padding:4px 6px">Table</th><th style="padding:4px 6px">Status</th><th style="padding:4px 6px">Rows</th></tr>';
- // The differing-statement list (below each table with SQL changes) is always shown now, not
- // hidden behind a "details" toggle link - the row comparison "rows\u2026" link, by contrast, only
- // shows up once "Check row differences" has actually been run (see _cmpRowScanStarted).
+ // The row comparison "rows\u2026" link only shows up once "Check row differences" has actually
+ // been run (see _cmpRowScanStarted) - the differing-statement "details" toggle below is back to
+ // its original collapsed-by-default behavior.
  _cmpTables.forEach((t,ti)=>{const hasSql=t.sql&&t.sql.length;
-  h+='<tr class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="border-top:1px solid var(--bd2)"><td style="padding:6px">'+(hasSql?('<input type="checkbox" '+(t.sql.some(s=>s.checked)?'checked':'')+' onclick="cmpToggleAllForTable('+ti+',this.checked)">'):'')+'</td><td style="padding:6px">'+esc(t.name)+(_cmpRowScanStarted?' <a href="#" onclick="cmpCompareRows('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">rows\u2026</a>':'')+'</td><td style="padding:6px">'+cmpBadge(t.status)+'</td><td id="cmpRowCell_'+ti+'" style="padding:6px">'+cmpRowBadge(t)+'</td></tr>';
-  if(hasSql){
-   h+='<tr class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'"><td colspan="4" style="padding:0 6px 8px 20px">';
-   t.sql.forEach((st,si)=>{h+='<div style="font-family:\'Cascadia Code\',Consolas,monospace;font-size:11px;margin:2px 0"><label><input type="checkbox" '+(st.checked?'checked':'')+' onclick="_cmpTables['+ti+'].sql['+si+'].checked=this.checked;cmpUpdateSummary()"> '+esc(st.stmt)+'</label></div>';});
-   h+='</td></tr>';
-  }
- });
+  h+='<tr class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="border-top:1px solid var(--bd2)"><td style="padding:6px">'+(hasSql?('<input type="checkbox" '+(t.sql.some(s=>s.checked)?'checked':'')+' onclick="cmpToggleAllForTable('+ti+',this.checked)">'):'')+'</td><td style="padding:6px">'+esc(t.name)+(hasSql?' <a href="#" onclick="cmpToggleDetail('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">details</a>':'')+(_cmpRowScanStarted?' <a href="#" onclick="cmpCompareRows('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">rows\u2026</a>':'')+'</td><td style="padding:6px">'+cmpBadge(t.status)+'</td><td id="cmpRowCell_'+ti+'" style="padding:6px">'+cmpRowBadge(t)+'</td></tr>';
+  h+='<tr id="cmpDetail_'+ti+'" class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="display:none"><td colspan="4" style="padding:0 6px 8px 20px">';
+  t.sql.forEach((st,si)=>{h+='<div style="font-family:\'Cascadia Code\',Consolas,monospace;font-size:11px;margin:2px 0"><label><input type="checkbox" '+(st.checked?'checked':'')+' onclick="_cmpTables['+ti+'].sql['+si+'].checked=this.checked;cmpUpdateSummary()"> '+esc(st.stmt)+'</label></div>';});
+  h+='</td></tr>';});
  h+='</table>';box.innerHTML=h;cmpUpdateSummary();cmpFilterResults();}
 function cmpFilterResults(){const q=($('cmpResultSearch').value||'').toLowerCase();
  document.querySelectorAll('#cmpResults tr.cmpresultrow').forEach(el=>{
-   el.style.display=(!q||el.dataset.name.includes(q))?'table-row':'none';
+   const match=!q||el.dataset.name.includes(q);
+   // a detail row (id starts with cmpDetail_) stays hidden unless the user has it expanded AND it matches
+   if(el.id&&el.id.indexOf('cmpDetail_')===0){ el.style.display=(match&&el.dataset.expanded==='1')?'table-row':'none'; }
+   else { el.style.display=match?'table-row':'none'; }
  });}
-function cmpToggleAllForTable(ti,on){_cmpTables[ti].sql.forEach(s=>s.checked=on);cmpRenderResults();}
+function cmpToggleDetail(ti){const el=$('cmpDetail_'+ti);if(el){const show=el.style.display==='none';el.style.display=show?'table-row':'none';el.dataset.expanded=show?'1':'0';}}
+function cmpToggleAllForTable(ti,on){_cmpTables[ti].sql.forEach(s=>s.checked=on);cmpRenderResults();const el=$('cmpDetail_'+ti);if(el){el.style.display='table-row';el.dataset.expanded='1';}}
 function cmpUpdateSummary(){if(!_cmpTables){$('cmpSummary').textContent='';return;}let n=0;_cmpTables.forEach(t=>t.sql.forEach(s=>{if(s.checked)n++;}));$('cmpSummary').textContent=n+' change(s) selected \u2022 SQL preview shown before apply';}
 let _cmpRequestId=null;
 let _cmpAbortCtrl=null;
