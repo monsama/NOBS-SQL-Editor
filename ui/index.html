@@ -555,12 +555,16 @@ function floatToggleMaximize(id){
  const btn=$('maxBtn_'+id);
  if(window._floatingMaxState[id]){
   const s=window._floatingMaxState[id];
-  box.style.top=s.top;box.style.left=s.left;box.style.width=s.width;box.style.height=s.height;
+  box.style.top=s.top;box.style.left=s.left;box.style.width=s.width;box.style.height=s.height;box.style.maxWidth=s.maxWidth;box.style.maxHeight=s.maxHeight;
   delete window._floatingMaxState[id];
   if(btn)btn.title='Maximize';
  } else {
-  window._floatingMaxState[id]={top:box.style.top,left:box.style.left,width:box.style.width,height:box.style.height};
-  box.style.top='10px';box.style.left='10px';box.style.width='calc(100vw - 20px)';box.style.height='calc(100vh - 20px)';
+  // Every modal has a max-width (95vw-ish, from the resize-ceiling fix) and the shared .box
+  // rule's max-height:92% - both still apply to an inline width/height set here, silently
+  // clamping the "full screen" size to something visibly short of the actual viewport (a bigger
+  // gap on the right/bottom than the 10px on top/left) unless overridden too.
+  window._floatingMaxState[id]={top:box.style.top,left:box.style.left,width:box.style.width,height:box.style.height,maxWidth:box.style.maxWidth,maxHeight:box.style.maxHeight};
+  box.style.top='10px';box.style.left='10px';box.style.width='calc(100vw - 20px)';box.style.height='calc(100vh - 20px)';box.style.maxWidth='none';box.style.maxHeight='none';
   if(btn)btn.title='Restore';
  }
  floatBringToFront(id);
@@ -3622,15 +3626,21 @@ function cmprDiffRender(){
   h+='<div style="border-top:1px solid var(--bd2);padding:6px">';
   h+='<label style="display:flex;align-items:center;gap:6px;font-weight:600"><input type="checkbox" '+(r.checked?'checked':'')+' onclick="_cmprDiffState.rows['+ri+'].checked=this.checked;cmprDiffUpdateSummary()"> id = '+esc(r.pk.join(', '))+' <span class="muted" style="font-weight:400">('+r.colDiffs.length+' column'+(r.colDiffs.length===1?'':'s')+' differ)</span></label>';
   h+='<table style="width:100%;border-collapse:collapse;font-size:11px;margin-top:4px"><tr class="muted" style="text-align:left"><th style="padding:2px 6px;width:25%">Column</th><th style="padding:2px 6px;width:37%">Source</th><th style="padding:2px 6px;width:37%">Target (current)</th></tr>';
-  r.colDiffs.forEach(cd=>{
+  r.colDiffs.forEach((cd,ci)=>{
    const isPk=(_cmprDiffState.pkCols||[]).indexOf(cd.col)>=0;const isFk=(_cmprDiffState.fkCols||[]).indexOf(cd.col)>=0;
    const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');
-   h+='<tr><td style="padding:2px 6px;font-weight:600">'+esc(cd.col)+kb+'</td><td style="padding:2px 6px;color:var(--erd-pk,#5dcaa5)">'+(cd.src===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(String(cd.src),80)))+'</td><td style="padding:2px 6px;color:var(--diff-tgt,#f0997b)">'+(cd.tgt===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(String(cd.tgt),80)))+'</td></tr>';
+   const srcClipped=cd.src!==null&&String(cd.src).length>80,tgtClipped=cd.tgt!==null&&String(cd.tgt).length>80;
+   h+='<tr><td style="padding:2px 6px;font-weight:600">'+esc(cd.col)+kb+'</td>'
+    +'<td style="padding:2px 6px;color:var(--erd-pk,#5dcaa5)'+(srcClipped?';cursor:pointer':'')+'" title="'+(srcClipped?'Click to view full value':'')+'"'+(srcClipped?' onclick="cmprDiffViewCell('+ri+','+ci+',\'src\')"':'')+'>'+(cd.src===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(String(cd.src),80)))+'</td>'
+    +'<td style="padding:2px 6px;color:var(--diff-tgt,#f0997b)'+(tgtClipped?';cursor:pointer':'')+'" title="'+(tgtClipped?'Click to view full value':'')+'"'+(tgtClipped?' onclick="cmprDiffViewCell('+ri+','+ci+',\'tgt\')"':'')+'>'+(cd.tgt===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(String(cd.tgt),80)))+'</td></tr>';
   });
   h+='</table></div>';
  });
  box.innerHTML=h;cmprDiffUpdateSummary();
 }
+// Same reasoning as cmprViewCell above: only wired up on cells actually clipped, reopens the
+// shared read-only cell-viewer rather than a one-off for this grid.
+function cmprDiffViewCell(ri,ci,which){const cd=_cmprDiffState.rows[ri].colDiffs[ci];const v=which==='src'?cd.src:cd.tgt;viewText(cd.col+' ('+(which==='src'?'Source':'Target')+')',v,{readonly:true});}
 function cmprDiffUpdateSummary(){if(!_cmprDiffState){$('cmprDiffSummary').textContent='';return;}const n=_cmprDiffState.rows.filter(r=>r.checked).length;$('cmprDiffSummary').textContent=n+' of '+_cmprDiffState.rows.length+' selected';}
 function cmprDiffSetAll(on){if(!_cmprDiffState)return;_cmprDiffState.rows.forEach(r=>r.checked=on);cmprDiffRender();}
 async function cmprDiffApply(){
@@ -3654,11 +3664,15 @@ function cmprRender(){
  h+='</tr>';
  _cmprState.rows.forEach((r,ri)=>{
   h+='<tr style="border-top:1px solid var(--bd2)"><td style="padding:3px 6px"><input type="checkbox" '+(r.checked?'checked':'')+' onclick="_cmprState.rows['+ri+'].checked=this.checked;cmprUpdateSummary()"></td>';
-  r.data.forEach(v=>{h+='<td style="padding:3px 6px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis" title="'+esc(v===null?'NULL':v)+'">'+(v===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(v,120)))+'</td>';});
+  r.data.forEach((v,ci)=>{const clipped=v!==null&&String(v).length>120;h+='<td style="padding:3px 6px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis'+(clipped?';cursor:pointer':'')+'" title="'+esc(v===null?'NULL':(clipped?'Click to view full value':v))+'"'+(clipped?' onclick="cmprViewCell('+ri+','+ci+')"':'')+'>'+(v===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(v,120)))+'</td>';});
   h+='</tr>';
  });
  h+='</table>';box.innerHTML=h;cmprUpdateSummary();
 }
+// Only wired up on cells long enough to actually be clipped (see cmprRender above) - reopens the
+// same read-only cell-viewer modal used throughout the app, rather than a bespoke one just for
+// this grid, so it gets Copy/full-size/Ctrl+wheel zoom for free.
+function cmprViewCell(ri,ci){const r=_cmprState.rows[ri];const v=r.data[ci];const col=_cmprState.columns[ci];viewText('Missing row - '+col,v,{readonly:true});}
 function cmprUpdateSummary(){if(!_cmprState){$('cmprSummary').textContent='';return;}const n=_cmprState.rows.filter(r=>r.checked).length;$('cmprSummary').textContent=n+' of '+_cmprState.rows.length+' selected';}
 function cmprSetAll(on){if(!_cmprState)return;_cmprState.rows.forEach(r=>r.checked=on);cmprRender();}
 async function cmprInsertAll(){
