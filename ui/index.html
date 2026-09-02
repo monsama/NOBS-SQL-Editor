@@ -26,8 +26,8 @@
    current theme's panel color is, so they need their OWN theme-appropriate variant to keep
    working WCAG-reasonable contrast in both themes rather than just the one they were originally
    picked to look good on. */
-:root{--bg:#fff;--fg:#1c1c1c;--panel:#eef0f3;--panel2:#e6e6e6;--bd:#ccc;--bd2:#e2e2e2;--hover:#eaf2fb;--accent:#1565c0;--muted:#777;--gridh:#f0f0f0;--even:#fafafa;--dirty:#fff6cc;--del:#ffdede;--btn:#fafafa;--log:#1e1e1e;--logfg:#d4d4d4;--str:#a31515;--kw:#0000c0;--com:#008000;--num:#098658;--in:#fff;--sb:rgba(0,0,0,.28);--sbh:rgba(0,0,0,.48);--erd-pk:#1a7a5e;--erd-fk:#2a5a9e;--erd-line:#2a5a9e;--diff-tgt:#a8442a}
- body.dark{--bg:#1e1e1e;--fg:#e0e0e0;--panel:#2a2d31;--panel2:#333;--bd:#444;--bd2:#3a3a3a;--hover:#33404d;--accent:#3b82f6;--muted:#999;--gridh:#2d2d2d;--even:#262626;--dirty:#4a4526;--del:#4a2626;--btn:#333;--log:#141414;--logfg:#d4d4d4;--str:#ce9178;--kw:#569cd6;--com:#6a9955;--num:#b5cea8;--in:#2a2a2a;--sb:rgba(255,255,255,.24);--sbh:rgba(255,255,255,.42);--erd-pk:#5dcaa5;--erd-fk:#8fb8e8;--erd-line:#7aa8d8;--diff-tgt:#f0997b}
+:root{--bg:#fff;--fg:#1c1c1c;--panel:#eef0f3;--panel2:#e6e6e6;--bd:#ccc;--bd2:#e2e2e2;--hover:#eaf2fb;--accent:#1565c0;--muted:#777;--gridh:#f0f0f0;--even:#fafafa;--dirty:#fff6cc;--del:#ffdede;--btn:#fafafa;--log:#1e1e1e;--logfg:#d4d4d4;--str:#a31515;--kw:#0000c0;--com:#008000;--num:#098658;--in:#fff;--sb:rgba(0,0,0,.28);--sbh:rgba(0,0,0,.48);--erd-pk:#1a7a5e;--erd-fk:#2a5a9e;--erd-line:#2a5a9e;--diff-tgt:#a8442a;--err-line:#c0392b}
+ body.dark{--bg:#1e1e1e;--fg:#e0e0e0;--panel:#2a2d31;--panel2:#333;--bd:#444;--bd2:#3a3a3a;--hover:#33404d;--accent:#3b82f6;--muted:#999;--gridh:#2d2d2d;--even:#262626;--dirty:#4a4526;--del:#4a2626;--btn:#333;--log:#141414;--logfg:#d4d4d4;--str:#ce9178;--kw:#569cd6;--com:#6a9955;--num:#b5cea8;--in:#2a2a2a;--sb:rgba(255,255,255,.24);--sbh:rgba(255,255,255,.42);--erd-pk:#5dcaa5;--erd-fk:#8fb8e8;--erd-line:#7aa8d8;--diff-tgt:#f0997b;--err-line:#e57373}
  *{box-sizing:border-box}
 *{scrollbar-width:thin;scrollbar-color:var(--sb) transparent}
 ::-webkit-scrollbar{width:11px;height:11px}
@@ -85,6 +85,10 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  table.grid tr.insrow td.delcell{color:#7ee0a0}
  table.grid td.kbfocus{outline:2px solid var(--accent);outline-offset:-2px}
  td.dirty{background:var(--dirty)!important} tr.del td{background:var(--del)!important;text-decoration:line-through}
+ #expLog .ln,#impLog .ln{border-left:3px solid transparent;padding-left:8px}
+ #expLog .ln.ok,#impLog .ln.ok{border-left-color:var(--erd-pk)}
+ #expLog .ln.warn,#impLog .ln.warn{border-left-color:var(--diff-tgt)}
+ #expLog .ln.err,#impLog .ln.err{border-left-color:var(--err-line)}
  /* Inline cell-edit input: kept visually close to the plain cell text it replaces - the td's own
     padding is zeroed while editing (.cellEditing) and moved onto the input itself instead, so the
     input fills the cell exactly (no inset "box" look, no row growth from stacking both paddings)
@@ -452,6 +456,14 @@ let curSchema=null, tabs=[], tabSeq=0, activeTab=null;
    ============================================================================ */
 const $=id=>document.getElementById(id);window.$=$;
 function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function logLineCls(l){
+ if(/^OK\s+with\s+\d+\s+error/i.test(l))return 'warn';
+ if(/^OK\b/.test(l))return 'ok';
+ if(/^FAILED\b/.test(l))return 'err';
+ if(/^(SKIP\b|CANCELLED\b|\(excluded\)|\(no tables\))/.test(l))return 'warn';
+ return '';
+}
+function logLinesHtml(lines){return lines.map(l=>{const c=logLineCls(l);return '<div class="ln'+(c?' '+c:'')+'">'+esc(l)+'</div>';}).join('');}
 function connMeta(){return window._connMeta||{};}
 function connMetaSet(n,m){window._connMeta=window._connMeta||{};if(m){const cur=window._connMeta[n]||{};window._connMeta[n]={accent:cur.accent||'',env:m.env||'',readonly:!!m.readonly};}else{delete window._connMeta[n];}}
 window.readOnly=false;window.curEnv='';
@@ -3511,7 +3523,7 @@ if(!dbs.length && tables.length){
  progStop('exp');
  if(r.cancelled){log('Export cancelled.');}
  if(!r.ok){showToolError('expLog','mExport',r.error);log('Export error: '+r.error);return;}
- $('expLog').textContent=r.log.join('\n');r.log.forEach(l=>log('EXPORT: '+l));}
+ $('expLog').innerHTML=logLinesHtml(r.log);r.log.forEach(l=>log('EXPORT: '+l));}
 let _cmpTables=null;
 // Per-table "rows…" links only show up once "Check row differences" has actually been pressed -
 // before that, row comparison hasn't been requested yet so the link would just be premature clutter.
@@ -3993,7 +4005,7 @@ async function runImport(){const files=$('impFiles').value.split(/\r?\n/).map(s=
  progStop('imp');
  if(r.cancelled){log('Import cancelled.');}
  if(!r.ok){showToolError('impLog','mImport',r.error);log('Import error: '+r.error);return;}
- $('impLog').textContent=r.log.join('\n');r.log.forEach(l=>log('IMPORT: '+l));}
+ $('impLog').innerHTML=logLinesHtml(r.log);r.log.forEach(l=>log('IMPORT: '+l));}
 async function openSupportLink(){try{await api('/api/open-support-link');}catch(e){}}
 async function quit(){
  const activeJobs=Object.keys(_progJobIds||{}).filter(k=>_progJobIds[k]);
