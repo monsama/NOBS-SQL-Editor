@@ -2273,7 +2273,7 @@ function renderBody(id){const t=T(id);const ed=!!t.pk;if(!t.selected)t.selected=
    h+='<td '+attr+' title="'+esc(clip(val,300))+'">'+cellHtml(val,t.bitCols&&t.bitCols[ci])+'</td>';});h+='</tr>';});
  if(botH>0)h+='<tr class="vpad" style="height:'+botH+'px"><td colspan="'+nCols+'" style="padding:0;border:none"></td></tr>';
  if(ed)t.pending.ins.forEach((row,ii)=>{h+='<tr class="insrow"><td></td><td class="delcell" onclick="delIns(\''+id+'\','+ii+')">\u00D7</td>';
-   t.cols.forEach((c,ci)=>{const v=row[c];h+='<td class="editable" onclick="insClick(this,\''+id+'\','+ii+',\''+c.replace(/'/g,"\\'")+'\')" ondblclick="editIns(this,\''+id+'\','+ii+',\''+c.replace(/'/g,"\\'")+'\')" oncontextmenu="insCellMenu(event,\''+id+'\','+ii+',\''+c.replace(/'/g,"\\'")+'\')" title="'+esc(v)+'">'+cellHtml(v===undefined?null:v,t.bitCols&&t.bitCols[ci])+'</td>';});h+='</tr>';});
+   t.cols.forEach((c,ci)=>{const v=row[c];const cAttr=esc(c).replace(/\x27/g,'\\x27');h+='<td class="editable" onclick="insClick(this,\''+id+'\','+ii+',\''+cAttr+'\')" ondblclick="editIns(this,\''+id+'\','+ii+',\''+cAttr+'\')" oncontextmenu="insCellMenu(event,\''+id+'\','+ii+',\''+cAttr+'\')" title="'+esc(v)+'">'+cellHtml(v===undefined?null:v,t.bitCols&&t.bitCols[ci])+'</td>';});h+='</tr>';});
  $('tbody_'+id).innerHTML=h;
  if(wrap&&slice.length){const sampleTr=wrap.querySelector('tbody tr[data-r]');if(sampleTr){const mh=sampleTr.getBoundingClientRect().height;if(mh>4)t._rowH=mh;}}
  updateEditBar(id);}
@@ -3383,8 +3383,14 @@ async function lockUser(lock){const v=window._selUser;if(!v){toast('Select a use
 async function changePassword(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const parts=v.split('\x01');const u=parts[0],h=parts[1];
  const res=await inputBox({title:'Change password for '+u+'@'+h,okText:'Change',fields:[{key:'pw',label:'New password',type:'password',value:''},{key:'pw2',label:'Confirm new password',type:'password',value:''}]});
  if(!res)return;if(!res.pw){toast('Password cannot be empty.',true);return;}if(res.pw!==res.pw2){toast('Passwords do not match.',true);return;}
- const uu=u.replace(/'/g,"''"),hh=h.replace(/'/g,"''"),pp=res.pw.replace(/'/g,"''");
- const sql="ALTER USER '"+uu+"'@'"+hh+"' IDENTIFIED BY '"+pp+"';";
+ // lit() for user/host (matching lockUser() above), but NOT for the password: lit()'s hex-literal
+ // passthrough (returning e.g. "0xdead" unquoted) is meant for cell values, not a password field -
+ // it would silently reinterpret a password that happens to look like hex as raw bytes instead of
+ // the literal text the user typed. Escape it directly instead: backslash first, then the quote -
+ // same as lit()/the backend's own sql_str_lit() - so a value ending in a backslash can't combine
+ // with the literal's closing quote to close the string one character early.
+ const pwLit="'"+res.pw.replace(/\\/g,'\\\\').replace(/'/g,"''")+"'";
+ const sql="ALTER USER "+lit(u)+"@"+lit(h)+" IDENTIFIED BY "+pwLit+";";
  const r=await api('/api/exec',{sql:sql});
  if(r.ok){log('Password changed for '+u+'@'+h+'.');}else{alert('Failed: '+(r.error||'unknown'));}}
 async function dropUser(){const v=window._selUser;if(!v)return;const[u,h]=v.split('\x01');if(!(await ask('DROP USER '+u+'@'+h+' ?')))return;if(await exec("DROP USER "+lit(u)+"@"+lit(h),'Dropped user'))openUsers();}
@@ -4040,7 +4046,7 @@ function renderImpDbPicker(){const inp=$('impDb');const f=inp.value.toLowerCase(
  showImpDbList(window._impDbSchemas.filter(n=>!f||n.toLowerCase().includes(f)));}
 function showImpDbList(matches){const p=$('impDbPicker');const inp=$('impDb');if(!p||!inp)return;
  if(!matches.length){p.style.display='none';return;}
- p.innerHTML=matches.map(n=>'<div class="item" onmousedown="event.preventDefault();impDbPick(\''+n.replace(/'/g,"\\'")+'\')">'+esc(n)+'</div>').join('');
+ p.innerHTML=matches.map(n=>'<div class="item" onmousedown="event.preventDefault();impDbPick(\''+esc(n).replace(/\x27/g,'\\x27')+'\')">'+esc(n)+'</div>').join('');
  const r=inp.getBoundingClientRect();
  p.style.left=r.left+'px';p.style.top=r.bottom+2+'px';p.style.minWidth=r.width+'px';p.style.display='block';}
 function impDbPick(name){$('impDb').value=name;$('impDbPicker').style.display='none';}
