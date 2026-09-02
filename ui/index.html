@@ -85,11 +85,17 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  table.grid tr.insrow td.delcell{color:#7ee0a0}
  table.grid td.kbfocus{outline:2px solid var(--accent);outline-offset:-2px}
  td.dirty{background:var(--dirty)!important} tr.del td{background:var(--del)!important;text-decoration:line-through}
- /* Inline cell-edit input: kept visually close to the plain cell text it replaces (matching
-    padding, no border/background box) rather than looking like a distinct form control - just a
-    faint tint so it's still clear the cell is being edited. */
- table.grid td input{width:100%;border:1px solid transparent;font:inherit;padding:1px 7px;background:transparent;color:var(--fg);border-radius:2px}
- table.grid td input:focus{background:var(--hover);border-color:transparent;outline:none}
+ /* Inline cell-edit input: kept visually close to the plain cell text it replaces - the td's own
+    padding is zeroed while editing (.cellEditing) and moved onto the input itself instead, so the
+    input fills the cell exactly (no inset "box" look, no row growth from stacking both paddings)
+    with just a faint tint on focus rather than a distinct form control's border. */
+ table.grid td.cellEditing{padding:0}
+ table.grid td input{width:100%;height:100%;box-sizing:border-box;border:none;font:inherit;padding:2px 8px;background:transparent;color:var(--fg);vertical-align:middle}
+ /* The "Set NULL" button next to the input is a regular <button> (height:28px by default) - taller
+    than a grid row, which was what was actually forcing the row to grow while editing. Shrunk to
+    match the cell instead. */
+ table.grid td button{height:19px;min-width:0;padding:0 4px;border:1px solid var(--bd2);vertical-align:middle}
+ table.grid td input:focus{background:var(--hover);outline:none}
  input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none}
  .delcell{color:#c00;cursor:pointer;text-align:center;width:22px}
  .status{padding:3px 8px;font-size:12px;color:var(--fg);border-top:1px solid var(--bd2);background:var(--panel)} .status.err{color:#e06}
@@ -2482,7 +2488,7 @@ async function inlineEdit(td,id,ri,ci){const t=T(id);const key=ri+':'+ci;const c
  // No inp.select() here on purpose - auto-selecting the whole value made entering edit mode look
  // like a big blue highlight box instead of just dropping into the text, so the cursor is placed
  // at the end of the existing value instead (still lets you type to replace via Home+shift, etc).
- td.innerHTML='<input><button tabindex="-1" title="Set NULL" style="padding:0 4px">&empty;</button>';const inp=td.querySelector('input');const nb=td.querySelector('button');inp.value=(cur===null?'':cur);inp.focus();const vlen=inp.value.length;inp.setSelectionRange(vlen,vlen);let done=false,dirty=false;
+ td.classList.add('cellEditing');td.innerHTML='<input><button tabindex="-1" title="Set NULL" style="padding:0 4px">&empty;</button>';const inp=td.querySelector('input');const nb=td.querySelector('button');inp.value=(cur===null?'':cur);inp.focus();const vlen=inp.value.length;inp.setSelectionRange(vlen,vlen);let done=false,dirty=false;
  const set=v=>{done=true;setUpd(id,ri,ci,v);};
  inp.addEventListener('input',()=>dirty=true);
  nb.addEventListener('mousedown',e=>{e.preventDefault();set(null);});
@@ -2490,7 +2496,7 @@ async function inlineEdit(td,id,ri,ci){const t=T(id);const key=ri+':'+ci;const c
  inp.addEventListener('blur',()=>setTimeout(()=>{if(!done){if(dirty)set(inp.value);else renderGrid(id);}},120));}
 function inlineEditIns(td,id,ii,col){const t=T(id);const cur=t.pending.ins[ii][col];
  if(cur!=null&&/[\r\n]/.test(String(cur))){editIns(td,id,ii,col);return;}
- td.innerHTML='<input><button tabindex="-1" style="padding:0 4px" title="Set NULL">&empty;</button>';const inp=td.querySelector('input');const nb=td.querySelector('button');inp.value=(cur==null?'':cur);inp.focus();let done=false,dirty=false;
+ td.classList.add('cellEditing');td.innerHTML='<input><button tabindex="-1" style="padding:0 4px" title="Set NULL">&empty;</button>';const inp=td.querySelector('input');const nb=td.querySelector('button');inp.value=(cur==null?'':cur);inp.focus();let done=false,dirty=false;
  const set=v=>{done=true;t.pending.ins[ii][col]=v;renderGrid(id);};
  inp.addEventListener('input',()=>dirty=true);
  nb.addEventListener('mousedown',e=>{e.preventDefault();set(null);});
