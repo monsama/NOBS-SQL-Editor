@@ -242,15 +242,15 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <!-- Its own row (matching Folder's label/width/casing) instead of squeezed into the dense options
       row above at 120px wide - plus a live preview of the actual resulting file name, since
       "timestamp" silently changes what gets written and a plain text box alone doesn't show that. -->
- <!-- maxlength 234: NTFS/Windows caps a single path component (a filename, not the whole path)
-      at 255 characters - 234 leaves room for the "_YYYYMMDD_HHMMSS" timestamp suffix (17 chars)
-      and ".sql" extension (4 chars) this field doesn't show while you're typing it, so the
-      actual file written can never itself hit that ceiling even with timestamp on. -->
+ <!-- maxlength 100: well under NTFS's 255-character filename ceiling (which itself would need
+      room for the "_YYYYMMDD_HHMMSS" timestamp suffix and ".sql" extension this field doesn't
+      show while typing) - chosen instead for the GUI itself, so a typed name stays on one line
+      in both the input and the preview row below it without ever needing to ellipsize. -->
  <!-- The generated-name preview gets its own row underneath (full width to actually show a long
       name) instead of squeezed to the right of the input, where it had almost no room and
       ellipsized down to nothing. -->
  <div id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none;flex-direction:column;gap:2px">
-  <div class="row" style="flex:none">Filename <input id="expFilename" placeholder="all_selected" maxlength="234" style="flex:1" oninput="expUpdateFilenamePreview()"><span id="expFilenameCount" class="muted" style="font-size:10px;white-space:nowrap;display:none"></span></div>
+  <div class="row" style="flex:none">Filename <input id="expFilename" placeholder="all_selected" maxlength="100" style="flex:1" oninput="expUpdateFilenamePreview()"><span id="expFilenameCount" class="muted" style="font-size:10px;white-space:nowrap;display:none"></span></div>
   <div id="expFilenamePreview" class="muted" style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
  </div>
  <div class="row" style="flex:none">Folder <input id="expFolder" style="flex:1" value="C:\temp"><button onclick="browse({title:'Select export folder',mode:'folder',start:$('expFolder').value,onPick:pp=>$('expFolder').value=pp})">Browse...</button></div>
