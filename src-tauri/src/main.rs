@@ -1471,6 +1471,38 @@ async fn export(app: tauri::AppHandle, req: Value) -> R {
     export_run(req, dbin).await
 }
 
+// mysqldump's --databases mode can only exclude tables via a repeated --ignore-table flag per
+// table - no ignore-list file, no wildcard. A schema with hundreds of tables where the user
+// only wants (or only excludes) a handful can blow straight through Windows' ~32K-character
+// CreateProcess command-line limit, failing with the unhelpful "os error 206: The filename or
+// extension is too long" despite a perfectly ordinary filename. Picks whichever side of the
+// include/exclude split is smaller for database `d`: a short exclude list stays --ignore-table
+// (as before); a short include list switches to naming those tables positionally instead
+// (mysqldump db table1 table2 ... dumps only the named tables - no --databases needed, but this
+// only works for a single database at a time). Returns (ignore_table_args, positional_tables) -
+// exactly one of the two is non-empty whenever `d` has any exclusions at all.
+fn table_filter_args(d: &str, excl: &std::collections::HashSet<String>, conn_req: &Value) -> Result<(Vec<String>, Vec<String>), String> {
+    let prefix = format!("{}.", d);
+    let this_excl: Vec<&str> = excl.iter().filter(|k| k.starts_with(&prefix)).map(|k| k.as_str()).collect();
+    if this_excl.is_empty() { return Ok((vec![], vec![])); }
+    // A normal handful of exclusions is cheap as --ignore-table either way - only worth the
+    // extra information_schema round-trip once the exclude list itself is already sizeable.
+    if this_excl.len() < 40 {
+        return Ok((this_excl.iter().map(|k| format!("--ignore-table={}", k)).collect(), vec![]));
+    }
+    let mut conn = build_conn(conn_req)?;
+    let sql = format!("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA={} ORDER BY TABLE_NAME", sql_lit(d));
+    let (_cols, rows) = run_select(&mut conn, &sql)?;
+    let excl_names: std::collections::HashSet<&str> = this_excl.iter().map(|k| k.splitn(2, '.').nth(1).unwrap_or("")).collect();
+    let included: Vec<String> = rows.iter().filter_map(|r| r.get(0).cloned().flatten())
+        .filter(|t| !excl_names.contains(t.as_str())).collect();
+    if this_excl.len() <= included.len() {
+        Ok((this_excl.iter().map(|k| format!("--ignore-table={}", k)).collect(), vec![]))
+    } else {
+        Ok((vec![], included))
+    }
+}
+
 // The body, split out so it can be driven from a test without a tauri::AppHandle - resolving
 // the mysqldump path is the only thing the handle was needed for.
 async fn export_run(req: Value, dbin: String) -> R {
@@ -1564,34 +1596,70 @@ async fn export_run(req: Value, dbin: String) -> R {
 
         if mode == "single" {
             let file = mkfile(&single_base);
-            let mut a = common.clone();
-            a.push("--databases".into());
-            if flag("routines") { a.push("--routines".into()); }
-            if flag("events") { a.push("--events".into()); }
-            if flag("adddropdb") { a.push("--add-drop-database".into()); }
-            if flag("adddroptb") { a.push("--add-drop-table".into()); } else { a.push("--skip-add-drop-table".into()); }
-            if !flag("createdb") { a.push("--no-create-db".into()); }
-            for k in &excl { a.push(format!("--ignore-table={}", k)); }
-            for d in &dbs { a.push(d.clone()); }
-            a.push(format!("--result-file={}", file));
-            match run(&dbin, &a, &file) {
-                Ok((true, msg)) => log.push(msg),
-                Ok((false, err)) => { if err == RUN_CANCELLED { log.push(format!("CANCELLED {}", single_base)); cancelled = true; } else { log.push(format!("FAILED {} : {}", single_base, err)); } }
-                Err(e) => log.push(format!("FAILED {} : {}", single_base, e)),
+            // Positional per-table filtering only works against a single database at a time, so
+            // the command-line-length fix (see table_filter_args) only kicks in when exactly one
+            // db is selected - a multi-database single-file export needs --databases to combine
+            // them anyway, and heavy exclusions on TOP of that is a rarer combination left as-is.
+            let mut positional: Option<Vec<String>> = None;
+            let mut listing_failed = false;
+            if dbs.len() == 1 {
+                match table_filter_args(&dbs[0], &excl, &req["conn"]) {
+                    Ok((_, included)) if !included.is_empty() => positional = Some(included),
+                    Ok(_) => {}
+                    Err(e) => { log.push(format!("FAILED (list tables) {} : {}", dbs[0], e)); listing_failed = true; }
+                }
+            }
+            if !listing_failed {
+                let mut a = common.clone();
+                if let Some(included) = positional {
+                    if flag("routines") { a.push("--routines".into()); }
+                    if flag("events") { a.push("--events".into()); }
+                    if flag("adddroptb") { a.push("--add-drop-table".into()); } else { a.push("--skip-add-drop-table".into()); }
+                    a.push(dbs[0].clone());
+                    a.extend(included);
+                } else {
+                    a.push("--databases".into());
+                    if flag("routines") { a.push("--routines".into()); }
+                    if flag("events") { a.push("--events".into()); }
+                    if flag("adddropdb") { a.push("--add-drop-database".into()); }
+                    if flag("adddroptb") { a.push("--add-drop-table".into()); } else { a.push("--skip-add-drop-table".into()); }
+                    if !flag("createdb") { a.push("--no-create-db".into()); }
+                    for k in &excl { a.push(format!("--ignore-table={}", k)); }
+                    for d in &dbs { a.push(d.clone()); }
+                }
+                a.push(format!("--result-file={}", file));
+                match run(&dbin, &a, &file) {
+                    Ok((true, msg)) => log.push(msg),
+                    Ok((false, err)) => { if err == RUN_CANCELLED { log.push(format!("CANCELLED {}", single_base)); cancelled = true; } else { log.push(format!("FAILED {} : {}", single_base, err)); } }
+                    Err(e) => log.push(format!("FAILED {} : {}", single_base, e)),
+                }
             }
         } else if mode == "db" {
             for d in &dbs {
                 if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { log.push("CANCELLED (remaining databases skipped)".into()); cancelled = true; break; }
                 let file = mkfile(d);
+                let positional = match table_filter_args(d, &excl, &req["conn"]) {
+                    Ok((_, included)) if !included.is_empty() => Some(included),
+                    Ok(_) => None,
+                    Err(e) => { log.push(format!("FAILED (list tables) {} : {}", d, e)); continue; }
+                };
                 let mut a = common.clone();
-                a.push("--databases".into());
-                if flag("routines") { a.push("--routines".into()); }
-                if flag("events") { a.push("--events".into()); }
-                if flag("adddropdb") { a.push("--add-drop-database".into()); }
-                if flag("adddroptb") { a.push("--add-drop-table".into()); } else { a.push("--skip-add-drop-table".into()); }
-                if !flag("createdb") { a.push("--no-create-db".into()); }
-                for k in &excl { if k.starts_with(&format!("{}.", d)) { a.push(format!("--ignore-table={}", k)); } }
-                a.push(d.clone());
+                if let Some(included) = positional {
+                    if flag("routines") { a.push("--routines".into()); }
+                    if flag("events") { a.push("--events".into()); }
+                    if flag("adddroptb") { a.push("--add-drop-table".into()); } else { a.push("--skip-add-drop-table".into()); }
+                    a.push(d.clone());
+                    a.extend(included);
+                } else {
+                    a.push("--databases".into());
+                    if flag("routines") { a.push("--routines".into()); }
+                    if flag("events") { a.push("--events".into()); }
+                    if flag("adddropdb") { a.push("--add-drop-database".into()); }
+                    if flag("adddroptb") { a.push("--add-drop-table".into()); } else { a.push("--skip-add-drop-table".into()); }
+                    if !flag("createdb") { a.push("--no-create-db".into()); }
+                    for k in &excl { if k.starts_with(&format!("{}.", d)) { a.push(format!("--ignore-table={}", k)); } }
+                    a.push(d.clone());
+                }
                 a.push(format!("--result-file={}", file));
                 match run(&dbin, &a, &file) {
                     Ok((true, msg)) => log.push(msg),
@@ -3129,6 +3197,33 @@ mod tests {
     fn ver_key_orders_numerically_not_lexically() {
         assert!(ver_key("11.4.2") > ver_key("9.9.9"), "11.x must beat 9.x");
         assert!(ver_key("10.11.0") > ver_key("10.9.0"), "10.11 must beat 10.9");
+    }
+
+    // The whole point of table_filter_args is to never build a command line that scales with a
+    // huge table count - below its 40-exclusion threshold it must stay on the cheap --ignore-table
+    // path without ever touching the database (a bogus connection here would panic/error out if
+    // it did), and it must ignore exclusions that belong to a different database entirely.
+    #[test]
+    fn table_filter_args_stays_on_ignore_table_path_under_threshold() {
+        let bogus_conn = json!({"host":"unreachable.invalid","port":3306,"user":"x","password":"x"});
+        let mut excl = std::collections::HashSet::new();
+        excl.insert("mydb.orders".to_string());
+        excl.insert("mydb.customers".to_string());
+        excl.insert("otherdb.orders".to_string()); // different database - must be filtered out
+        let (ignore_args, positional) = table_filter_args("mydb", &excl, &bogus_conn).unwrap();
+        assert!(positional.is_empty());
+        assert_eq!(ignore_args.len(), 2);
+        assert!(ignore_args.contains(&"--ignore-table=mydb.orders".to_string()));
+        assert!(ignore_args.contains(&"--ignore-table=mydb.customers".to_string()));
+        assert!(!ignore_args.iter().any(|a| a.contains("otherdb")));
+    }
+
+    #[test]
+    fn table_filter_args_is_a_noop_with_no_exclusions() {
+        let bogus_conn = json!({"host":"unreachable.invalid","port":3306,"user":"x","password":"x"});
+        let excl = std::collections::HashSet::new();
+        let (ignore_args, positional) = table_filter_args("mydb", &excl, &bogus_conn).unwrap();
+        assert!(ignore_args.is_empty() && positional.is_empty());
     }
 
     #[test]
