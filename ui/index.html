@@ -219,9 +219,12 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row"><b>Options</b></div><div class="grid2" id="expOpts"></div>
  <div class="row"><label title="How a NULL is written to CSV. \N is what LOAD DATA reads back; blank makes NULL and an empty string indistinguishable in the file.">NULL value <input id="expNullVal" value="\N" style="width:52px;font-family:Consolas,monospace"></label> Charset <select id="expCharset"><option>utf8mb4</option><option>utf8</option><option>latin1</option><option>binary</option></select>
   <label title="One .sql file per table - lets you restore a single table. Slower, more files (like Workbench Dump Project Folder)."><input type="radio" name="expmode" id="expTable" checked onchange="expSyncFilenameField()"> per table</label><label title="One .sql file per database."><input type="radio" name="expmode" id="expPer" onchange="expSyncFilenameField()"> per DB</label><label title="Everything in one combined .sql file."><input type="radio" name="expmode" id="expSingle" onchange="expSyncFilenameField()"> single file</label>
-  <label title="Append a date-time stamp to each file name."><input type="checkbox" id="expStamp" checked> timestamp</label>
-  <label title="mysqldump --max-allowed-packet. Raise this for very large rows or BLOBs (e.g. 1G).">max packet <input id="expMaxPacket" value="1G" style="width:56px"></label>
-  <label id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none">filename <input id="expFilename" placeholder="all_selected" style="width:120px"></label></div>
+  <label title="Append a date-time stamp to each file name."><input type="checkbox" id="expStamp" checked onchange="expUpdateFilenamePreview()"> timestamp</label>
+  <label title="mysqldump --max-allowed-packet. Raise this for very large rows or BLOBs (e.g. 1G).">max packet <input id="expMaxPacket" value="1G" style="width:56px"></label></div>
+ <!-- Its own row (matching Folder's label/width/casing) instead of squeezed into the dense options
+      row above at 120px wide - plus a live preview of the actual resulting file name, since
+      "timestamp" silently changes what gets written and a plain text box alone doesn't show that. -->
+ <div class="row" id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none">Filename <input id="expFilename" placeholder="all_selected" style="flex:1" oninput="expUpdateFilenamePreview()"><span id="expFilenamePreview" class="muted" style="font-size:11px;white-space:nowrap"></span></div>
  <div class="row">Folder <input id="expFolder" style="flex:1" value="C:\temp"><button onclick="browse({title:'Select export folder',mode:'folder',start:$('expFolder').value,onPick:pp=>$('expFolder').value=pp})">Browse...</button></div>
  <div class="row" style="justify-content:flex-end"><button class="go" id="expGoBtn" onclick="runExport()">Start Export</button><button class="warn" id="expCancelBtn" disabled onclick="cancelJob('exp')">Cancel</button><button onclick="hide('mExport')">Close</button></div>
  <div id="expProgress" style="display:none;margin-top:8px">
@@ -3305,7 +3308,11 @@ show('mExport');}
 // so any table list already expanded before "All"/"None" is clicked was left stuck at its old
 // checked state - cascading into .exptbl directly here (same as expDbToggle does per-db) fixes that.
 function expAll(v){[...document.querySelectorAll('.expdb')].forEach(c=>c.checked=v);[...document.querySelectorAll('.exptbl')].forEach(c=>c.checked=v);}
-function expSyncFilenameField(){const row=$('expFilenameRow');if(row)row.style.display=$('expSingle').checked?'inline-flex':'none';}
+function expSyncFilenameField(){const row=$('expFilenameRow');if(row)row.style.display=$('expSingle').checked?'flex':'none';expUpdateFilenamePreview();}
+// Shows what the export will actually be saved as - the base name defaults to "all_selected" when
+// left blank, and "timestamp" appends a date/time suffix the plain text box alone doesn't hint at.
+function expUpdateFilenamePreview(){const el=$('expFilenamePreview');if(!el)return;const base=($('expFilename').value||'').trim()||'all_selected';const stamp=$('expStamp').checked?'_'+expTimestampSample():'';el.textContent='→ '+base+stamp+'.sql';}
+function expTimestampSample(){const d=new Date();const p=n=>String(n).padStart(2,'0');return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'_'+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds());}
 // A few export options only exist on one mysqldump flavor: --set-gtid-purged is MySQL 5.6+
 // only, --column-statistics is MySQL 8+ only - MariaDB's mysqldump has neither, and checking
 // either against it aborts the WHOLE export with "unknown variable". Grey them out up front
