@@ -219,9 +219,12 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div class="row"><b>Options</b></div><div class="grid2" id="expOpts"></div>
  <div class="row"><label title="How a NULL is written to CSV. \N is what LOAD DATA reads back; blank makes NULL and an empty string indistinguishable in the file.">NULL value <input id="expNullVal" value="\N" style="width:52px;font-family:Consolas,monospace"></label> Charset <select id="expCharset"><option>utf8mb4</option><option>utf8</option><option>latin1</option><option>binary</option></select>
   <label title="One .sql file per table - lets you restore a single table. Slower, more files (like Workbench Dump Project Folder)."><input type="radio" name="expmode" id="expTable" checked onchange="expSyncFilenameField()"> per table</label><label title="One .sql file per database."><input type="radio" name="expmode" id="expPer" onchange="expSyncFilenameField()"> per DB</label><label title="Everything in one combined .sql file."><input type="radio" name="expmode" id="expSingle" onchange="expSyncFilenameField()"> single file</label>
-  <label title="Append a date-time stamp to each file name."><input type="checkbox" id="expStamp" checked> timestamp</label>
-  <label title="mysqldump --max-allowed-packet. Raise this for very large rows or BLOBs (e.g. 1G).">max packet <input id="expMaxPacket" value="1G" style="width:56px"></label>
-  <label id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none">filename <input id="expFilename" placeholder="all_selected" style="width:120px"></label></div>
+  <label title="Append a date-time stamp to each file name."><input type="checkbox" id="expStamp" checked onchange="expUpdateFilenamePreview()"> timestamp</label>
+  <label title="mysqldump --max-allowed-packet. Raise this for very large rows or BLOBs (e.g. 1G).">max packet <input id="expMaxPacket" value="1G" style="width:56px"></label></div>
+ <!-- Its own row (matching Folder's label/width/casing) instead of squeezed into the dense options
+      row above at 120px wide - plus a live preview of the actual resulting file name, since
+      "timestamp" silently changes what gets written and a plain text box alone doesn't show that. -->
+ <div class="row" id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none">Filename <input id="expFilename" placeholder="all_selected" style="flex:1" oninput="expUpdateFilenamePreview()"><span id="expFilenamePreview" class="muted" style="font-size:11px;white-space:nowrap"></span></div>
  <div class="row">Folder <input id="expFolder" style="flex:1" value="C:\temp"><button onclick="browse({title:'Select export folder',mode:'folder',start:$('expFolder').value,onPick:pp=>$('expFolder').value=pp})">Browse...</button></div>
  <div class="row" style="justify-content:flex-end"><button class="go" id="expGoBtn" onclick="runExport()">Start Export</button><button class="warn" id="expCancelBtn" disabled onclick="cancelJob('exp')">Cancel</button><button onclick="hide('mExport')">Close</button></div>
  <div id="expProgress" style="display:none;margin-top:8px">
@@ -1920,6 +1923,11 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
     if(t.table){const pk=await api('/api/pk',{db:t.db,table:t.table});if(pk.ok&&pk.pk.length){t.pk=pk.pk;t.pending={upd:{},del:new Set(),ins:[]};}
       const fk=await api('/api/fk',{db:t.db,table:t.table});if(fk.ok){t.fk=fk.fk||[];t.fkDetails=fk.fkDetails||[];}
+      // Warms getColType's cache now (fire-and-forget) instead of waiting for the first cell click
+      // to trigger it - inlineEdit awaits this to know whether a column is enum/tinyint(1), and
+      // without pre-warming, the very first click on a freshly loaded table paid for a real DB
+      // round-trip before the inline edit's tint would even appear.
+      getColType(id,t.cols[0]);
       if(objData && objData.db===t.db && objData.rowCounts && (t.table in objData.rowCounts) && objData.rowCounts[t.table]!=null){
         t.estRows=+objData.rowCounts[t.table];
       } else {
@@ -2477,8 +2485,12 @@ function gridKeyNav(id,e){const t=T(id);if(!t||!t.pk)return;const f=gridFocus[id
  else if(e.key==='Enter'||e.key==='F2'){e.preventDefault();const el=gridCellEl(id,ri,ci);if(el)inlineEdit(el,id,ri,ci);}
  else if(e.key==='Escape'){gridClearFocus(id);}
 }
-function cellClick(td,id,ri,ci){if(td.querySelector('input'))return;clearTimeout(clickTimer);clickTimer=setTimeout(()=>inlineEdit(td,id,ri,ci),200);}
-function insClick(td,id,ii,col){if(td.querySelector('input'))return;clearTimeout(clickTimer);clickTimer=setTimeout(()=>inlineEditIns(td,id,ii,col),200);}
+// No delay/timer here to disambiguate a single click from the first click of a double-click - the
+// "if input already present" guard already makes a second click a no-op, and a genuine
+// double-click's dblclick handler (editCell/editIns) opens the full modal regardless of whether an
+// inline edit is mid-flight, so waiting around just made the tint feel laggy for no real benefit.
+function cellClick(td,id,ri,ci){if(td.querySelector('input'))return;inlineEdit(td,id,ri,ci);}
+function insClick(td,id,ii,col){if(td.querySelector('input'))return;inlineEditIns(td,id,ii,col);}
 async function inlineEdit(td,id,ri,ci){const t=T(id);const key=ri+':'+ci;const cur=(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci];
  if(cur!=null&&/[\r\n]/.test(String(cur))){editCell(td,id,ri,ci);return;}
  // Enum/boolean columns always go through editCell's dropdown - a plain inline text input would
@@ -2696,7 +2708,9 @@ async function dlBinary(blob,name){
 // ---- history ----
 function hist(){try{return JSON.parse(localStorage.getItem('history')||'[]');}catch(e){return[];}}
 function addHistory(sql){sql=sql.trim();if(!sql)return;let h=hist().filter(x=>x!==sql);h.unshift(sql);h=h.slice(0,200);localStorage.setItem('history',JSON.stringify(h));}
-function openHistory(){const box=$('histList');const h=hist();box.innerHTML=h.length?'':'<div class="muted">No history yet.</div>';h.forEach(sql=>{const d=document.createElement('div');d.className='item';d.style.borderBottom='1px solid var(--bd2)';d.style.fontFamily='"Cascadia Code",Consolas,"SF Mono",Menlo,"DejaVu Sans Mono",monospace';d.style.whiteSpace='pre-wrap';d.textContent=sql.slice(0,300);d.onclick=()=>{hide('mHist');openTab('history',sql,curSchema,false,null);};box.appendChild(d);});show('mHist');}
+// Same dark "console" code-block treatment as the schema-diff statement list - a past query read
+// as plain wrapped monospace text before, same readability problem for anything longer than a line.
+function openHistory(){const box=$('histList');const h=hist();box.innerHTML=h.length?'':'<div class="muted">No history yet.</div>';h.forEach(sql=>{const d=document.createElement('div');d.className='item';d.style.cssText='border-bottom:1px solid var(--bd2);padding:6px 4px';const code=document.createElement('code');code.style.cssText="display:block;background:var(--log);color:var(--logfg);font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;line-height:1.5;padding:6px 8px;border-radius:4px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere";code.textContent=sql.slice(0,300);d.appendChild(code);d.onclick=()=>{hide('mHist');openTab('history',sql,curSchema,false,null);};box.appendChild(d);});show('mHist');}
 async function clearHistory(){localStorage.removeItem('history');openHistory();}
 let _libCache=[];
 function libAll(){return _libCache.slice();}
@@ -2728,7 +2742,8 @@ function libRender(){const box=$('libList');const q=($('libSearch').value||'').t
   const ed=document.createElement('button');ed.className='sm';ed.textContent='Edit';ed.style.marginLeft='6px';ed.onclick=()=>libEdit(x.name);
   const dl=document.createElement('button');dl.className='sm warn';dl.textContent='Delete';dl.style.marginLeft='6px';dl.onclick=async()=>{if(await ask('Delete saved query "'+x.name+'"?')){await api('/api/lib-delete',{name:x.name});await libLoad();libRender();}};
   btns.appendChild(op);btns.appendChild(ed);btns.appendChild(dl);head.appendChild(nm);head.appendChild(btns);
-  const pre=document.createElement('div');pre.style.fontFamily='"Cascadia Code",Consolas,"SF Mono",Menlo,"DejaVu Sans Mono",monospace';pre.style.fontSize='11px';pre.style.color='var(--muted)';pre.style.whiteSpace='pre-wrap';pre.style.marginTop='3px';pre.textContent=(x.sql||'').slice(0,200);
+  // Same dark "console" code-block treatment as the schema-diff statement list and query history.
+  const pre=document.createElement('code');pre.style.cssText="display:block;background:var(--log);color:var(--logfg);font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;line-height:1.5;padding:6px 8px;border-radius:4px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;margin-top:4px";pre.textContent=(x.sql||'').slice(0,200);
   d.appendChild(head);d.appendChild(pre);box.appendChild(d);});}
 
 // ---- users ----
@@ -3293,7 +3308,11 @@ show('mExport');}
 // so any table list already expanded before "All"/"None" is clicked was left stuck at its old
 // checked state - cascading into .exptbl directly here (same as expDbToggle does per-db) fixes that.
 function expAll(v){[...document.querySelectorAll('.expdb')].forEach(c=>c.checked=v);[...document.querySelectorAll('.exptbl')].forEach(c=>c.checked=v);}
-function expSyncFilenameField(){const row=$('expFilenameRow');if(row)row.style.display=$('expSingle').checked?'inline-flex':'none';}
+function expSyncFilenameField(){const row=$('expFilenameRow');if(row)row.style.display=$('expSingle').checked?'flex':'none';expUpdateFilenamePreview();}
+// Shows what the export will actually be saved as - the base name defaults to "all_selected" when
+// left blank, and "timestamp" appends a date/time suffix the plain text box alone doesn't hint at.
+function expUpdateFilenamePreview(){const el=$('expFilenamePreview');if(!el)return;const base=($('expFilename').value||'').trim()||'all_selected';const stamp=$('expStamp').checked?'_'+expTimestampSample():'';el.textContent='→ '+base+stamp+'.sql';}
+function expTimestampSample(){const d=new Date();const p=n=>String(n).padStart(2,'0');return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'_'+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds());}
 // A few export options only exist on one mysqldump flavor: --set-gtid-purged is MySQL 5.6+
 // only, --column-statistics is MySQL 8+ only - MariaDB's mysqldump has neither, and checking
 // either against it aborts the WHOLE export with "unknown variable". Grey them out up front
@@ -3450,7 +3469,10 @@ function cmpRenderResults(){const box=$('cmpResults');const sr=$('cmpResultsSear
  _cmpTables.forEach((t,ti)=>{const hasSql=t.sql&&t.sql.length;
   h+='<tr class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="border-top:1px solid var(--bd2)"><td style="padding:6px">'+(hasSql?('<input type="checkbox" '+(t.sql.some(s=>s.checked)?'checked':'')+' onclick="cmpToggleAllForTable('+ti+',this.checked)">'):'')+'</td><td style="padding:6px">'+esc(t.name)+(hasSql?' <a href="#" onclick="cmpToggleDetail('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">details</a>':'')+(_cmpRowScanStarted?' <a href="#" onclick="cmpCompareRows('+ti+');return false" style="font-size:11px;color:var(--accent);margin-left:6px">rows\u2026</a>':'')+'</td><td style="padding:6px">'+cmpBadge(t.status)+'</td><td id="cmpRowCell_'+ti+'" style="padding:6px">'+cmpRowBadge(t)+'</td></tr>';
   h+='<tr id="cmpDetail_'+ti+'" class="cmpresultrow" data-name="'+esc(t.name.toLowerCase())+'" style="display:none"><td colspan="4" style="padding:0 6px 8px 20px">';
-  t.sql.forEach((st,si)=>{h+='<div style="font-family:\'Cascadia Code\',Consolas,monospace;font-size:11px;margin:2px 0"><label><input type="checkbox" '+(st.checked?'checked':'')+' onclick="_cmpTables['+ti+'].sql['+si+'].checked=this.checked;cmpUpdateSummary()"> '+esc(st.stmt)+'</label></div>';});
+  // Each statement gets the same dark "console" look as the app's query log (var(--log)/--logfg,
+  // always dark regardless of light/dark theme) instead of sitting as plain wrapped text - reads
+  // like a small code block rather than a run-on sentence, especially for long CREATE/ALTER DDL.
+  t.sql.forEach((st,si)=>{h+='<label style="display:flex;align-items:flex-start;gap:6px;margin:4px 0;cursor:pointer"><input type="checkbox" style="margin-top:7px;flex:none" '+(st.checked?'checked':'')+' onclick="_cmpTables['+ti+'].sql['+si+'].checked=this.checked;cmpUpdateSummary()"><code style="flex:1;display:block;background:var(--log);color:var(--logfg);font-family:\'Cascadia Code\',Consolas,\'SF Mono\',Menlo,\'DejaVu Sans Mono\',monospace;font-size:11px;line-height:1.5;padding:6px 8px;border-radius:4px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere">'+esc(st.stmt)+'</code></label>';});
   h+='</td></tr>';});
  h+='</table>';box.innerHTML=h;cmpUpdateSummary();cmpFilterResults();}
 function cmpFilterResults(){const q=($('cmpResultSearch').value||'').toLowerCase();
