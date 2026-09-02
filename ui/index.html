@@ -2774,7 +2774,10 @@ function csvNullHint(rows){
  toast('NULLs were written as '+nm+'. Clear "NULL value" in the Export dialog to copy them as blanks instead.');
 }
 function csvNullMarker(){ const el=$('expNullVal'); return el?el.value:'\\N'; }
-function bCSV(cols,rows){const nm=csvNullMarker();const q=s=>s===null?nm:/[",\n]/.test(s)?'"'+String(s).replace(/"/g,'""')+'"':s;return cols.map(c=>c===null?'':q(c)).join(',')+'\n'+rows.map(r=>r.map(q).join(',')).join('\n');}
+// A bare \r (no following \n) has to be quoted too, not just \n - both this app's own CSV
+// importer and a spreadsheet's CSV rules treat a lone \r as ending the row, so an unquoted one
+// silently splits one logical row into two and shifts every column after it.
+function bCSV(cols,rows){const nm=csvNullMarker();const q=s=>s===null?nm:/[",\n\r]/.test(s)?'"'+String(s).replace(/"/g,'""')+'"':s;return cols.map(c=>c===null?'':q(c)).join(',')+'\n'+rows.map(r=>r.map(q).join(',')).join('\n');}
 function bMD(cols,rows){
   const esc=s=>s===null?'':String(s).replace(/\|/g,'\\|').replace(/\n/g,' ');
   let h='| '+cols.map(esc).join(' | ')+' |\n';

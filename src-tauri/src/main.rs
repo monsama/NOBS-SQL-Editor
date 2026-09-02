@@ -1829,37 +1829,60 @@ async fn importcsv(req: Value) -> R {
         let col_list = use_cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
         let obj = format!("{}.{}", sql_id(&db), sql_id(&table));
 
-        if req["truncate"].as_bool().unwrap_or(false) {
-            c.query_drop(format!("TRUNCATE TABLE {}", obj)).map_err(|e| e.to_string())?;
-        }
-        let _ = c.query_drop("SET FOREIGN_KEY_CHECKS=0; SET UNIQUE_CHECKS=0");
-        let mut n = 0usize; let mut batch: Vec<String> = Vec::new();
-        for rec in rdr.records() {
-            let rec = rec.map_err(|e| e.to_string())?;
-            let vals: Vec<String> = use_idx.iter().enumerate().map(|(ci, &i)| {
-                // The marker decides what an empty cell means. With one set (the default, \N)
-                // the file states NULL explicitly, so an empty cell is an empty string and a
-                // round trip keeps both. Clearing the marker restores the older reading, where a
-                // blank means NULL - which is what a spreadsheet usually intends.
-                match rec.get(i) {
-                    None => "NULL".to_string(),
-                    Some(s) if !null_marker.is_empty() && s == null_marker => "NULL".to_string(),
-                    Some("") if null_marker.is_empty() => "NULL".to_string(),
-                    // sql_lit()'s hex-literal passthrough only applies to a column information_schema
-                    // actually reports as binary/BIT - anything else always gets a real quoted string,
-                    // even if the cell's text happens to look like hex (see bin_cols above).
-                    Some(s) if bin_cols.contains(&use_cols[ci]) => sql_lit(s),
-                    Some(s) => sql_str_lit(s),
-                }
-            }).collect();
-            batch.push(format!("({})", vals.join(","))); n += 1;
-            if batch.len() >= 500 {
-                c.query_drop(format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, batch.join(","))).map_err(|e| e.to_string())?;
-                batch.clear();
+        // "Truncate table" + a mid-file failure (a bad value, an FK violation, disk full) used to
+        // leave the table permanently truncated and only partially reloaded - every batch ran on
+        // autocommit with nothing to undo the ones that had already landed. Wrapped in the same
+        // START TRANSACTION/COMMIT/ROLLBACK pattern the grid's own edit-apply path uses for
+        // exactly this failure mode (see the comment above it, near req["transaction"]).
+        //
+        // TRUNCATE TABLE itself is DDL - MySQL/MariaDB implicitly commit it the moment it runs,
+        // transaction or not, so wrapping THAT in START TRANSACTION would do nothing to protect
+        // it. DELETE FROM (no WHERE) does the same job here and, unlike TRUNCATE, is ordinary
+        // transactional DML that a ROLLBACK genuinely undoes - the one real cost is that it
+        // doesn't reset an AUTO_INCREMENT counter the way TRUNCATE does.
+        c.query_drop("START TRANSACTION").map_err(|e| e.to_string())?;
+        let import_result: Result<usize, String> = (|| {
+            if req["truncate"].as_bool().unwrap_or(false) {
+                c.query_drop(format!("DELETE FROM {}", obj)).map_err(|e| e.to_string())?;
             }
-        }
-        if !batch.is_empty() {
-            c.query_drop(format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, batch.join(","))).map_err(|e| e.to_string())?;
+            let _ = c.query_drop("SET FOREIGN_KEY_CHECKS=0; SET UNIQUE_CHECKS=0");
+            let mut n = 0usize; let mut batch: Vec<String> = Vec::new();
+            for rec in rdr.records() {
+                let rec = rec.map_err(|e| e.to_string())?;
+                let vals: Vec<String> = use_idx.iter().enumerate().map(|(ci, &i)| {
+                    // The marker decides what an empty cell means. With one set (the default, \N)
+                    // the file states NULL explicitly, so an empty cell is an empty string and a
+                    // round trip keeps both. Clearing the marker restores the older reading, where a
+                    // blank means NULL - which is what a spreadsheet usually intends.
+                    match rec.get(i) {
+                        None => "NULL".to_string(),
+                        Some(s) if !null_marker.is_empty() && s == null_marker => "NULL".to_string(),
+                        Some("") if null_marker.is_empty() => "NULL".to_string(),
+                        // sql_lit()'s hex-literal passthrough only applies to a column information_schema
+                        // actually reports as binary/BIT - anything else always gets a real quoted string,
+                        // even if the cell's text happens to look like hex (see bin_cols above).
+                        Some(s) if bin_cols.contains(&use_cols[ci]) => sql_lit(s),
+                        Some(s) => sql_str_lit(s),
+                    }
+                }).collect();
+                batch.push(format!("({})", vals.join(","))); n += 1;
+                if batch.len() >= 500 {
+                    c.query_drop(format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, batch.join(","))).map_err(|e| e.to_string())?;
+                    batch.clear();
+                }
+            }
+            if !batch.is_empty() {
+                c.query_drop(format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, batch.join(","))).map_err(|e| e.to_string())?;
+            }
+            Ok(n)
+        })();
+        let n = match import_result {
+            Ok(n) => n,
+            Err(e) => { let _ = c.query_drop("ROLLBACK"); return Ok(json!({"ok":false,"error":format!("{}\n\nNo rows were imported - the batch was rolled back.", e)})); }
+        };
+        if let Err(e) = c.query_drop("COMMIT") {
+            let _ = c.query_drop("ROLLBACK");
+            return Ok(json!({"ok":false,"error":format!("Could not commit: {}\n\nNo rows were imported.", e.to_string())}));
         }
         Ok(json!({"ok":true,"message":format!("Imported {} row(s) into {}.{} (columns: {})", n, db, table, use_cols.join(", "))}))
     }).await.map_err(|e| e.to_string())?
@@ -2432,7 +2455,15 @@ async fn compare_rows_apply_diff(req: Value) -> R {
         if pk_cols.is_empty() || updates.is_empty() { return Ok(json!({"ok":false,"error":"No rows to update."})); }
         let mut c = build_conn(&connj)?;
         let obj = format!("{}.{}", sql_id(&tgt_db), sql_id(&table));
+        // Unlike compare_rows_apply/compare_rows_insert_all (INSERT-only, each batch already
+        // atomic as a single multi-row statement, and a chunk failing partway through a large
+        // bulk insert shouldn't block the rest), this updates EXISTING target rows one at a time -
+        // the exact "apply this reviewed set of corrections" shape the grid's own staged-edits
+        // apply already wraps in a transaction for. A batch failing partway through here left
+        // some rows changed and others not, with no way back - same failure mode, same fix.
+        c.query_drop("START TRANSACTION").map_err(|e| e.to_string())?;
         let mut log = Vec::new();
+        let mut failed = false;
         for u in &updates {
             let col_diffs = u["colDiffs"].as_array().cloned().unwrap_or_default();
             let pk_vals = u["pk"].as_array().cloned().unwrap_or_default();
@@ -2461,8 +2492,18 @@ async fn compare_rows_apply_diff(req: Value) -> R {
             let sql = format!("UPDATE {} SET {} WHERE {} LIMIT 1", obj, sets, wheres);
             match c.query_drop(&sql) {
                 Ok(_) => log.push(format!("OK  updated id={}", pk_desc)),
-                Err(e) => log.push(format!("FAILED id={} : {}", pk_desc, e)),
+                Err(e) => { log.push(format!("FAILED id={} : {}", pk_desc, e)); failed = true; break; }
             }
+        }
+        if failed {
+            let _ = c.query_drop("ROLLBACK");
+            log.push("No rows were updated - the batch was rolled back.".to_string());
+            return Ok(json!({"ok":false,"log":log}));
+        }
+        if let Err(e) = c.query_drop("COMMIT") {
+            let _ = c.query_drop("ROLLBACK");
+            log.push(format!("Could not commit: {} - no rows were updated.", e));
+            return Ok(json!({"ok":false,"log":log}));
         }
         Ok(json!({"ok":true,"log":log}))
     }).await.map_err(|e| e.to_string())?
@@ -2473,6 +2514,14 @@ async fn compare_rows_apply_diff(req: Value) -> R {
 // the frontend at all - it fetches a chunk of missing rows from source and inserts that SAME
 // chunk into target immediately, chunk by chunk, so the amount of data moved isn't limited by
 // what's practical to render as a checkbox list. Still insert-only.
+//
+// Deliberately not wrapped in one big transaction across every chunk: each chunk's INSERT is
+// already one SQL statement, which MySQL/InnoDB itself only ever applies all-or-nothing - a
+// chunk failing partway through can't leave that chunk half-inserted. What continue-on-error
+// buys here is that ONE bad chunk (say, a duplicate key from a row someone else inserted since
+// the scan started) doesn't roll back or abort inserting the rest of what could be tens of
+// thousands of otherwise-good rows - unlike compare_rows_apply_diff below, this never touches an
+// existing row, so a chunk that fails simply leaves those rows still missing, not corrupted.
 #[tauri::command]
 async fn compare_rows_insert_all(req: Value) -> R {
     let src_name = req["sourceConnName"].as_str().unwrap_or("").to_string();
@@ -2539,6 +2588,9 @@ async fn compare_rows_insert_all(req: Value) -> R {
     }).await.map_err(|e| e.to_string())?
 }
 
+// Same reasoning as compare_rows_insert_all above: insert-only, each batch already atomic as one
+// SQL statement, continue-on-error across batches so one bad batch doesn't block the rest of a
+// large reviewed set from landing.
 #[tauri::command]
 async fn compare_rows_apply(req: Value) -> R {
     let tgt_name = req["targetConnName"].as_str().unwrap_or("").to_string();
@@ -2639,6 +2691,13 @@ async fn compare_schemas(req: Value) -> R {
     }).await.map_err(|e| e.to_string())?
 }
 
+// Deliberately NOT wrapped in a transaction: these are schema-diff statements (ALTER/CREATE/DROP
+// TABLE), and every one of them is an implicit-commit statement in MySQL/MariaDB - a
+// START TRANSACTION here would be silently ignored the moment the first DDL statement ran, giving
+// false confidence that a failure partway through could be rolled back when it can't be. Running
+// each independently and reporting OK/FAILED per line (as already done below) is the honest
+// behavior given that constraint - a half-migrated schema is visible in the log, not hidden by a
+// rollback that was never actually possible.
 #[tauri::command]
 async fn compare_apply(req: Value) -> R {
     let tgt_name = req["targetConnName"].as_str().unwrap_or("").to_string();
@@ -2859,13 +2918,16 @@ async fn export_table_run(app: Option<tauri::AppHandle>, req: Value) -> R {
         // instead, defaulting to \N, which is what LOAD DATA reads and what HeidiSQL defaults
         // to. The marker is never quoted: the server only recognises \N unenclosed.
         let null_marker = req["nullValue"].as_str().unwrap_or("\\N").to_string();
+        // A bare \r (no following \n) has to be quoted too, not just \n - both this app's own
+        // CSV importer and a spreadsheet's CSV rules treat a lone \r as ending the row, so an
+        // unquoted one silently splits one logical row into two and shifts every column after it.
         let csv_field = |o: &Option<String>| -> String {
             match o { None => null_marker.clone(), Some(s) => {
-                if s.contains('"') || s.contains(',') || s.contains('\n') { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.clone() }
+                if s.contains('"') || s.contains(',') || s.contains('\n') || s.contains('\r') { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.clone() }
             }}
         };
         if fmt != "inserts" {
-            let hdr = cols.iter().map(|c| if c.contains(',')||c.contains('"'){format!("\"{}\"",c.replace('"',"\"\""))}else{c.clone()}).collect::<Vec<_>>().join(",");
+            let hdr = cols.iter().map(|c| if c.contains(',')||c.contains('"')||c.contains('\n')||c.contains('\r'){format!("\"{}\"",c.replace('"',"\"\""))}else{c.clone()}).collect::<Vec<_>>().join(",");
             w.write_all(hdr.as_bytes()).map_err(|e| e.to_string())?; w.write_all(b"\n").map_err(|e| e.to_string())?;
         }
         let mut n: usize = 0;
@@ -3689,6 +3751,47 @@ mod csv_null_tests {
         let _ = std::fs::remove_file(&file);
     }
 
+    // A CSV import with "Truncate table" checked used to leave the table permanently truncated
+    // and only partially reloaded if a later row failed (e.g. a duplicate key) - every batch ran
+    // on autocommit with nothing to undo the ones that had already landed. It's now wrapped in a
+    // transaction: a mid-file failure must leave the table exactly as it was before the import.
+    #[tokio::test]
+    #[ignore]
+    async fn a_failed_csv_import_with_truncate_leaves_the_table_untouched() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let q = |sql: &str| { let c = conn.clone(); let s = sql.to_string();
+            async move { query(json!({"sql":s,"conn":c,"db":"nobs_test"})).await.unwrap() } };
+
+        q("DROP TABLE IF EXISTS csv_txn_rt").await;
+        q("CREATE TABLE csv_txn_rt (id INT PRIMARY KEY, v VARCHAR(32))").await;
+        q("INSERT INTO csv_txn_rt VALUES (100, 'original')").await;
+
+        // 501 good rows (id 1..501, spanning the importer's 500-row batch boundary) followed by
+        // a row that duplicates id 1 - the SECOND batch's INSERT fails. A single statement is
+        // already atomic on its own in MySQL, so this specifically checks that the FIRST batch
+        // (which had already landed inside the open transaction) gets rolled back too, not just
+        // that the failing batch itself doesn't partially apply.
+        let mut csv = String::from("id,v\n");
+        for i in 1..=501 { csv.push_str(&format!("{},row{}\n", i, i)); }
+        csv.push_str("1,duplicate\n");
+        let file = std::env::temp_dir().join("csv_txn_rt.csv");
+        std::fs::write(&file, csv).unwrap();
+
+        let ir = importcsv(json!({"conn":conn,"db":"nobs_test","table":"csv_txn_rt",
+                                   "file":file.to_string_lossy(),"hasHeader":true,"truncate":true})).await.unwrap();
+        assert_eq!(ir["ok"], false, "the import should fail on the duplicate key");
+        println!("  import error: {}", ir["error"].as_str().unwrap_or("").lines().next().unwrap_or(""));
+
+        let back = q("SELECT id, v FROM csv_txn_rt").await;
+        let rows = back["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "the truncate should have been rolled back along with the failed batch");
+        assert_eq!(rows[0][0].as_str(), Some("100"));
+        assert_eq!(rows[0][1].as_str(), Some("original"), "the original row must survive a rolled-back import");
+
+        q("DROP TABLE IF EXISTS csv_txn_rt").await;
+        let _ = std::fs::remove_file(&file);
+    }
+
     // Clearing the marker restores the older reading, where a blank cell means NULL - which is
     // what a spreadsheet exported from Excel usually intends.
     #[tokio::test]
@@ -3862,5 +3965,44 @@ mod compare_tests {
         // --- a row that exists only in the TARGET
         println!("  note: id=5 exists only in the target -> reported: {}",
                  found.iter().any(|f| f.0=="5") || missing.contains(&"5".to_string()));
+    }
+
+    // compare_rows_apply_diff updates existing target rows one at a time, unlike the insert-only
+    // apply paths - a batch failing partway through used to leave some rows corrected and others
+    // not, with no way back. It's now wrapped in a transaction: a mid-batch failure must leave
+    // every target row exactly as it was before the apply.
+    #[tokio::test]
+    #[ignore]
+    async fn compare_rows_apply_diff_rolls_back_a_failed_batch() {
+        if std::env::var("NOBS_TEST_LIVE").is_err() { eprintln!("NOBS_TEST_LIVE not set - skipping"); return }
+        let profiles = json!([{"name":"cmp_diff_rt","host":"127.0.0.1","port":"3306","user":"nobsnp2","ssl":"default","readonly":false}]);
+        std::fs::write(conn_path(), serde_json::to_string_pretty(&profiles).unwrap()).unwrap();
+        let raw = |sql: &str| {
+            let c = json!({"host":"127.0.0.1","port":"3306","user":"nobsnp2","password":"","ssl":"default"});
+            let mut conn = build_conn(&c).unwrap();
+            conn.query_drop(sql).unwrap();
+        };
+
+        raw("DROP DATABASE IF EXISTS cmp_diff_rt"); raw("CREATE DATABASE cmp_diff_rt");
+        raw("CREATE TABLE cmp_diff_rt.t (id INT PRIMARY KEY, qty INT CHECK (qty >= 0))");
+        raw("INSERT INTO cmp_diff_rt.t VALUES (1, 10), (2, 20)");
+
+        // Row 1's update is valid; row 2's violates the CHECK constraint and fails.
+        let updates = json!([
+            {"pk":[1], "colDiffs":[{"col":"qty","src":99}]},
+            {"pk":[2], "colDiffs":[{"col":"qty","src":-1}]},
+        ]);
+        let r = compare_rows_apply_diff(json!({"targetConnName":"cmp_diff_rt","targetDb":"cmp_diff_rt",
+                                                "table":"t","pkCols":["id"],"updates":updates})).await.unwrap();
+        assert_eq!(r["ok"], false, "the batch should fail on the CHECK constraint: {r}");
+        println!("  log: {:?}", r["log"]);
+
+        let c = json!({"host":"127.0.0.1","port":"3306","user":"nobsnp2","password":"","ssl":"default"});
+        let mut conn = build_conn(&c).unwrap();
+        let (_c, rows) = run_select(&mut conn, "SELECT id, qty FROM cmp_diff_rt.t ORDER BY id").unwrap();
+        let qty1 = rows[0][1].clone().unwrap_or_default();
+        assert_eq!(qty1, "10", "row 1's update must have been rolled back along with row 2's failure, got qty={qty1}");
+
+        raw("DROP DATABASE IF EXISTS cmp_diff_rt");
     }
 }
