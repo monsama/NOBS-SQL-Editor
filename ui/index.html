@@ -3928,7 +3928,7 @@ function cmprRender(){
  // clickable to toggle its checkbox rather than just the small box itself - selected rows switch
  // to the hover-accent tint so it's clear which ones are queued for insert.
  _cmprState.rows.forEach((r,ri)=>{
-  h+='<tr data-ri="'+ri+'" style="border-top:1px solid var(--bd2);cursor:pointer;background:'+(r.checked?'var(--hover)':'var(--del)')+'" onclick="cmprToggleRow('+ri+')"><td style="padding:3px 6px" onclick="event.stopPropagation()"><input type="checkbox" '+(r.checked?'checked':'')+' onclick="_cmprState.rows['+ri+'].checked=this.checked;cmprRowRestyle('+ri+');cmprUpdateSummary()"></td>';
+  h+='<tr data-ri="'+ri+'" style="border-top:1px solid var(--bd2);cursor:pointer;background:'+(r.checked?'':'var(--del)')+'" onclick="cmprToggleRow('+ri+')"><td style="padding:3px 6px" onclick="event.stopPropagation()"><input type="checkbox" '+(r.checked?'checked':'')+' onclick="_cmprState.rows['+ri+'].checked=this.checked;cmprRowRestyle('+ri+');cmprUpdateSummary()"></td>';
   // Every non-NULL field opens the viewer, not just ones long enough to be visibly clipped - a
   // consistent click-to-inspect affordance across the whole grid, matching the column-diff table.
   // stopPropagation keeps a value click from also toggling the row's checkbox.
@@ -3942,7 +3942,7 @@ function cmprRender(){
 // this grid, so it gets Copy/full-size/Ctrl+wheel zoom for free.
 function cmprViewCell(ri,ci){const r=_cmprState.rows[ri];const v=r.data[ci];const col=_cmprState.columns[ci];viewText('Missing row - '+col,v,{readonly:true});}
 function cmprToggleRow(ri){_cmprState.rows[ri].checked=!_cmprState.rows[ri].checked;cmprRowRestyle(ri);cmprUpdateSummary();}
-function cmprRowRestyle(ri){const r=_cmprState.rows[ri];const tr=$('cmprGrid').querySelector('tr[data-ri="'+ri+'"]');if(!tr)return;tr.style.background=r.checked?'var(--hover)':'var(--del)';const cb=tr.querySelector('input[type=checkbox]');if(cb)cb.checked=r.checked;}
+function cmprRowRestyle(ri){const r=_cmprState.rows[ri];const tr=$('cmprGrid').querySelector('tr[data-ri="'+ri+'"]');if(!tr)return;tr.style.background=r.checked?'':'var(--del)';const cb=tr.querySelector('input[type=checkbox]');if(cb)cb.checked=r.checked;}
 function cmprUpdateSummary(){if(!_cmprState){$('cmprSummary').textContent='';return;}const n=_cmprState.rows.filter(r=>r.checked).length;$('cmprSummary').textContent=n+' of '+_cmprState.rows.length+' selected';}
 function cmprSetAll(on){if(!_cmprState)return;_cmprState.rows.forEach(r=>r.checked=on);cmprRender();}
 async function cmprInsertAll(){
