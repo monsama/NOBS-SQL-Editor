@@ -719,9 +719,14 @@ function inputBox(opts){return new Promise(res=>{_inpResolve=res;$('inpTitle').t
   // real problem, even in a local, developer-facing tool. inpOk()'s extraction needs no changes
   // for this: it already just reads .value off any non-checkbox input regardless of its type.
   if(f.type==='password'){const wrap=document.createElement('div');wrap.style.position='relative';const inp=document.createElement('input');inp.id='inp_'+f.key;inp.type='password';inp.style.width='100%';inp.style.paddingRight='28px';inp.style.boxSizing='border-box';if(f.value!=null)inp.value=f.value;inp.onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();inpOk();}else if(e.key==='Escape'){e.preventDefault();inpCancel();}};const eye=document.createElement('span');eye.textContent='\u{1F441}';eye.title='Show/hide password';eye.style.cssText='position:absolute;right:6px;top:50%;transform:translateY(-50%);cursor:pointer;font-size:13px;user-select:none;opacity:.7';eye.onclick=()=>{inp.type=(inp.type==='password')?'text':'password';};wrap.appendChild(inp);wrap.appendChild(eye);w.appendChild(lb);w.appendChild(wrap);box.appendChild(w);return;}
-  const isTa=(f.type==='textarea');const inp=document.createElement(isTa?'textarea':'input');inp.id='inp_'+f.key;if(!isTa)inp.type=f.type||'text';inp.style.width='100%';if(isTa){inp.rows=Math.min(16,Math.max(5,String(f.value||'').split('\n').length+1));inp.style.fontFamily='"Cascadia Code",Consolas,"SF Mono",Menlo,"DejaVu Sans Mono",monospace';inp.style.fontSize='12px';}if(f.value!=null)inp.value=f.value;if(f.placeholder)inp.placeholder=f.placeholder;
+  const isTa=(f.type==='textarea');const inp=document.createElement(isTa?'textarea':'input');inp.id='inp_'+f.key;if(!isTa)inp.type=f.type||'text';inp.style.width='100%';if(isTa){inp.rows=Math.min(16,Math.max(5,String(f.value||'').split('\n').length+1));inp.style.fontFamily='"Cascadia Code",Consolas,"SF Mono",Menlo,"DejaVu Sans Mono",monospace';inp.style.fontSize='12px';inp.style.boxSizing='border-box';}if(f.value!=null)inp.value=f.value;if(f.placeholder)inp.placeholder=f.placeholder;
   inp.onkeydown=e=>{if(e.key==='Enter'&&!isTa){e.preventDefault();inpOk();}else if(e.key==='Escape'){e.preventDefault();inpCancel();}};w.appendChild(lb);w.appendChild(inp);box.appendChild(w);});
- $('inpOk').textContent=opts.okText||'OK';show('mInput');setTimeout(()=>{const f0=box.querySelector('input');if(f0){f0.focus();f0.select();}},40);});}
+ // A textarea field (e.g. editing a saved query's SQL) already resizes both ways like any browser
+ // textarea, but the dialog's normal 460px width cramps that - widen it so there's real room to
+ // drag into, matching the cell-edit modal's more generous default size.
+ const hasTa=(opts.fields||[]).some(f=>f.type==='textarea');
+ const mbox=$('mInput').querySelector('.box');mbox.style.width=hasTa?'700px':'460px';mbox.style.maxWidth=hasTa?'95vw':'92vw';
+ $('inpOk').textContent=opts.okText||'OK';show('mInput');setTimeout(()=>{const f0=box.querySelector('input,textarea');if(f0){f0.focus();f0.select&&f0.select();}},40);});}
 function inpOk(){const out={};$('inpFields').querySelectorAll('input,textarea,select').forEach(i=>{out[i.id.slice(4)]=(i.type==='checkbox')?i.checked:i.value;});hide('mInput');const r=_inpResolve;_inpResolve=null;if(r)r(out);}
 function inpCancel(){hide('mInput');const r=_inpResolve;_inpResolve=null;if(r)r(null);}
 async function ask(msg){const d=(window.__TAURI__&&window.__TAURI__.dialog);if(d&&d.confirm){try{return await d.confirm(msg,{title:'Confirm',kind:'warning'});}catch(e){}}return window.confirm(msg);}
@@ -2710,7 +2715,12 @@ function hist(){try{return JSON.parse(localStorage.getItem('history')||'[]');}ca
 function addHistory(sql){sql=sql.trim();if(!sql)return;let h=hist().filter(x=>x!==sql);h.unshift(sql);h=h.slice(0,200);localStorage.setItem('history',JSON.stringify(h));}
 // Same dark "console" code-block treatment as the schema-diff statement list - a past query read
 // as plain wrapped monospace text before, same readability problem for anything longer than a line.
-function openHistory(){const box=$('histList');const h=hist();box.innerHTML=h.length?'':'<div class="muted">No history yet.</div>';h.forEach(sql=>{const d=document.createElement('div');d.className='item';d.style.cssText='border-bottom:1px solid var(--bd2);padding:6px 4px';const code=document.createElement('code');code.style.cssText="display:block;background:var(--log);color:var(--logfg);font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;line-height:1.5;padding:6px 8px;border-radius:4px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere";code.textContent=sql.slice(0,300);d.appendChild(code);d.onclick=()=>{hide('mHist');openTab('history',sql,curSchema,false,null);};box.appendChild(d);});show('mHist');}
+// Starting height for a code-preview box scales with how many lines the query actually has (capped
+// so a huge query doesn't default to a huge box) - no max-height is set, so the resize handle (see
+// codeBlockStyle) can still be dragged well past this, same as the cell-edit textarea.
+function codeBlockStartHeight(text){const lines=String(text||'').split('\n').length;return Math.min(140,Math.max(40,lines*17+13))+'px';}
+function codeBlockStyle(text){return "display:block;background:var(--log);color:var(--logfg);font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;line-height:1.5;padding:6px 8px;border-radius:4px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;overflow:auto;resize:both;height:"+codeBlockStartHeight(text);}
+function openHistory(){const box=$('histList');const h=hist();box.innerHTML=h.length?'':'<div class="muted">No history yet.</div>';h.forEach(sql=>{const d=document.createElement('div');d.className='item';d.style.cssText='border-bottom:1px solid var(--bd2);padding:6px 4px';const code=document.createElement('code');code.style.cssText=codeBlockStyle(sql);code.textContent=sql;d.appendChild(code);d.onclick=()=>{hide('mHist');openTab('history',sql,curSchema,false,null);};box.appendChild(d);});show('mHist');}
 async function clearHistory(){localStorage.removeItem('history');openHistory();}
 let _libCache=[];
 function libAll(){return _libCache.slice();}
@@ -2742,8 +2752,9 @@ function libRender(){const box=$('libList');const q=($('libSearch').value||'').t
   const ed=document.createElement('button');ed.className='sm';ed.textContent='Edit';ed.style.marginLeft='6px';ed.onclick=()=>libEdit(x.name);
   const dl=document.createElement('button');dl.className='sm warn';dl.textContent='Delete';dl.style.marginLeft='6px';dl.onclick=async()=>{if(await ask('Delete saved query "'+x.name+'"?')){await api('/api/lib-delete',{name:x.name});await libLoad();libRender();}};
   btns.appendChild(op);btns.appendChild(ed);btns.appendChild(dl);head.appendChild(nm);head.appendChild(btns);
-  // Same dark "console" code-block treatment as the schema-diff statement list and query history.
-  const pre=document.createElement('code');pre.style.cssText="display:block;background:var(--log);color:var(--logfg);font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;line-height:1.5;padding:6px 8px;border-radius:4px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;margin-top:4px";pre.textContent=(x.sql||'').slice(0,200);
+  // Same dark "console" code-block treatment as the schema-diff statement list and query history -
+  // resizable both ways (drag the corner) so a long saved query isn't stuck at a fixed preview size.
+  const pre=document.createElement('code');pre.style.cssText=codeBlockStyle(x.sql)+';margin-top:4px';pre.textContent=x.sql||'';
   d.appendChild(head);d.appendChild(pre);box.appendChild(d);});}
 
 // ---- users ----
