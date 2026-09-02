@@ -26,8 +26,8 @@
    current theme's panel color is, so they need their OWN theme-appropriate variant to keep
    working WCAG-reasonable contrast in both themes rather than just the one they were originally
    picked to look good on. */
-:root{--bg:#fff;--fg:#1c1c1c;--panel:#eef0f3;--panel2:#e6e6e6;--bd:#ccc;--bd2:#e2e2e2;--hover:#eaf2fb;--accent:#1565c0;--muted:#777;--gridh:#f0f0f0;--even:#fafafa;--dirty:#fff6cc;--del:#ffdede;--btn:#fafafa;--log:#1e1e1e;--logfg:#d4d4d4;--str:#a31515;--kw:#0000c0;--com:#008000;--num:#098658;--in:#fff;--sb:rgba(0,0,0,.28);--sbh:rgba(0,0,0,.48);--erd-pk:#1a7a5e;--erd-fk:#2a5a9e;--erd-line:#2a5a9e;--diff-tgt:#a8442a}
- body.dark{--bg:#1e1e1e;--fg:#e0e0e0;--panel:#2a2d31;--panel2:#333;--bd:#444;--bd2:#3a3a3a;--hover:#33404d;--accent:#3b82f6;--muted:#999;--gridh:#2d2d2d;--even:#262626;--dirty:#4a4526;--del:#4a2626;--btn:#333;--log:#141414;--logfg:#d4d4d4;--str:#ce9178;--kw:#569cd6;--com:#6a9955;--num:#b5cea8;--in:#2a2a2a;--sb:rgba(255,255,255,.24);--sbh:rgba(255,255,255,.42);--erd-pk:#5dcaa5;--erd-fk:#8fb8e8;--erd-line:#7aa8d8;--diff-tgt:#f0997b}
+:root{--bg:#fff;--fg:#1c1c1c;--panel:#eef0f3;--panel2:#e6e6e6;--bd:#ccc;--bd2:#e2e2e2;--hover:#eaf2fb;--accent:#1565c0;--muted:#777;--gridh:#f0f0f0;--even:#fafafa;--dirty:#fff6cc;--del:#ffdede;--btn:#fafafa;--log:#1e1e1e;--logfg:#d4d4d4;--str:#a31515;--kw:#0000c0;--com:#008000;--num:#098658;--in:#fff;--sb:rgba(0,0,0,.28);--sbh:rgba(0,0,0,.48);--erd-pk:#1a7a5e;--erd-fk:#2a5a9e;--erd-line:#2a5a9e;--diff-tgt:#a8442a;--err-line:#c0392b}
+ body.dark{--bg:#1e1e1e;--fg:#e0e0e0;--panel:#2a2d31;--panel2:#333;--bd:#444;--bd2:#3a3a3a;--hover:#33404d;--accent:#3b82f6;--muted:#999;--gridh:#2d2d2d;--even:#262626;--dirty:#4a4526;--del:#4a2626;--btn:#333;--log:#141414;--logfg:#d4d4d4;--str:#ce9178;--kw:#569cd6;--com:#6a9955;--num:#b5cea8;--in:#2a2a2a;--sb:rgba(255,255,255,.24);--sbh:rgba(255,255,255,.42);--erd-pk:#5dcaa5;--erd-fk:#8fb8e8;--erd-line:#7aa8d8;--diff-tgt:#f0997b;--err-line:#e57373}
  *{box-sizing:border-box}
 *{scrollbar-width:thin;scrollbar-color:var(--sb) transparent}
 ::-webkit-scrollbar{width:11px;height:11px}
@@ -85,6 +85,12 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  table.grid tr.insrow td.delcell{color:#7ee0a0}
  table.grid td.kbfocus{outline:2px solid var(--accent);outline-offset:-2px}
  td.dirty{background:var(--dirty)!important} tr.del td{background:var(--del)!important;text-decoration:line-through}
+ .logpanel{background:var(--log);color:var(--logfg);border:1px solid var(--bd);border-radius:4px;padding:6px 8px 6px 0}
+ .logpanel:empty{display:none;border:none;padding:0}
+ .logpanel .ln{border-left:3px solid transparent;padding-left:8px}
+ .logpanel .ln.ok{border-left-color:var(--erd-pk)}
+ .logpanel .ln.warn{border-left-color:var(--diff-tgt)}
+ .logpanel .ln.err{border-left-color:var(--err-line)}
  /* Inline cell-edit input: kept visually close to the plain cell text it replaces - the td's own
     padding is zeroed while editing (.cellEditing) and moved onto the input itself instead, so the
     input fills the cell exactly (no inset "box" look, no row growth from stacking both paddings)
@@ -222,7 +228,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
   <label title="Empty the table first, then load (use this to restore a table from its own export)"><input type="radio" name="csvmode" id="csvReplace"> Replace (truncate first)</label><label style="margin-left:14px" title="A cell holding exactly this is imported as NULL. Clear it to treat empty cells as NULL instead.">NULL value <input id="csvNullVal" value="\N" style="width:52px;font-family:Consolas,monospace"></label></div>
  <div class="muted" style="font-size:11px;flex:none">Columns are matched to the table by header name; unmatched CSV columns are ignored. A cell equal to the NULL value below is imported as NULL; an empty cell is imported as an empty string. Clear the NULL value to import empty cells as NULL instead, which is usually what a spreadsheet means. For an exact restore of a whole database, prefer Export/Import (mysqldump).</div>
  <div class="row" style="justify-content:flex-end;flex:none"><button class="go" onclick="runCsvImport()">Import</button><button onclick="hide('mCsv')">Close</button></div>
- <div id="csvLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;overflow:auto;margin-top:6px;flex:1;min-height:60px"></div></div></div>
+ <div id="csvLog" class="logpanel" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;overflow:auto;margin-top:6px;flex:1;min-height:60px"></div></div></div>
 <div class="modal floating" id="mExport"><div class="box" style="width:900px;max-width:95vw;height:840px;display:flex;flex-direction:column;overflow:hidden;top:80px;left:120px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mExport')" title="Drag to move"><h3 style="margin:0 0 10px">Data Export</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mExport')" title="Maximize" id="maxBtn_mExport" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mExport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
  <div class="row" style="flex:none"><b>Databases</b> <button onclick="expAll(true)">All</button><button onclick="expAll(false)">None</button></div>
  <!-- flex:1 (not a fixed max-height) so the database/table picker actually uses the extra room a
@@ -243,7 +249,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
    <div style="height:6px;border-radius:3px;background:var(--panel2);overflow:hidden"><div id="expBar" style="height:100%;width:40%;background:var(--accent);animation:expmove 1.1s ease-in-out infinite"></div></div>
    <div id="expProgLabel" class="muted" style="font-size:11px;margin-top:4px"></div>
  </div>
- <div id="expLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:220px;overflow:auto;margin-top:6px;flex:none"></div></div></div>
+ <div id="expLog" class="logpanel" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:220px;overflow:auto;margin-top:6px;flex:none"></div></div></div>
 
 <div class="modal floating" id="mImport"><div class="box" style="width:900px;max-width:95vw;height:640px;display:flex;flex-direction:column;overflow:hidden;top:80px;left:200px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mImport')" title="Drag to move"><h3 style="margin:0 0 10px">Data Import</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mImport')" title="Maximize" id="maxBtn_mImport" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mImport')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div><div class="row" style="flex:none">SQL file paths (one per line):</div>
  <!-- flex:1 (shared with impLog below, same as Row comparison's two grids) instead of a fixed
@@ -260,7 +266,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  </div>
  <!-- flex:1 so the accumulating import log (potentially many files/statements) actually uses the
       window's extra room, instead of capping out with empty space below it. -->
- <div id="impLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;overflow:auto;margin-top:6px;flex:1;min-height:60px"></div></div></div>
+ <div id="impLog" class="logpanel" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;overflow:auto;margin-top:6px;flex:1;min-height:60px"></div></div></div>
 
 <div class="modal floating" id="mCompare"><div class="box" style="width:820px;max-width:94vw;height:640px;display:flex;flex-direction:column;overflow:hidden;top:50px;left:90px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mCompare')" title="Drag to move"><h3 style="margin:0 0 10px">Compare Databases <span class="muted" style="font-size:13px;cursor:help;font-weight:400" title="Connects to both sides independently of whatever's currently active, using each saved connection's stored password - so both the source and target connection need &quot;Save password&quot; checked (Edit... on the connection) or this will fail to log in.">&#9432;</span></h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mCompare')" title="Maximize" id="maxBtn_mCompare" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompare')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
  <div class="row" style="display:flex;gap:10px;flex:none">
@@ -286,7 +292,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
    <span id="cmpSummary" class="muted" style="font-size:11px"></span>
    <span style="display:inline-flex;gap:6px"><button onclick="previewCompareSql()">Preview SQL</button><button class="go write" onclick="applyCompare()">Apply to target</button><button onclick="cmpCloseAndCancel()">Close</button></span>
  </div>
- <div id="cmpLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:140px;overflow:auto;margin-top:6px;flex:none"></div>
+ <div id="cmpLog" class="logpanel" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:140px;overflow:auto;margin-top:6px;flex:none"></div>
 </div></div>
 
 <div class="modal floating" id="mCompareRows"><div class="box" style="width:900px;max-width:96vw;display:flex;flex-direction:column;overflow:hidden;top:50px;left:110px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mCompareRows')" title="Drag to move"><h3 id="cmprTitle" style="margin:0 0 10px">Row comparison</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mCompareRows')" title="Maximize" id="maxBtn_mCompareRows" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompareRows')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
@@ -452,6 +458,14 @@ let curSchema=null, tabs=[], tabSeq=0, activeTab=null;
    ============================================================================ */
 const $=id=>document.getElementById(id);window.$=$;
 function esc(s){return (s==null?'':String(s)).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function logLineCls(l){
+ if(/^OK\s+with\s+\d+\s+error/i.test(l))return 'warn';
+ if(/^OK\b/.test(l))return 'ok';
+ if(/^FAILED\b/.test(l))return 'err';
+ if(/^(SKIP\b|CANCELLED\b|\(excluded\)|\(no tables\))/.test(l))return 'warn';
+ return '';
+}
+function logLinesHtml(lines){return lines.map(l=>{const c=logLineCls(l);return '<div class="ln'+(c?' '+c:'')+'">'+esc(l)+'</div>';}).join('');}
 function connMeta(){return window._connMeta||{};}
 function connMetaSet(n,m){window._connMeta=window._connMeta||{};if(m){const cur=window._connMeta[n]||{};window._connMeta[n]={accent:cur.accent||'',env:m.env||'',readonly:!!m.readonly};}else{delete window._connMeta[n];}}
 window.readOnly=false;window.curEnv='';
@@ -3511,7 +3525,7 @@ if(!dbs.length && tables.length){
  progStop('exp');
  if(r.cancelled){log('Export cancelled.');}
  if(!r.ok){showToolError('expLog','mExport',r.error);log('Export error: '+r.error);return;}
- $('expLog').textContent=r.log.join('\n');r.log.forEach(l=>log('EXPORT: '+l));}
+ $('expLog').innerHTML=logLinesHtml(r.log);r.log.forEach(l=>log('EXPORT: '+l));}
 let _cmpTables=null;
 // Per-table "rows…" links only show up once "Check row differences" has actually been pressed -
 // before that, row comparison hasn't been requested yet so the link would just be premature clutter.
@@ -3665,7 +3679,7 @@ async function applyCompare(){const stmts=cmpSelectedStatements();if(!stmts.leng
  $('cmpLog').textContent='Applying\u2026';
  const r=await api('/api/compare-apply',{targetConnName:$('cmpTgtConn').value,targetDb:$('cmpTgtDb').value,statements:stmts});
  if(!r.ok){$('cmpLog').textContent='';toast(r.error||'Apply failed',true);return;}
- $('cmpLog').textContent=r.log.join('\n');
+ $('cmpLog').innerHTML=logLinesHtml(r.log);
  log('Compare: applied '+stmts.length+' statement(s) to '+$('cmpTgtConn').value+'.');
  await runCompare();}
 let _cmprState=null;
@@ -3993,7 +4007,7 @@ async function runImport(){const files=$('impFiles').value.split(/\r?\n/).map(s=
  progStop('imp');
  if(r.cancelled){log('Import cancelled.');}
  if(!r.ok){showToolError('impLog','mImport',r.error);log('Import error: '+r.error);return;}
- $('impLog').textContent=r.log.join('\n');r.log.forEach(l=>log('IMPORT: '+l));}
+ $('impLog').innerHTML=logLinesHtml(r.log);r.log.forEach(l=>log('IMPORT: '+l));}
 async function openSupportLink(){try{await api('/api/open-support-link');}catch(e){}}
 async function quit(){
  const activeJobs=Object.keys(_progJobIds||{}).filter(k=>_progJobIds[k]);
@@ -4114,8 +4128,8 @@ async function runCsvImport(){const f=$('csvFile').value.trim();if(!f){toast('Ch
  if(doTrunc && !(await ask('REPLACE mode: truncate '+csvTarget.db+'.'+csvTarget.table+' before import? All existing rows will be permanently deleted.')))return;
  $('csvLog').textContent='Importing...';
  const r=await api('/api/importcsv',{nullValue:($('csvNullVal')?$('csvNullVal').value:'\\N'),db:csvTarget.db,table:csvTarget.table,file:f,hasHeader:$('csvHeader').checked,truncate:doTrunc});
- if(!r.ok){$('csvLog').textContent=r.error;log('CSV import error: '+r.error);return;}
- $('csvLog').textContent=r.message;log('CSV import: '+r.message);invalidateTableCache(csvTarget.db,csvTarget.table);if(curSchema)loadObjects(curSchema);}
+ if(!r.ok){$('csvLog').innerHTML='<div class="ln err">'+esc(r.error)+'</div>';log('CSV import error: '+r.error);return;}
+ $('csvLog').innerHTML='<div class="ln ok">'+esc(r.message)+'</div>';log('CSV import: '+r.message);invalidateTableCache(csvTarget.db,csvTarget.table);if(curSchema)loadObjects(curSchema);}
 
 // Auto-reconnect on page load (Option 1)
 refreshConns().then(async () => {
