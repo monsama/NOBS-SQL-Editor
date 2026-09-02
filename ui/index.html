@@ -98,6 +98,15 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  table.grid td button{height:19px;min-width:0;padding:0 4px;border:1px solid var(--bd2);vertical-align:middle}
  table.grid td input:focus,table.grid td textarea:focus{background:var(--hover);outline:none}
  input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none}
+ /* Every textarea in the app is natively resizable by the browser (resize:both by default) with no
+    built-in ceiling - dragging one's corner past the window's own bounds could grow it to an
+    enormous size and make the window unresponsive while it repainted. This caps growth to the
+    element's own container width and the viewport height, everywhere, so no textarea - the cell
+    editor, the generated-SQL boxes, a plain prompt field, the transfer-script output - can ever be
+    dragged wider than the space it already has or taller than the visible window. table.grid td
+    textarea already has its own explicit height:100%/max sizing (see above) and is unaffected.
+    */
+ textarea{max-width:100%;max-height:calc(100vh - 40px)}
  .delcell{color:#c00;cursor:pointer;text-align:center;width:22px}
  .status{padding:3px 8px;font-size:12px;color:var(--fg);border-top:1px solid var(--bd2);background:var(--panel)} .status.err{color:#e06}
  #loghdr{background:#333;color:#ddd;padding:2px 8px;font-size:11px;display:flex;justify-content:space-between}
@@ -572,6 +581,18 @@ function floatRestore(id){
  floatBringToFront(id);
  floatRenderTray();
 }
+// Captured once, right here at script load - before any user interaction has had a chance to
+// drag-resize anything - so hide() below always has the modal's true pristine size to snap back
+// to. Also captures any persistent inner textarea (the cell-edit box, generated-SQL boxes, etc. -
+// elements that live in the page permanently rather than being rebuilt fresh on every open, unlike
+// e.g. Query History's per-row code blocks) so a manually resized one of those resets too.
+window._floatingDefaultSize={};
+window._floatingInnerDefaults={};
+document.querySelectorAll('.modal.floating').forEach(m=>{
+ const box=m.querySelector('.box');
+ if(box)window._floatingDefaultSize[m.id]={width:box.style.width,height:box.style.height,maxWidth:box.style.maxWidth,maxHeight:box.style.maxHeight};
+ window._floatingInnerDefaults[m.id]=[...m.querySelectorAll('textarea[id]')].map(ta=>({id:ta.id,width:ta.style.width,height:ta.style.height}));
+});
 // Snapshotting the exact prior inline top/left/width/height (rather than re-deriving them) means
 // restore always lands back exactly where the window was, including a size/position from a
 // manual drag-resize - not just back to the modal's hardcoded default.
@@ -621,12 +642,19 @@ function show(id){
 }
 function hide(id){
  $(id).classList.remove('show');
+ const box=$(id).querySelector('.box');
  if(window._floatingMinimized[id]){
   delete window._floatingMinimized[id];
-  const box=$(id).querySelector('.box');
   if(box)box.style.display='';
   floatRenderTray();
  }
+ // Always reset back to default size on close - reopening a window later should start fresh at
+ // its normal size rather than carrying over whatever a manual drag-resize (or an un-restored
+ // Maximize) last left it at. Position is left alone; only size is reset.
+ delete window._floatingMaxState[id];
+ const d=window._floatingDefaultSize&&window._floatingDefaultSize[id];
+ if(box&&d){box.style.width=d.width;box.style.height=d.height;box.style.maxWidth=d.maxWidth;box.style.maxHeight=d.maxHeight;const btn=$('maxBtn_'+id);if(btn)btn.title='Maximize';}
+ (window._floatingInnerDefaults&&window._floatingInnerDefaults[id]||[]).forEach(dd=>{const ta=$(dd.id);if(ta){ta.style.width=dd.width;ta.style.height=dd.height;}});
 }
 const RESERVED=new Set(['accessible','add','all','alter','analyze','and','as','asc','before','between','bigint','binary','blob','both','by','call','cascade','case','change','char','character','check','collate','column','condition','constraint','continue','convert','create','cross','current_date','current_time','current_timestamp','cursor','database','databases','default','delete','desc','describe','distinct','div','double','drop','dual','each','else','exists','explain','false','fetch','float','for','force','foreign','from','fulltext','function','group','having','if','ignore','in','index','inner','insert','int','integer','interval','into','is','join','key','keys','left','like','limit','lock','long','longblob','longtext','match','mediumblob','mediumint','mediumtext','natural','not','null','numeric','offset','on','optimize','option','or','order','outer','primary','procedure','references','rename','repeat','replace','restrict','return','revoke','right','rlike','schema','schemas','select','set','show','smallint','spatial','sql','table','then','tinyblob','tinyint','tinytext','to','trigger','true','union','unique','unlock','unsigned','update','usage','use','using','values','varbinary','varchar','varying','when','where','while','with','write','zerofill']);
 function qid(n){n=String(n);if(n===''||!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n)||RESERVED.has(n.toLowerCase()))return '`'+n.replace(/`/g,'``')+'`';return n;}
@@ -2749,7 +2777,12 @@ function addHistory(sql){sql=sql.trim();if(!sql)return;let h=hist().filter(x=>x!
 // so a huge query doesn't default to a huge box) - no max-height is set, so the resize handle (see
 // codeBlockStyle) can still be dragged well past this, same as the cell-edit textarea.
 function codeBlockStartHeight(text){const lines=String(text||'').split('\n').length;return Math.min(140,Math.max(40,lines*17+13))+'px';}
-function codeBlockStyle(text){return "display:block;background:var(--log);color:var(--logfg);font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;line-height:1.5;padding:6px 8px;border-radius:4px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;overflow:auto;resize:both;height:"+codeBlockStartHeight(text);}
+// max-width:100% keeps a drag-resize from ever growing wider than the box it's already filling
+// (effectively horizontal-only-if-there-was-room-to-begin-with, i.e. no overstretch past the
+// window's own edge), and max-height clamps to the viewport itself so dragging can never grow the
+// block past the visible window - without both, an unbounded resize:both could be dragged to an
+// enormous size and made the whole window unresponsive while it repainted.
+function codeBlockStyle(text){return "display:block;background:var(--log);color:var(--logfg);font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;line-height:1.5;padding:6px 8px;border-radius:4px;white-space:pre-wrap;word-break:break-word;overflow-wrap:anywhere;overflow:auto;resize:both;max-width:100%;max-height:calc(100vh - 40px);height:"+codeBlockStartHeight(text);}
 function openHistory(){const box=$('histList');const h=hist();box.innerHTML=h.length?'':'<div class="muted">No history yet.</div>';h.forEach(sql=>{const d=document.createElement('div');d.className='item';d.style.cssText='border-bottom:1px solid var(--bd2);padding:6px 4px';const code=document.createElement('code');code.style.cssText=codeBlockStyle(sql);code.textContent=sql;d.appendChild(code);d.onclick=()=>{hide('mHist');openTab('history',sql,curSchema,false,null);};box.appendChild(d);});show('mHist');}
 async function clearHistory(){localStorage.removeItem('history');openHistory();}
 let _libCache=[];
