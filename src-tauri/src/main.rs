@@ -510,15 +510,31 @@ fn sql_id(name: &str) -> String { format!("`{}`", name.replace('`', "``")) }
 fn strip_parens(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut depth = 0i32;
-    for c in s.chars() {
-        if c == '(' {
-            if depth == 0 { out.push(' '); }
-            depth += 1;
-        } else if c == ')' {
-            if depth > 0 { depth -= 1; }
-            if depth == 0 { out.push(' '); }
-        } else if depth == 0 {
-            out.push(c);
+    // A ')' (or, for that matter, a keyword) inside a quoted string/identifier isn't a real
+    // paren/keyword at all - "WHERE a=')SELECT('" is one string literal, not three tokens. Without
+    // tracking quote state, that stray ')' closed the depth early and let the literal SELECT it
+    // contains leak out as an exposed depth-0 token, which sql_is_readonly's "first verb wins"
+    // check then picked over the CTE's real (dangerous) trailing statement.
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if let Some(q) = quote {
+            if escaped { escaped = false; }
+            else if c == '\\' { escaped = true; }
+            else if c == q {
+                // A doubled quote ('' or "" or ``) is an escaped literal quote, not the closer -
+                // consume the pair and stay inside the string.
+                if chars.peek() == Some(&q) { chars.next(); }
+                else { quote = None; }
+            }
+            continue;
+        }
+        match c {
+            '\'' | '"' | '`' => { quote = Some(c); }
+            '(' => { if depth == 0 { out.push(' '); } depth += 1; }
+            ')' => { if depth > 0 { depth -= 1; } if depth == 0 { out.push(' '); } }
+            _ => { if depth == 0 { out.push(c); } }
         }
     }
     out
@@ -1781,8 +1797,22 @@ async fn importcsv(req: Value) -> R {
         let db = req["db"].as_str().unwrap_or("").to_string();
         let table = req["table"].as_str().unwrap_or("").to_string();
         let mut c = build_conn(&req["conn"])?;
-        let colsql = format!("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION", sql_str_lit(&db), sql_str_lit(&table));
+        let colsql = format!("SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION", sql_str_lit(&db), sql_str_lit(&table));
         let (_c, crows) = run_select(&mut c, &colsql)?;
+        // sql_lit()'s "0xDEADBEEF passes through unquoted as a hex literal" rule exists so a
+        // genuinely binary/BIT column can be filled from its own hex display - it was never meant
+        // to apply to an ordinary text column that merely happens to contain a value that LOOKS
+        // like hex ("0xFF", a hash, an ID). Used indiscriminately here, that silently reinterpreted
+        // such a CSV cell as raw bytes instead of the literal text, with no error. Only the columns
+        // information_schema actually reports as binary/BIT get that treatment; everything else
+        // goes through sql_str_lit(), which always quotes.
+        const BIN_TYPES: &[&str] = &["binary", "varbinary", "blob", "tinyblob", "mediumblob", "longblob", "bit"];
+        let bin_cols: std::collections::HashSet<String> = crows.iter()
+            .filter(|r| {
+                let ty = r.get(1).and_then(|v| v.as_deref()).unwrap_or("").to_lowercase();
+                BIN_TYPES.contains(&ty.as_str())
+            })
+            .filter_map(|r| r.first().cloned().flatten()).collect();
         let table_cols: Vec<String> = crows.into_iter().filter_map(|r| r.into_iter().next().flatten()).collect();
         if table_cols.is_empty() { return Ok(json!({"ok":false,"error":"Table not found or has no columns."})); }
 
@@ -1806,7 +1836,7 @@ async fn importcsv(req: Value) -> R {
         let mut n = 0usize; let mut batch: Vec<String> = Vec::new();
         for rec in rdr.records() {
             let rec = rec.map_err(|e| e.to_string())?;
-            let vals: Vec<String> = use_idx.iter().map(|&i| {
+            let vals: Vec<String> = use_idx.iter().enumerate().map(|(ci, &i)| {
                 // The marker decides what an empty cell means. With one set (the default, \N)
                 // the file states NULL explicitly, so an empty cell is an empty string and a
                 // round trip keeps both. Clearing the marker restores the older reading, where a
@@ -1815,7 +1845,11 @@ async fn importcsv(req: Value) -> R {
                     None => "NULL".to_string(),
                     Some(s) if !null_marker.is_empty() && s == null_marker => "NULL".to_string(),
                     Some("") if null_marker.is_empty() => "NULL".to_string(),
-                    Some(s) => sql_lit(s),
+                    // sql_lit()'s hex-literal passthrough only applies to a column information_schema
+                    // actually reports as binary/BIT - anything else always gets a real quoted string,
+                    // even if the cell's text happens to look like hex (see bin_cols above).
+                    Some(s) if bin_cols.contains(&use_cols[ci]) => sql_lit(s),
+                    Some(s) => sql_str_lit(s),
                 }
             }).collect();
             batch.push(format!("({})", vals.join(","))); n += 1;
@@ -3210,6 +3244,16 @@ mod tests {
         assert!(!sql_is_readonly("WITH x AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT id FROM x)"));
         assert!(!sql_is_readonly("WITH x AS (SELECT 1) UPDATE t SET a=1"));
         assert!(!sql_is_readonly("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x"));
+    }
+
+    // A ')' - or a keyword - inside a quoted string isn't a real paren/token: without tracking
+    // quote state, this exact statement's embedded ")SELECT(" leaked out as an exposed depth-0
+    // "SELECT", which "first verb wins" then picked over the real (and dangerous) trailing DELETE.
+    #[test]
+    fn read_only_blocks_cte_with_paren_in_string_literal() {
+        assert!(!sql_is_readonly("WITH x AS (SELECT 1 FROM t WHERE a=')SELECT(') DELETE FROM t"));
+        assert!(!sql_is_readonly("WITH x AS (SELECT 1 FROM t WHERE a=\")SELECT(\") DELETE FROM t"));
+        assert!(sql_is_readonly("WITH x AS (SELECT 1 FROM t WHERE a=')DELETE(') SELECT * FROM x"));
     }
 
     #[test]

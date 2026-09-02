@@ -691,7 +691,13 @@ function hide(id){
 }
 const RESERVED=new Set(['accessible','add','all','alter','analyze','and','as','asc','before','between','bigint','binary','blob','both','by','call','cascade','case','change','char','character','check','collate','column','condition','constraint','continue','convert','create','cross','current_date','current_time','current_timestamp','cursor','database','databases','default','delete','desc','describe','distinct','div','double','drop','dual','each','else','exists','explain','false','fetch','float','for','force','foreign','from','fulltext','function','group','having','if','ignore','in','index','inner','insert','int','integer','interval','into','is','join','key','keys','left','like','limit','lock','long','longblob','longtext','match','mediumblob','mediumint','mediumtext','natural','not','null','numeric','offset','on','optimize','option','or','order','outer','primary','procedure','references','rename','repeat','replace','restrict','return','revoke','right','rlike','schema','schemas','select','set','show','smallint','spatial','sql','table','then','tinyblob','tinyint','tinytext','to','trigger','true','union','unique','unlock','unsigned','update','usage','use','using','values','varbinary','varchar','varying','when','where','while','with','write','zerofill']);
 function qid(n){n=String(n);if(n===''||!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n)||RESERVED.has(n.toLowerCase()))return '`'+n.replace(/`/g,'``')+'`';return n;}
-function lit(v){if(v===null)return 'NULL';const s=String(v);if(/^0x[0-9A-Fa-f]+$/.test(s))return s;return "'"+s.replace(/\\/g,'\\\\').replace(/'/g,"''")+"'";}
+function lit(v){if(v===null)return 'NULL';const s=String(v);if(/^0x[0-9A-Fa-f]+$/.test(s))return s;return strLit(s);}
+// Always a quoted string literal - unlike lit(), never reinterprets a hex-looking value as a raw
+// unquoted hex literal. lit()'s passthrough is meant for grid cell values (matching how the
+// backend already displays/edits binary columns); a password or other plain-text field that
+// happens to look like hex should stay exactly the text the user typed, not silently become a
+// different value with a different meaning to MySQL.
+function strLit(v){return "'"+String(v).replace(/\\/g,'\\\\').replace(/'/g,"''")+"'";}
 
 async function searchAllSchemas(){
   const term=($('objFilter').value||'').trim();
@@ -3315,7 +3321,7 @@ async function refreshProcessList(){
   // button at all rather than one that would only ever fail.
   const info=infoIdx>=0?String(row[infoIdx]||'').trim().toLowerCase():'';
   const isSelf=(info==='show full processlist'||info==='show processlist');
-  h+='<td style="padding:4px 6px;border-bottom:1px solid var(--bd2)">'+((pid!=null&&!isSelf)?'<button class="sm warn" onclick="killProcess(\''+esc(pid)+'\')">Kill</button>':'')+'</td>';
+  h+='<td style="padding:4px 6px;border-bottom:1px solid var(--bd2)">'+((pid!=null&&!isSelf)?'<button class="sm warn" onclick="killProcess(\''+esc(pid).replace(/\x27/g,'\\x27')+'\')">Kill</button>':'')+'</td>';
   h+='</tr>';
  });
  h+='</tbody></table>';
@@ -3329,7 +3335,7 @@ async function killProcess(pid){
 async function openUsers(){const r=await api('/api/query',{sql:"SELECT User,Host FROM mysql.user ORDER BY User,Host"});const sel=$('userSel');sel.innerHTML='';$('grantsBox').textContent='';window._selUser='';
  if(!r.ok){toast(r.error,true);return;}r.rows.forEach(u=>{const d=document.createElement('div');d.className='uitem';d.textContent=u[0]+'@'+u[1];d.dataset.v=u[0]+'\x01'+u[1];d.onclick=()=>{[...sel.children].forEach(c=>c.classList.remove('sel'));d.classList.add('sel');window._selUser=d.dataset.v;showGrants();};sel.appendChild(d);});show('mUsers');}
 async function showGrants(){const v=window._selUser;if(!v)return;const[u,h]=v.split('\x01');const r=await api('/api/query',{sql:"SHOW GRANTS FOR "+lit(u)+"@"+lit(h)});$('grantsBox').textContent=r.ok?r.rows.map(x=>x[0]).join('\n'):r.error;}
-async function newUser(){const res=await inputBox({title:'New user',okText:'Create',fields:[{key:'user',label:'User name'},{key:'host',label:'Host',value:'%'},{key:'pw',label:'Password',type:'password'}]});if(!res||!res.user.trim())return;const h=res.host.trim()||'%';if(await exec("CREATE USER "+lit(res.user.trim())+"@"+lit(h)+" IDENTIFIED BY "+lit(res.pw),'Created user'))openUsers();}
+async function newUser(){const res=await inputBox({title:'New user',okText:'Create',fields:[{key:'user',label:'User name'},{key:'host',label:'Host',value:'%'},{key:'pw',label:'Password',type:'password'}]});if(!res||!res.user.trim())return;const h=res.host.trim()||'%';if(await exec("CREATE USER "+lit(res.user.trim())+"@"+lit(h)+" IDENTIFIED BY "+strLit(res.pw),'Created user'))openUsers();}
 async function revokeUser(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const[u,h]=v.split('\x01');const res=await grantRevokeDialog('revoke');if(!res||!res.g.trim())return;if(await exec("REVOKE "+res.g.trim()+" FROM "+lit(u)+"@"+lit(h),'Revoked')){await exec('FLUSH PRIVILEGES','Flush');showGrants();}}
 // Common privilege combos, similar to what Workbench's own privilege list offers - not exhaustive
 // (there's dozens of individual MySQL privileges), just the handful actually reached for often. The
@@ -3383,14 +3389,11 @@ async function lockUser(lock){const v=window._selUser;if(!v){toast('Select a use
 async function changePassword(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const parts=v.split('\x01');const u=parts[0],h=parts[1];
  const res=await inputBox({title:'Change password for '+u+'@'+h,okText:'Change',fields:[{key:'pw',label:'New password',type:'password',value:''},{key:'pw2',label:'Confirm new password',type:'password',value:''}]});
  if(!res)return;if(!res.pw){toast('Password cannot be empty.',true);return;}if(res.pw!==res.pw2){toast('Passwords do not match.',true);return;}
- // lit() for user/host (matching lockUser() above), but NOT for the password: lit()'s hex-literal
- // passthrough (returning e.g. "0xdead" unquoted) is meant for cell values, not a password field -
- // it would silently reinterpret a password that happens to look like hex as raw bytes instead of
- // the literal text the user typed. Escape it directly instead: backslash first, then the quote -
- // same as lit()/the backend's own sql_str_lit() - so a value ending in a backslash can't combine
- // with the literal's closing quote to close the string one character early.
- const pwLit="'"+res.pw.replace(/\\/g,'\\\\').replace(/'/g,"''")+"'";
- const sql="ALTER USER "+lit(u)+"@"+lit(h)+" IDENTIFIED BY "+pwLit+";";
+ // lit() for user/host (matching lockUser() above), but strLit() - always quoted - for the
+ // password: lit()'s hex-literal passthrough (returning e.g. "0xdead" unquoted) is meant for cell
+ // values, not a password field, and would silently reinterpret a password that happens to look
+ // like hex as raw bytes instead of the literal text the user typed.
+ const sql="ALTER USER "+lit(u)+"@"+lit(h)+" IDENTIFIED BY "+strLit(res.pw)+";";
  const r=await api('/api/exec',{sql:sql});
  if(r.ok){log('Password changed for '+u+'@'+h+'.');}else{alert('Failed: '+(r.error||'unknown'));}}
 async function dropUser(){const v=window._selUser;if(!v)return;const[u,h]=v.split('\x01');if(!(await ask('DROP USER '+u+'@'+h+' ?')))return;if(await exec("DROP USER "+lit(u)+"@"+lit(h),'Dropped user'))openUsers();}
