@@ -503,6 +503,26 @@ fn sql_id(name: &str) -> String { format!("`{}`", name.replace('`', "``")) }
 // Mirrors the PowerShell version's Test-SqlReadOnly: strips /* */, --, and # comments, then
 // every statement's leading keyword must be on the allow-list for the SQL to be read-only.
 // This is the server-side enforcement backing a connection's "read-only / safe mode" flag.
+// Removes every balanced (...) group, tracking nesting depth so this is correct for parentheses
+// nested inside parentheses (unlike a regex, which can't do that). Used by sql_is_readonly to see
+// past a CTE's own body (or a subquery's) to the keyword actually driving the statement. Each
+// removed group leaves a single space behind so words on either side don't get glued together.
+fn strip_parens(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0i32;
+    for c in s.chars() {
+        if c == '(' {
+            if depth == 0 { out.push(' '); }
+            depth += 1;
+        } else if c == ')' {
+            if depth > 0 { depth -= 1; }
+            if depth == 0 { out.push(' '); }
+        } else if depth == 0 {
+            out.push(c);
+        }
+    }
+    out
+}
 fn sql_is_readonly(sql: &str) -> bool {
     if sql.trim().is_empty() { return true; }
     // /*! ... */ and /*!50000 ... */ are NOT comments: MySQL executes their contents. Stripping
@@ -513,6 +533,12 @@ fn sql_is_readonly(sql: &str) -> bool {
     let re_block = regex::Regex::new(r"(?s)/\*.*?\*/").unwrap();
     let re_dash  = regex::Regex::new(r"(?m)--.*$").unwrap();
     let re_hash  = regex::Regex::new(r"(?m)#.*$").unwrap();
+    // MariaDB's ANALYZE [FORMAT=JSON] <statement> form (distinct from ANALYZE TABLE) actually
+    // EXECUTES the wrapped statement while profiling it - bare "ANALYZE" was allow-listed for the
+    // genuinely read-only ANALYZE TABLE form, which also let "ANALYZE DELETE FROM t" straight
+    // through untouched. This strips a leading FORMAT=JSON clause so the wrapped statement's own
+    // keyword is what's left to check.
+    let re_analyze_fmt = regex::Regex::new(r"(?i)^FORMAT\s*=\s*JSON\s+").unwrap();
     let unwrapped = re_exec.replace_all(sql, " $1 ");
     let step1 = re_block.replace_all(&unwrapped, " ");
     let step2 = re_dash.replace_all(&step1, " ");
@@ -531,6 +557,29 @@ fn sql_is_readonly(sql: &str) -> bool {
             let second = up.split_whitespace().nth(1).unwrap_or("");
             if second.starts_with("GLOBAL") || second.starts_with("PERSIST")
                 || up.contains("@@GLOBAL") || up.contains("@@PERSIST") { return false; }
+        }
+        // A CTE only stays read-only if it's actually prefixing a SELECT/TABLE/VALUES - MySQL
+        // 8.0.19+/MariaDB also allow "WITH x AS (...) DELETE/UPDATE FROM t ...", which the leading
+        // "WITH" alone can't reveal. Strip every CTE's own (possibly nested) body via
+        // strip_parens, leaving roughly "WITH cte1 AS , cte2 AS  DELETE FROM t ..." - the first
+        // remaining recognizable verb after that is the statement actually being run.
+        if w == "WITH" {
+            let stripped = strip_parens(t);
+            const VERBS: &[&str] = &["SELECT","INSERT","UPDATE","DELETE","REPLACE","TABLE","VALUES"];
+            let verb = stripped.split_whitespace().map(|w| w.to_uppercase()).find(|w| VERBS.contains(&w.as_str()));
+            match verb.as_deref() {
+                Some("SELECT") | Some("TABLE") | Some("VALUES") => {}
+                _ => return false,
+            }
+        }
+        if w == "ANALYZE" {
+            let rest = t.splitn(2, char::is_whitespace).nth(1).unwrap_or("").trim_start();
+            let is_analyze_table = rest.split_whitespace().next().map(|f| f.eq_ignore_ascii_case("TABLE")).unwrap_or(false);
+            if !is_analyze_table {
+                let inner = re_analyze_fmt.replace(rest, "");
+                let inner_w = inner.trim().split_whitespace().next().unwrap_or("").to_uppercase();
+                if inner_w != "SELECT" { return false; }
+            }
         }
     }
     true
@@ -1121,16 +1170,23 @@ async fn rowop(req: Value) -> R {
 }
 
 // script / import / export shell out to the mysql/mysqldump CLI (DELIMITER-safe)
+// A raw newline in a value would otherwise start a brand new line in the .cnf file, letting a
+// saved connection's host/user/password inject an arbitrary extra option-file directive (e.g.
+// "pager=<command>", which the mysql CLI executes) rather than staying part of THIS value.
+// Backslash-doubling (below) only protects against \n being misread as an escape sequence -
+// it does nothing for an actual embedded newline BYTE, which this strips outright since none of
+// these fields have any legitimate use for one.
+fn cnf_safe(s: &str) -> String { s.replace(['\r', '\n'], "") }
 fn cnf_file(connj: &Value) -> Result<(tempfile::NamedTempFile, String), String> {
     let mut f = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     let mut s = String::from("[client]\n");
-    s += &format!("host={}\nport={}\nuser={}\n", connj["host"].as_str().unwrap_or("127.0.0.1"),
-        connj["port"].as_str().unwrap_or("3306"), connj["user"].as_str().unwrap_or("root"));
+    s += &format!("host={}\nport={}\nuser={}\n", cnf_safe(connj["host"].as_str().unwrap_or("127.0.0.1")),
+        cnf_safe(connj["port"].as_str().unwrap_or("3306")), cnf_safe(connj["user"].as_str().unwrap_or("root")));
     // MySQL option files treat backslash as an escape character in values (\t, \n, \\, ...), so a
     // password containing a literal backslash has to be doubled here or the .cnf parser would
     // silently consume it as (the start of) an escape sequence instead of a literal character -
     // corrupting the password and breaking auth for anyone whose password happens to contain one.
-    if let Some(p) = connj["password"].as_str() { if !p.is_empty() { s += &format!("password={}\n", p.replace('\\', "\\\\")); } }
+    if let Some(p) = connj["password"].as_str() { if !p.is_empty() { s += &format!("password={}\n", cnf_safe(p).replace('\\', "\\\\")); } }
     f.write_all(s.as_bytes()).map_err(|e| e.to_string())?;
     let path = f.path().to_string_lossy().to_string();
     Ok((f, path))
@@ -3100,6 +3156,13 @@ mod tests {
     }
 
     #[test]
+    fn cnf_safe_strips_embedded_newlines() {
+        assert_eq!(cnf_safe("normal-host"), "normal-host");
+        assert_eq!(cnf_safe("evil\npager=touch /tmp/pwned"), "evilpager=touch /tmp/pwned");
+        assert_eq!(cnf_safe("evil\r\nmore"), "evilmore");
+    }
+
+    #[test]
     fn sql_val_lit_passes_hex_through_unquoted() {
         assert_eq!(sql_val_lit("0xDEADBEEF"), "0xDEADBEEF");
         assert_eq!(sql_val_lit("0x00"), "0x00");
@@ -3138,6 +3201,31 @@ mod tests {
         // comment - so stripping it before the keyword check lets a write through.
         assert!(!sql_is_readonly("/*!50000 DELETE FROM t */"));
         assert!(!sql_is_readonly("SELECT 1; /*!DROP TABLE t */"));
+    }
+
+    #[test]
+    fn read_only_blocks_cte_prefixed_writes() {
+        assert!(sql_is_readonly("WITH x AS (SELECT 1) SELECT * FROM x"));
+        assert!(sql_is_readonly("WITH x AS (SELECT 1), y AS (SELECT 2) SELECT * FROM x, y"));
+        assert!(!sql_is_readonly("WITH x AS (SELECT 1) DELETE FROM t WHERE id IN (SELECT id FROM x)"));
+        assert!(!sql_is_readonly("WITH x AS (SELECT 1) UPDATE t SET a=1"));
+        assert!(!sql_is_readonly("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x"));
+    }
+
+    #[test]
+    fn read_only_blocks_analyze_wrapped_writes() {
+        // ANALYZE TABLE is a genuinely read-only maintenance statement.
+        assert!(sql_is_readonly("ANALYZE TABLE t"));
+        assert!(sql_is_readonly("analyze table t, t2"));
+        // MariaDB's ANALYZE [FORMAT=JSON] <statement> form actually EXECUTES the statement it
+        // wraps - a SELECT is fine, anything else must be blocked exactly like it would be
+        // unwrapped.
+        assert!(sql_is_readonly("ANALYZE SELECT 1"));
+        assert!(sql_is_readonly("ANALYZE FORMAT=JSON SELECT * FROM t"));
+        assert!(!sql_is_readonly("ANALYZE DELETE FROM t"));
+        assert!(!sql_is_readonly("ANALYZE INSERT INTO t VALUES (1)"));
+        assert!(!sql_is_readonly("ANALYZE UPDATE t SET a=1"));
+        assert!(!sql_is_readonly("ANALYZE FORMAT=JSON DELETE FROM t"));
     }
 
     #[test]
