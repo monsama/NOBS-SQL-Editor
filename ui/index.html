@@ -3267,10 +3267,13 @@ async function grantRevokeDialog(mode){
  fields.push({key:'g',label:'Privileges'+(isGrant?' to grant':' to revoke')+' (e.g. ALL PRIVILEGES ON db.*) - editable directly, or built from the pickers above',value:'ALL PRIVILEGES ON *.*'});
  const p=inputBox({title:isGrant?'Grant privileges':'Revoke privileges',okText:isGrant?'Grant':'Revoke',width:'560px',fields});
  const presetSel=$('inp_preset'),schemaSel=$('inp_schema'),tableSel=$('inp_table'),gInput=$('inp_g'),wgoCk=isGrant?$('inp_wgo'):null;
+ // WITH GRANT OPTION is a suffix on the whole GRANT statement (after "TO user@host"), not part of
+ // the privilege/target list this field holds - grantUser() appends it separately at exec time, in
+ // the right place, based on the checkbox state rather than baking it into this text.
  function rebuild(){
   const on=(schemaSel.value==='*'?'*':qid(schemaSel.value))+'.'+(tableSel.value==='*'?'*':qid(tableSel.value));
   const priv=presetSel.value==='__custom__'?(gInput.value.replace(/\s+ON\s+\S+\.\S+.*$/i,'').trim()||'SELECT'):presetSel.value;
-  gInput.value=priv+' ON '+on+(wgoCk&&wgoCk.checked?' WITH GRANT OPTION':'');
+  gInput.value=priv+' ON '+on;
  }
  async function refreshTables(){
   if(schemaSel.value==='*'){tableSel.innerHTML='<option value="*">* (all tables)</option>';tableSel.disabled=true;return;}
@@ -3292,7 +3295,9 @@ async function changePassword(){const v=window._selUser;if(!v){toast('Select a u
  const r=await api('/api/exec',{sql:sql});
  if(r.ok){log('Password changed for '+u+'@'+h+'.');}else{alert('Failed: '+(r.error||'unknown'));}}
 async function dropUser(){const v=window._selUser;if(!v)return;const[u,h]=v.split('\x01');if(!(await ask('DROP USER '+u+'@'+h+' ?')))return;if(await exec("DROP USER "+lit(u)+"@"+lit(h),'Dropped user'))openUsers();}
-async function grantUser(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const[u,h]=v.split('\x01');const res=await grantRevokeDialog('grant');if(!res||!res.g.trim())return;if(await exec("GRANT "+res.g.trim()+" TO "+lit(u)+"@"+lit(h),'Granted')){await exec('FLUSH PRIVILEGES','Flush');showGrants();}}
+async function grantUser(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const[u,h]=v.split('\x01');const res=await grantRevokeDialog('grant');if(!res||!res.g.trim())return;
+ const sql="GRANT "+res.g.trim()+" TO "+lit(u)+"@"+lit(h)+(res.wgo?' WITH GRANT OPTION':'');
+ if(await exec(sql,'Granted')){await exec('FLUSH PRIVILEGES','Flush');showGrants();}}
 
 // ---- table designer ----
 const DTYPES=['INT','BIGINT','TINYINT','SMALLINT','MEDIUMINT','DECIMAL','FLOAT','DOUBLE','BIT','BOOLEAN','CHAR','VARCHAR','TEXT','MEDIUMTEXT','LONGTEXT','DATE','DATETIME','TIMESTAMP','TIME','YEAR','JSON','BLOB','LONGBLOB','ENUM','BINARY','VARBINARY'];
