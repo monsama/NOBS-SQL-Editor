@@ -242,7 +242,11 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <!-- Its own row (matching Folder's label/width/casing) instead of squeezed into the dense options
       row above at 120px wide - plus a live preview of the actual resulting file name, since
       "timestamp" silently changes what gets written and a plain text box alone doesn't show that. -->
- <div class="row" id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none;flex:none">Filename <input id="expFilename" placeholder="all_selected" style="flex:1" oninput="expUpdateFilenamePreview()"><span id="expFilenamePreview" class="muted" style="font-size:11px;white-space:nowrap"></span></div>
+ <!-- maxlength 234: NTFS/Windows caps a single path component (a filename, not the whole path)
+      at 255 characters - 234 leaves room for the "_YYYYMMDD_HHMMSS" timestamp suffix (17 chars)
+      and ".sql" extension (4 chars) this field doesn't show while you're typing it, so the
+      actual file written can never itself hit that ceiling even with timestamp on. -->
+ <div class="row" id="expFilenameRow" title="Only applies to “single file” mode - db/table mode each produce one file per object, so a manual name has nowhere to go. Leave blank to keep the default (all_selected)." style="display:none;flex:none">Filename <input id="expFilename" placeholder="all_selected" maxlength="234" style="flex:1" oninput="expUpdateFilenamePreview()"><span id="expFilenameCount" class="muted" style="font-size:10px;white-space:nowrap;display:none"></span><span id="expFilenamePreview" class="muted" style="font-size:11px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis"></span></div>
  <div class="row" style="flex:none">Folder <input id="expFolder" style="flex:1" value="C:\temp"><button onclick="browse({title:'Select export folder',mode:'folder',start:$('expFolder').value,onPick:pp=>$('expFolder').value=pp})">Browse...</button></div>
  <div class="row" style="justify-content:flex-end;flex:none"><button class="go" id="expGoBtn" onclick="runExport()">Start Export</button><button class="warn" id="expCancelBtn" disabled onclick="cancelJob('exp')">Cancel</button><button onclick="hide('mExport')">Close</button></div>
  <div id="expProgress" style="display:none;margin-top:8px;flex:none">
@@ -3479,7 +3483,13 @@ function expAll(v){[...document.querySelectorAll('.expdb')].forEach(c=>c.checked
 function expSyncFilenameField(){const row=$('expFilenameRow');if(row)row.style.display=$('expSingle').checked?'flex':'none';expUpdateFilenamePreview();}
 // Shows what the export will actually be saved as - the base name defaults to "all_selected" when
 // left blank, and "timestamp" appends a date/time suffix the plain text box alone doesn't hint at.
-function expUpdateFilenamePreview(){const el=$('expFilenamePreview');if(!el)return;const base=($('expFilename').value||'').trim()||'all_selected';const stamp=$('expStamp').checked?'_'+expTimestampSample():'';el.textContent='→ '+base+stamp+'.sql';}
+function expUpdateFilenamePreview(){const el=$('expFilenamePreview');if(!el)return;const inp=$('expFilename');const base=(inp.value||'').trim()||'all_selected';const stamp=$('expStamp').checked?'_'+expTimestampSample():'';const text='→ '+base+stamp+'.sql';el.textContent=text;el.title=text;
+ // Quiet unless you're actually closing in on the limit - a short, everyday filename shouldn't
+ // have to share the row with a running character count.
+ const cnt=$('expFilenameCount');if(cnt){const len=inp.value.length,max=inp.maxLength;
+  if(len>=max-20){cnt.style.display='';cnt.textContent=len+'/'+max;cnt.style.color=(len>=max)?'var(--log-warn)':'';}
+  else{cnt.style.display='none';}
+ }}
 function expTimestampSample(){const d=new Date();const p=n=>String(n).padStart(2,'0');return d.getFullYear()+p(d.getMonth()+1)+p(d.getDate())+'_'+p(d.getHours())+p(d.getMinutes())+p(d.getSeconds());}
 // A few export options only exist on one mysqldump flavor: --set-gtid-purged is MySQL 5.6+
 // only, --column-statistics is MySQL 8+ only - MariaDB's mysqldump has neither, and checking
