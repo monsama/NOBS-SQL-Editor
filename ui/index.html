@@ -268,7 +268,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
       window's extra room, instead of capping out with empty space below it. -->
  <div id="impLog" class="logpanel" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;overflow:auto;margin-top:6px;flex:1;min-height:60px"></div></div></div>
 
-<div class="modal floating" id="mCompare"><div class="box" style="width:820px;max-width:94vw;height:640px;display:flex;flex-direction:column;overflow:hidden;top:50px;left:90px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mCompare')" title="Drag to move"><h3 style="margin:0 0 2px">Compare Databases</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mCompare')" title="Maximize" id="maxBtn_mCompare" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompare')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
+<div class="modal floating" id="mCompare"><div class="box" style="width:820px;max-width:94vw;height:360px;display:flex;flex-direction:column;overflow:hidden;top:50px;left:90px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mCompare')" title="Drag to move"><h3 style="margin:0 0 2px">Compare Databases</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mCompare')" title="Maximize" id="maxBtn_mCompare" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompare')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
  <div class="muted" style="font-size:11px;margin-bottom:8px;flex:none">Connects to both sides independently of whatever's currently active, using each saved connection's stored password - so both the source and target connection need "Save password" checked (Edit... on the connection) or this will fail to log in.</div>
  <div class="row" style="display:flex;gap:10px;flex:none">
    <div style="flex:1"><div class="muted" style="font-size:11px;margin-bottom:3px">Source</div>
@@ -3579,7 +3579,12 @@ async function cmpLoadDbs(side){const connSel=$(side==='src'?'cmpSrcConn':'cmpTg
    if(srcDbVal&&r.databases.includes(srcDbVal))dbSel.value=srcDbVal;
    $('cmpRoNote').style.display=r.readonly?'inline':'none';
  }}
-async function openCompare(){$('cmpResults').innerHTML='';$('cmpLog').textContent='';$('cmpSummary').textContent='';const tr=$('cmpTallyRow');if(tr)tr.style.display='none';const rsr=$('cmpRowScanRow');if(rsr)rsr.style.display='none';const rss=$('cmpRowScanStatus');if(rss)rss.textContent='';_cmpTables=null;_cmpRowScanStarted=false;cmpResetTablePicker();
+async function openCompare(){$('cmpResults').innerHTML='';$('cmpLog').textContent='';$('cmpSummary').textContent='';const tr=$('cmpTallyRow');if(tr)tr.style.display='none';const rsr=$('cmpRowScanRow');if(rsr)rsr.style.display='none';const rss=$('cmpRowScanStatus');if(rss)rss.textContent='';
+ // Was missing from this reset - reopening the dialog after a PREVIOUS comparison had shown the
+ // "filter results by table name..." row (only shown once >8 tables came back) left that row
+ // visibly stuck on screen above a now-empty results area, even though there was nothing to filter.
+ const sr=$('cmpResultsSearchRow');if(sr)sr.style.display='none';
+ _cmpTables=null;_cmpRowScanStarted=false;cmpResetTablePicker();
  await cmpFillConnSelect($('cmpSrcConn'));await cmpFillConnSelect($('cmpTgtConn'));
  if(window._primaryConn){$('cmpSrcConn').value=window._primaryConn;}
  await cmpLoadDbs('src');await cmpLoadDbs('tgt');
@@ -3687,6 +3692,15 @@ async function runCompare(){
  _cmpRequestId=null;_cmpAbortCtrl=null;
  if(!r.ok){$('cmpResults').innerHTML='<div class="muted">'+esc(r.error||'Compare failed')+' <a href="#" onclick="runCompare();return false" style="color:var(--accent)">Retry</a></div>';toast(r.error||'Compare failed',true);return;}
  _cmpTables=r.tables;$('cmpRoNote').style.display=r.targetReadonly?'inline':'none';const _sb=$('cmpResultSearch');if(_sb)_sb.value='';cmpRenderResults();
+ // The dialog opens compact (just enough for the pickers and Run button, see cmpResults' default
+ // box height) since there's nothing to show yet - once a comparison actually returns tables, grow
+ // it to give the results list real room. Only on THIS transition, not on every re-render (filter,
+ // expanding a row's details) - those would fight a manual resize every time. Skipped while
+ // maximized for the same reason floatToggleMaximize/viewText skip resizing then.
+ if(_cmpTables.length&&(!window._floatingMaxState||!window._floatingMaxState.mCompare)){
+  const box=$('mCompare').querySelector('.box');
+  if(box&&parseInt(box.style.height,10)<640)box.style.height='640px';
+ }
  if(r.cancelled)toast('Comparison cancelled - showing '+_cmpTables.length+' table(s) checked before you stopped it.',true);}
 function cmpSelectedStatements(){const out=[];if(_cmpTables)_cmpTables.forEach(t=>t.sql.forEach(s=>{if(s.checked)out.push(s.stmt);}));return out;}
 function previewCompareSql(){const stmts=cmpSelectedStatements();if(!stmts.length){toast('No changes selected.',true);return;}viewText('Preview - '+stmts.length+' statement(s)',stmts.join('\n\n'),{readonly:true});}
