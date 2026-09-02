@@ -90,12 +90,13 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
     input fills the cell exactly (no inset "box" look, no row growth from stacking both paddings)
     with just a faint tint on focus rather than a distinct form control's border. */
  table.grid td.cellEditing{padding:0}
- table.grid td input{width:100%;height:100%;box-sizing:border-box;border:none;font:inherit;padding:2px 8px;background:transparent;color:var(--fg);vertical-align:middle}
+ table.grid td input,table.grid td textarea{width:100%;height:100%;box-sizing:border-box;border:none;font:inherit;padding:2px 8px;background:transparent;color:var(--fg);vertical-align:middle}
+ table.grid td textarea{display:block;resize:vertical;white-space:pre-wrap}
  /* The "Set NULL" button next to the input is a regular <button> (height:28px by default) - taller
     than a grid row, which was what was actually forcing the row to grow while editing. Shrunk to
     match the cell instead. */
  table.grid td button{height:19px;min-width:0;padding:0 4px;border:1px solid var(--bd2);vertical-align:middle}
- table.grid td input:focus{background:var(--hover);outline:none}
+ table.grid td input:focus,table.grid td textarea:focus{background:var(--hover);outline:none}
  input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none}
  .delcell{color:#c00;cursor:pointer;text-align:center;width:22px}
  .status{padding:3px 8px;font-size:12px;color:var(--fg);border-top:1px solid var(--bd2);background:var(--panel)} .status.err{color:#e06}
@@ -724,8 +725,10 @@ function inputBox(opts){return new Promise(res=>{_inpResolve=res;$('inpTitle').t
  // A textarea field (e.g. editing a saved query's SQL) already resizes both ways like any browser
  // textarea, but the dialog's normal 460px width cramps that - widen it so there's real room to
  // drag into, matching the cell-edit modal's more generous default size.
+ // opts.width lets a caller with a denser form (several selects, not just one textarea) ask for
+ // more room directly, instead of every such case needing its own heuristic here.
  const hasTa=(opts.fields||[]).some(f=>f.type==='textarea');
- const mbox=$('mInput').querySelector('.box');mbox.style.width=hasTa?'700px':'460px';mbox.style.maxWidth=hasTa?'95vw':'92vw';
+ const mbox=$('mInput').querySelector('.box');mbox.style.width=opts.width||(hasTa?'700px':'460px');mbox.style.maxWidth=opts.maxWidth||(hasTa?'95vw':'92vw');
  $('inpOk').textContent=opts.okText||'OK';show('mInput');setTimeout(()=>{const f0=box.querySelector('input,textarea');if(f0){f0.focus();f0.select&&f0.select();}},40);});}
 function inpOk(){const out={};$('inpFields').querySelectorAll('input,textarea,select').forEach(i=>{out[i.id.slice(4)]=(i.type==='checkbox')?i.checked:i.value;});hide('mInput');const r=_inpResolve;_inpResolve=null;if(r)r(out);}
 function inpCancel(){hide('mInput');const r=_inpResolve;_inpResolve=null;if(r)r(null);}
@@ -2496,29 +2499,50 @@ function gridKeyNav(id,e){const t=T(id);if(!t||!t.pk)return;const f=gridFocus[id
 // inline edit is mid-flight, so waiting around just made the tint feel laggy for no real benefit.
 function cellClick(td,id,ri,ci){if(td.querySelector('input'))return;inlineEdit(td,id,ri,ci);}
 function insClick(td,id,ii,col){if(td.querySelector('input'))return;inlineEditIns(td,id,ii,col);}
+// Reverts a single cell back to its plain display markup - same output renderBody would have
+// produced for it, but touching only this one <td> instead of tearing down and rebuilding the
+// entire grid. Discarding an inline edit (Escape, or blur with nothing typed) used to call the
+// full renderGrid(id), and its blur path in particular runs after a 120ms delay - long enough that
+// clicking straight into a DIFFERENT cell to start editing it, then having this cell's delayed
+// "nothing changed" cleanup fire afterward, would wipe out that other cell's fresh inline editor
+// out from under the user (intermittently, depending on exact timing) since a full grid rebuild
+// regenerates every cell from persisted state, and a not-yet-committed inline edit isn't part of
+// that state. Reverting only the one cell that actually needs reverting avoids the whole class of
+// race entirely.
+function cellRevert(td,id,ri,ci){const t=T(id);const key=ri+':'+ci;const pend=t.pending&&(key in t.pending.upd);const val=pend?t.pending.upd[key]:t.rows[ri][ci];
+ td.className='editable'+(pend?' dirty':'');td.title=String(clip(val,300));td.innerHTML=cellHtml(val,t.bitCols&&t.bitCols[ci]);}
+function insCellRevert(td,id,ii,col){const t=T(id);const v=t.pending.ins[ii][col];const ci=t.cols.indexOf(col);
+ td.className='editable';td.title=(v===undefined?'undefined':String(v));td.innerHTML=cellHtml(v===undefined?null:v,t.bitCols&&t.bitCols[ci]);}
 async function inlineEdit(td,id,ri,ci){const t=T(id);const key=ri+':'+ci;const cur=(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci];
- if(cur!=null&&/[\r\n]/.test(String(cur))){editCell(td,id,ri,ci);return;}
  // Enum/boolean columns always go through editCell's dropdown - a plain inline text input would
  // let you type a value the column can't actually hold, which the double-click path already avoids.
  const colType=await getColType(id,t.cols[ci]);
  if(colType&&(/^enum\(/i.test(colType)||/^tinyint\(1\)/i.test(colType))){editCell(td,id,ri,ci);return;}
+ // A value with embedded newlines used to jump straight to the big modal on a single click, which
+ // read as "one click opened the double-click editor" - it's a plain multi-line <textarea> inline
+ // instead now, sized to roughly fit the existing line count; the big modal is still one
+ // double-click away for anything that genuinely needs more room.
+ const isMulti=cur!=null&&/[\r\n]/.test(String(cur));
  // No inp.select() here on purpose - auto-selecting the whole value made entering edit mode look
  // like a big blue highlight box instead of just dropping into the text, so the cursor is placed
  // at the end of the existing value instead (still lets you type to replace via Home+shift, etc).
- td.classList.add('cellEditing');td.innerHTML='<input><button tabindex="-1" title="Set NULL" style="padding:0 4px">&empty;</button>';const inp=td.querySelector('input');const nb=td.querySelector('button');inp.value=(cur===null?'':cur);inp.focus();const vlen=inp.value.length;inp.setSelectionRange(vlen,vlen);let done=false,dirty=false;
+ td.classList.add('cellEditing');td.innerHTML=(isMulti?'<textarea rows="'+Math.min(8,Math.max(2,String(cur).split(/\r\n|\r|\n/).length))+'"></textarea>':'<input>')+'<button tabindex="-1" title="Set NULL" style="padding:0 4px">&empty;</button>';const inp=td.querySelector(isMulti?'textarea':'input');const nb=td.querySelector('button');inp.value=(cur===null?'':cur);inp.focus();const vlen=inp.value.length;inp.setSelectionRange(vlen,vlen);let done=false,dirty=false;
  const set=v=>{done=true;setUpd(id,ri,ci,v);};
  inp.addEventListener('input',()=>dirty=true);
  nb.addEventListener('mousedown',e=>{e.preventDefault();set(null);});
- inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();if(dirty)set(inp.value);else{done=true;renderGrid(id);}}else if(e.key==='Escape'){done=true;renderGrid(id);}});
- inp.addEventListener('blur',()=>setTimeout(()=>{if(!done){if(dirty)set(inp.value);else renderGrid(id);}},120));}
+ // A plain Enter commits for a single-line input, but inserts a newline (as it always does in a
+ // textarea) for the multi-line case - Ctrl/Cmd+Enter commits there instead, same convention as
+ // "Run Query Selection" elsewhere in the app.
+ inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&(!isMulti||e.ctrlKey||e.metaKey)){e.preventDefault();if(dirty)set(inp.value);else{done=true;cellRevert(td,id,ri,ci);}}else if(e.key==='Escape'){done=true;cellRevert(td,id,ri,ci);}});
+ inp.addEventListener('blur',()=>setTimeout(()=>{if(!done){if(dirty)set(inp.value);else cellRevert(td,id,ri,ci);}},120));}
 function inlineEditIns(td,id,ii,col){const t=T(id);const cur=t.pending.ins[ii][col];
- if(cur!=null&&/[\r\n]/.test(String(cur))){editIns(td,id,ii,col);return;}
- td.classList.add('cellEditing');td.innerHTML='<input><button tabindex="-1" style="padding:0 4px" title="Set NULL">&empty;</button>';const inp=td.querySelector('input');const nb=td.querySelector('button');inp.value=(cur==null?'':cur);inp.focus();let done=false,dirty=false;
+ const isMulti=cur!=null&&/[\r\n]/.test(String(cur));
+ td.classList.add('cellEditing');td.innerHTML=(isMulti?'<textarea rows="'+Math.min(8,Math.max(2,String(cur).split(/\r\n|\r|\n/).length))+'"></textarea>':'<input>')+'<button tabindex="-1" style="padding:0 4px" title="Set NULL">&empty;</button>';const inp=td.querySelector(isMulti?'textarea':'input');const nb=td.querySelector('button');inp.value=(cur==null?'':cur);inp.focus();let done=false,dirty=false;
  const set=v=>{done=true;t.pending.ins[ii][col]=v;renderGrid(id);};
  inp.addEventListener('input',()=>dirty=true);
  nb.addEventListener('mousedown',e=>{e.preventDefault();set(null);});
- inp.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();if(dirty)set(inp.value);else{done=true;renderGrid(id);}}else if(e.key==='Escape'){done=true;renderGrid(id);}});
- inp.addEventListener('blur',()=>setTimeout(()=>{if(!done){if(dirty)set(inp.value);else renderGrid(id);}},120));}
+ inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&(!isMulti||e.ctrlKey||e.metaKey)){e.preventDefault();if(dirty)set(inp.value);else{done=true;insCellRevert(td,id,ii,col);}}else if(e.key==='Escape'){done=true;insCellRevert(td,id,ii,col);}});
+ inp.addEventListener('blur',()=>setTimeout(()=>{if(!done){if(dirty)set(inp.value);else insCellRevert(td,id,ii,col);}},120));}
 function cellMenu(e,id,ri,ci){e.preventDefault();const t=T(id);const key=ri+':'+ci;const cur=(t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];const items=[['Copy value',()=>{navigator.clipboard.writeText(cur===null?'':String(cur));log('Copied cell value.');}],['Copy row',()=>copyRow(id,ri)],['Copy rows (selected)',()=>copySelRows(id)],['Paste row here (overwrite)',()=>pasteRowInto(id,ri)],['Paste rows as new',()=>pasteRowsAsNew(id)],['Copy column: '+t.cols[ci],()=>copyColumn(id,ci)],['Edit full row (form)...',()=>rowForm(id,ri)],'-'];if(t.table){const col=t.cols[ci];items.push(['Quick filter',qfSub(id,col,cur)]);if(t.filterClauses&&t.filterClauses.length)items.push(['Clear filter ('+t.filterClauses.length+')',()=>clearFilters(id)]);
   const fkd=(t.fkDetails||[]).find(f=>f[0]===col);
   if(fkd&&cur!=null){items.push(['Go to referenced row ('+fkd[1]+'.'+fkd[2]+')',()=>goToFkRow(t.db,fkd[1],fkd[2],cur)]);}
@@ -3213,7 +3237,52 @@ async function openUsers(){const r=await api('/api/query',{sql:"SELECT User,Host
  if(!r.ok){toast(r.error,true);return;}r.rows.forEach(u=>{const d=document.createElement('div');d.className='uitem';d.textContent=u[0]+'@'+u[1];d.dataset.v=u[0]+'\x01'+u[1];d.onclick=()=>{[...sel.children].forEach(c=>c.classList.remove('sel'));d.classList.add('sel');window._selUser=d.dataset.v;showGrants();};sel.appendChild(d);});show('mUsers');}
 async function showGrants(){const v=window._selUser;if(!v)return;const[u,h]=v.split('\x01');const r=await api('/api/query',{sql:"SHOW GRANTS FOR "+lit(u)+"@"+lit(h)});$('grantsBox').textContent=r.ok?r.rows.map(x=>x[0]).join('\n'):r.error;}
 async function newUser(){const res=await inputBox({title:'New user',okText:'Create',fields:[{key:'user',label:'User name'},{key:'host',label:'Host',value:'%'},{key:'pw',label:'Password',type:'password'}]});if(!res||!res.user.trim())return;const h=res.host.trim()||'%';if(await exec("CREATE USER "+lit(res.user.trim())+"@"+lit(h)+" IDENTIFIED BY "+lit(res.pw),'Created user'))openUsers();}
-async function revokeUser(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const[u,h]=v.split('\x01');const res=await inputBox({title:'Revoke privileges',okText:'Revoke',fields:[{key:'g',label:'Privileges to revoke (e.g. ALL PRIVILEGES ON db.*)',value:'ALL PRIVILEGES ON *.*'}]});if(!res||!res.g.trim())return;if(await exec("REVOKE "+res.g.trim()+" FROM "+lit(u)+"@"+lit(h),'Revoked')){await exec('FLUSH PRIVILEGES','Flush');showGrants();}}
+async function revokeUser(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const[u,h]=v.split('\x01');const res=await grantRevokeDialog('revoke');if(!res||!res.g.trim())return;if(await exec("REVOKE "+res.g.trim()+" FROM "+lit(u)+"@"+lit(h),'Revoked')){await exec('FLUSH PRIVILEGES','Flush');showGrants();}}
+// Common privilege combos, similar to what Workbench's own privilege list offers - not exhaustive
+// (there's dozens of individual MySQL privileges), just the handful actually reached for often. The
+// free-text field underneath stays the source of truth: picking a preset/schema/table just (re)writes
+// it for you, and it's still hand-editable for anything these pickers don't cover.
+const GRANT_PRESETS=[
+ {value:'__custom__',label:'Custom (type below)'},
+ {value:'ALL PRIVILEGES',label:'ALL PRIVILEGES'},
+ {value:'SELECT',label:'SELECT (read-only)'},
+ {value:'SELECT, INSERT, UPDATE, DELETE',label:'SELECT, INSERT, UPDATE, DELETE'},
+ {value:'SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES',label:'SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES'},
+ {value:'EXECUTE',label:'EXECUTE (procedures/functions)'},
+ {value:'PROCESS, RELOAD',label:'PROCESS, RELOAD'},
+ {value:'REPLICATION SLAVE, REPLICATION CLIENT',label:'REPLICATION SLAVE, REPLICATION CLIENT'},
+ {value:'USAGE',label:'USAGE (no privileges)'},
+];
+// Shared by grantUser()/revokeUser() - the dialog itself doesn't know or care which one it's for
+// beyond the title/button text; the caller still does the actual GRANT/REVOKE + FLUSH PRIVILEGES.
+async function grantRevokeDialog(mode){
+ const isGrant=mode==='grant';
+ const sr=await api('/api/schemas');const schemas=sr.ok?sr.schemas.map(s=>s.name):[];
+ const fields=[
+  {key:'preset',label:'Common privileges',type:'select',options:GRANT_PRESETS,value:'__custom__'},
+  {key:'schema',label:'Schema',type:'select',options:[{value:'*',label:'* (all databases)'},...schemas.map(s=>({value:s,label:s}))],value:'*'},
+  {key:'table',label:'Table',type:'select',options:[{value:'*',label:'* (all tables)'}],value:'*'},
+ ];
+ if(isGrant)fields.push({key:'wgo',label:'With grant option',type:'checkbox',value:false});
+ fields.push({key:'g',label:'Privileges'+(isGrant?' to grant':' to revoke')+' (e.g. ALL PRIVILEGES ON db.*) - editable directly, or built from the pickers above',value:'ALL PRIVILEGES ON *.*'});
+ const p=inputBox({title:isGrant?'Grant privileges':'Revoke privileges',okText:isGrant?'Grant':'Revoke',width:'560px',fields});
+ const presetSel=$('inp_preset'),schemaSel=$('inp_schema'),tableSel=$('inp_table'),gInput=$('inp_g'),wgoCk=isGrant?$('inp_wgo'):null;
+ function rebuild(){
+  const on=(schemaSel.value==='*'?'*':qid(schemaSel.value))+'.'+(tableSel.value==='*'?'*':qid(tableSel.value));
+  const priv=presetSel.value==='__custom__'?(gInput.value.replace(/\s+ON\s+\S+\.\S+.*$/i,'').trim()||'SELECT'):presetSel.value;
+  gInput.value=priv+' ON '+on+(wgoCk&&wgoCk.checked?' WITH GRANT OPTION':'');
+ }
+ async function refreshTables(){
+  if(schemaSel.value==='*'){tableSel.innerHTML='<option value="*">* (all tables)</option>';tableSel.disabled=true;return;}
+  tableSel.disabled=false;tableSel.innerHTML='<option value="*">* (all tables)</option>';
+  const tr=await api('/api/query',{sql:'SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA='+lit(schemaSel.value)+' ORDER BY TABLE_NAME'});
+  if(tr.ok)tr.rows.forEach(r=>{const o=document.createElement('option');o.value=r[0];o.textContent=r[0];tableSel.appendChild(o);});
+ }
+ presetSel.onchange=rebuild;tableSel.onchange=rebuild;if(wgoCk)wgoCk.onchange=rebuild;
+ schemaSel.onchange=async()=>{await refreshTables();rebuild();};
+ await refreshTables();
+ return await p;
+}
 async function lockUser(lock){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const[u,h]=v.split('\x01');const verb=lock?'LOCK':'UNLOCK';if(await exec("ALTER USER "+lit(u)+"@"+lit(h)+" ACCOUNT "+verb,(lock?'Locked ':'Unlocked ')+u+'@'+h)){showGrants();}}
 async function changePassword(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const parts=v.split('\x01');const u=parts[0],h=parts[1];
  const res=await inputBox({title:'Change password for '+u+'@'+h,okText:'Change',fields:[{key:'pw',label:'New password',type:'password',value:''},{key:'pw2',label:'Confirm new password',type:'password',value:''}]});
@@ -3223,7 +3292,7 @@ async function changePassword(){const v=window._selUser;if(!v){toast('Select a u
  const r=await api('/api/exec',{sql:sql});
  if(r.ok){log('Password changed for '+u+'@'+h+'.');}else{alert('Failed: '+(r.error||'unknown'));}}
 async function dropUser(){const v=window._selUser;if(!v)return;const[u,h]=v.split('\x01');if(!(await ask('DROP USER '+u+'@'+h+' ?')))return;if(await exec("DROP USER "+lit(u)+"@"+lit(h),'Dropped user'))openUsers();}
-async function grantUser(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const[u,h]=v.split('\x01');const res=await inputBox({title:'Grant privileges',okText:'Grant',fields:[{key:'g',label:'Privileges (e.g. ALL PRIVILEGES ON db.*)',value:'ALL PRIVILEGES ON *.*'}]});if(!res||!res.g.trim())return;if(await exec("GRANT "+res.g.trim()+" TO "+lit(u)+"@"+lit(h),'Granted')){await exec('FLUSH PRIVILEGES','Flush');showGrants();}}
+async function grantUser(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const[u,h]=v.split('\x01');const res=await grantRevokeDialog('grant');if(!res||!res.g.trim())return;if(await exec("GRANT "+res.g.trim()+" TO "+lit(u)+"@"+lit(h),'Granted')){await exec('FLUSH PRIVILEGES','Flush');showGrants();}}
 
 // ---- table designer ----
 const DTYPES=['INT','BIGINT','TINYINT','SMALLINT','MEDIUMINT','DECIMAL','FLOAT','DOUBLE','BIT','BOOLEAN','CHAR','VARCHAR','TEXT','MEDIUMTEXT','LONGTEXT','DATE','DATETIME','TIMESTAMP','TIME','YEAR','JSON','BLOB','LONGBLOB','ENUM','BINARY','VARBINARY'];
