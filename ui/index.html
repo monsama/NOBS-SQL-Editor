@@ -231,8 +231,8 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  </div>
  <div id="impLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:220px;overflow:auto;margin-top:6px"></div></div></div>
 
-<div class="modal floating" id="mCompare"><div class="box" style="width:820px;max-width:94vw;top:50px;left:90px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mCompare')" title="Drag to move"><h3 style="margin:0 0 10px">Compare Databases <span class="muted" style="font-size:13px;cursor:help;font-weight:400" title="Connects to both sides independently of whatever's currently active, using each saved connection's stored password - so both the source and target connection need &quot;Save password&quot; checked (Edit... on the connection) or this will fail to log in.">&#9432;</span></h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mCompare')" title="Maximize" id="maxBtn_mCompare" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompare')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
- <div class="row" style="display:flex;gap:10px">
+<div class="modal floating" id="mCompare"><div class="box" style="width:820px;max-width:94vw;height:640px;display:flex;flex-direction:column;overflow:hidden;top:50px;left:90px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mCompare')" title="Drag to move"><h3 style="margin:0 0 10px">Compare Databases <span class="muted" style="font-size:13px;cursor:help;font-weight:400" title="Connects to both sides independently of whatever's currently active, using each saved connection's stored password - so both the source and target connection need &quot;Save password&quot; checked (Edit... on the connection) or this will fail to log in.">&#9432;</span></h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mCompare')" title="Maximize" id="maxBtn_mCompare" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompare')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
+ <div class="row" style="display:flex;gap:10px;flex:none">
    <div style="flex:1"><div class="muted" style="font-size:11px;margin-bottom:3px">Source</div>
      <select id="cmpSrcConn" style="width:100%" onchange="cmpResetResults();cmpLoadDbs('src')"></select>
      <select id="cmpSrcDb" style="width:100%;margin-top:4px" onchange="cmpResetResults();cmpSrcDbChanged()"></select></div>
@@ -241,43 +241,48 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
      <select id="cmpTgtConn" style="width:100%" onchange="cmpResetResults();cmpLoadDbs('tgt')"></select>
      <select id="cmpTgtDb" style="width:100%;margin-top:4px" onchange="cmpResetResults();cmpResetTablePicker()"></select></div>
  </div>
- <div class="row"><a href="#" onclick="cmpToggleTablePicker();return false" style="font-size:11px;color:var(--accent)">Choose specific tables (optional)</a></div>
-<div id="cmpTablesBox" style="display:none;max-height:140px;overflow:auto;border:1px solid var(--bd2);border-radius:4px;padding:4px 8px;margin-bottom:6px"></div>
-<div class="row"><button class="go" onclick="runCompare()">Run comparison</button><span id="cmpRoNote" class="muted" style="font-size:11px;margin-left:8px;display:none;color:var(--del)">Target is read-only / safe mode - apply will be blocked.</span></div>
- <div class="row" id="cmpTallyRow" style="display:none"><span id="cmpTally" class="muted" style="font-size:11px"></span></div>
- <div class="row" id="cmpRowScanRow" style="display:none"><button id="cmpRowScanBtn" onclick="cmpScanRowDiffs()" title="For every table marked structure identical, run the same missing-rows + content check that clicking rows… on it does - just automatically, one table at a time, so you know which ones are worth opening. If &quot;Choose specific tables&quot; has checked tables, only those are scanned.">Check row differences</button><span id="cmpRowScanStatus" class="muted" style="font-size:11px;margin-left:8px"></span></div>
- <div class="row" id="cmpResultsSearchRow" style="display:none"><input id="cmpResultSearch" type="text" placeholder="filter results by table name…" oninput="cmpFilterResults()" style="width:100%;font-size:12px"></div>
- <div id="cmpResults" style="max-height:320px;overflow:auto;margin-top:6px"></div>
- <div class="row" style="display:flex;justify-content:space-between;align-items:center">
+ <div class="row" style="flex:none"><a href="#" onclick="cmpToggleTablePicker();return false" style="font-size:11px;color:var(--accent)">Choose specific tables (optional)</a></div>
+<div id="cmpTablesBox" style="display:none;max-height:140px;overflow:auto;border:1px solid var(--bd2);border-radius:4px;padding:4px 8px;margin-bottom:6px;flex:none"></div>
+<div class="row" style="flex:none"><button class="go" onclick="runCompare()">Run comparison</button><span id="cmpRoNote" class="muted" style="font-size:11px;margin-left:8px;display:none;color:var(--del)">Target is read-only / safe mode - apply will be blocked.</span></div>
+ <div class="row" id="cmpTallyRow" style="display:none;flex:none"><span id="cmpTally" class="muted" style="font-size:11px"></span></div>
+ <div class="row" id="cmpRowScanRow" style="display:none;flex:none"><button id="cmpRowScanBtn" onclick="cmpScanRowDiffs()" title="For every table marked structure identical, run the same missing-rows + content check that clicking rows… on it does - just automatically, one table at a time, so you know which ones are worth opening. If &quot;Choose specific tables&quot; has checked tables, only those are scanned.">Check row differences</button><span id="cmpRowScanStatus" class="muted" style="font-size:11px;margin-left:8px"></span></div>
+ <div class="row" id="cmpResultsSearchRow" style="display:none;flex:none"><input id="cmpResultSearch" type="text" placeholder="filter results by table name…" oninput="cmpFilterResults()" style="width:100%;font-size:12px"></div>
+ <!-- flex:1 (not a fixed max-height) so the results list actually grows to use whatever room the
+      window gives it - at the default size, when maximized, and as the window itself is resized -
+      instead of capping out and leaving the rest of a tall window empty below it. -->
+ <div id="cmpResults" style="overflow:auto;margin-top:6px;flex:1;min-height:80px"></div>
+ <div class="row" style="display:flex;justify-content:space-between;align-items:center;flex:none">
    <span id="cmpSummary" class="muted" style="font-size:11px"></span>
    <span style="display:inline-flex;gap:6px"><button onclick="previewCompareSql()">Preview SQL</button><button class="go write" onclick="applyCompare()">Apply to target</button><button onclick="cmpCloseAndCancel()">Close</button></span>
  </div>
- <div id="cmpLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:140px;overflow:auto;margin-top:6px"></div>
+ <div id="cmpLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:140px;overflow:auto;margin-top:6px;flex:none"></div>
 </div></div>
 
-<div class="modal floating" id="mCompareRows"><div class="box" style="width:900px;max-width:96vw;top:50px;left:110px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mCompareRows')" title="Drag to move"><h3 id="cmprTitle" style="margin:0 0 10px">Row comparison</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompareRows')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
+<div class="modal floating" id="mCompareRows"><div class="box" style="width:900px;max-width:96vw;height:700px;display:flex;flex-direction:column;overflow:hidden;top:50px;left:110px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mCompareRows')" title="Drag to move"><h3 id="cmprTitle" style="margin:0 0 10px">Row comparison</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mCompareRows')" title="Maximize" id="maxBtn_mCompareRows" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mCompareRows')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
 
- <div class="muted" style="font-size:12px;font-weight:600;margin-top:4px">Missing on target</div>
- <div id="cmprNote" class="muted" style="font-size:11px;margin-bottom:6px"></div>
- <div class="row"><a href="#" onclick="cmprSetAll(true);return false" style="font-size:11px;color:var(--accent)">All</a> / <a href="#" onclick="cmprSetAll(false);return false" style="font-size:11px;color:var(--accent)">None</a> <span id="cmprSummary" class="muted" style="font-size:11px;margin-left:8px"></span></div>
- <div id="cmprGrid" style="max-height:220px;overflow:auto;border:1px solid var(--bd2);border-radius:4px;margin-top:4px"></div>
- <div class="row" style="display:flex;align-items:center;gap:10px">
+ <div class="muted" style="font-size:12px;font-weight:600;margin-top:4px;flex:none">Missing on target</div>
+ <div id="cmprNote" class="muted" style="font-size:11px;margin-bottom:6px;flex:none"></div>
+ <div class="row" style="flex:none"><a href="#" onclick="cmprSetAll(true);return false" style="font-size:11px;color:var(--accent)">All</a> / <a href="#" onclick="cmprSetAll(false);return false" style="font-size:11px;color:var(--accent)">None</a> <span id="cmprSummary" class="muted" style="font-size:11px;margin-left:8px"></span></div>
+ <!-- flex:1 on both grids below (not a fixed max-height) so they share whatever extra room a
+      taller/maximized window gives them, instead of capping out with empty space left over. -->
+ <div id="cmprGrid" style="overflow:auto;border:1px solid var(--bd2);border-radius:4px;margin-top:4px;flex:1;min-height:60px"></div>
+ <div class="row" style="display:flex;align-items:center;gap:10px;flex:none">
    <button class="go write" onclick="cmprApply()">Insert selected rows</button>
    <span id="cmprRoNote" class="muted" style="font-size:11px;display:none;color:var(--del)">Target is read-only / safe mode - blocked.</span>
    <span id="cmprMissingNote" class="muted" style="font-size:11px;display:none;color:var(--del)">Table doesn't exist on the target yet - create it first (via the schema comparison's "details"), then come back to insert rows.</span>
  </div>
 
- <div class="muted" style="font-size:12px;font-weight:600;margin-top:14px">Column differences (rows matched by id, content compared column-by-column)</div>
- <div id="cmprDiffNote" class="muted" style="font-size:11px;margin-bottom:6px"></div>
- <div class="row"><a href="#" onclick="cmprDiffSetAll(true);return false" style="font-size:11px;color:var(--accent)">All</a> / <a href="#" onclick="cmprDiffSetAll(false);return false" style="font-size:11px;color:var(--accent)">None</a> <span id="cmprDiffSummary" class="muted" style="font-size:11px;margin-left:8px"></span></div>
- <div id="cmprDiffGrid" style="max-height:220px;overflow:auto;border:1px solid var(--bd2);border-radius:4px;margin-top:4px"></div>
- <div class="row" style="display:flex;align-items:center;gap:10px">
+ <div class="muted" style="font-size:12px;font-weight:600;margin-top:14px;flex:none">Column differences (rows matched by id, content compared column-by-column)</div>
+ <div id="cmprDiffNote" class="muted" style="font-size:11px;margin-bottom:6px;flex:none"></div>
+ <div class="row" style="flex:none"><a href="#" onclick="cmprDiffSetAll(true);return false" style="font-size:11px;color:var(--accent)">All</a> / <a href="#" onclick="cmprDiffSetAll(false);return false" style="font-size:11px;color:var(--accent)">None</a> <span id="cmprDiffSummary" class="muted" style="font-size:11px;margin-left:8px"></span></div>
+ <div id="cmprDiffGrid" style="overflow:auto;border:1px solid var(--bd2);border-radius:4px;margin-top:4px;flex:1;min-height:60px"></div>
+ <div class="row" style="display:flex;align-items:center;gap:10px;flex:none">
    <button class="warn write" onclick="cmprDiffApply()" title="Overwrites the target row's differing columns with the source values shown">Update selected rows (overwrites target)</button>
    <span id="cmprDiffRoNote" class="muted" style="font-size:11px;display:none;color:var(--del)">Target is read-only / safe mode - blocked.</span>
  </div>
 
- <div class="row" style="display:flex;justify-content:flex-end;margin-top:6px"><button onclick="cmprCloseAndCancel()">Close</button></div>
- <div id="cmprLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:120px;overflow:auto;margin-top:6px"></div>
+ <div class="row" style="display:flex;justify-content:flex-end;margin-top:6px;flex:none"><button onclick="cmprCloseAndCancel()">Close</button></div>
+ <div id="cmprLog" class="muted" style="white-space:pre-wrap;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:11px;max-height:120px;overflow:auto;margin-top:6px;flex:none"></div>
 </div></div>
 
 <div class="modal floating" id="mUsers"><div class="box" style="width:1050px;max-width:96vw;top:40px;left:70px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none" onmousedown="floatDragStart(event,'mUsers')" title="Drag to move"><h3 style="margin:0 0 10px">Users &amp; Privileges</h3><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mUsers')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></div>
@@ -3629,10 +3634,12 @@ function cmprDiffRender(){
   r.colDiffs.forEach((cd,ci)=>{
    const isPk=(_cmprDiffState.pkCols||[]).indexOf(cd.col)>=0;const isFk=(_cmprDiffState.fkCols||[]).indexOf(cd.col)>=0;
    const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');
-   const srcClipped=cd.src!==null&&String(cd.src).length>80,tgtClipped=cd.tgt!==null&&String(cd.tgt).length>80;
-   h+='<tr><td style="padding:2px 6px;font-weight:600">'+esc(cd.col)+kb+'</td>'
-    +'<td style="padding:2px 6px;color:var(--erd-pk,#5dcaa5)'+(srcClipped?';cursor:pointer':'')+'" title="'+(srcClipped?'Click to view full value':'')+'"'+(srcClipped?' onclick="cmprDiffViewCell('+ri+','+ci+',\'src\')"':'')+'>'+(cd.src===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(String(cd.src),80)))+'</td>'
-    +'<td style="padding:2px 6px;color:var(--diff-tgt,#f0997b)'+(tgtClipped?';cursor:pointer':'')+'" title="'+(tgtClipped?'Click to view full value':'')+'"'+(tgtClipped?' onclick="cmprDiffViewCell('+ri+','+ci+',\'tgt\')"':'')+'>'+(cd.tgt===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(String(cd.tgt),80)))+'</td></tr>';
+   // Every cell here opens the viewer, not just the ones long enough to be visibly clipped -
+   // consistent "click to inspect" affordance across the whole grid beats a mix of clickable and
+   // non-clickable cells that looks identical until you try clicking one.
+   h+='<tr><td style="padding:2px 6px;font-weight:600;cursor:pointer" title="Click to view" onclick="cmprDiffViewCell('+ri+','+ci+',\'col\')">'+esc(cd.col)+kb+'</td>'
+    +'<td style="padding:2px 6px;color:var(--erd-pk,#5dcaa5);cursor:pointer" title="Click to view full value" onclick="cmprDiffViewCell('+ri+','+ci+',\'src\')">'+(cd.src===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(String(cd.src),80)))+'</td>'
+    +'<td style="padding:2px 6px;color:var(--diff-tgt,#f0997b);cursor:pointer" title="Click to view full value" onclick="cmprDiffViewCell('+ri+','+ci+',\'tgt\')">'+(cd.tgt===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(String(cd.tgt),80)))+'</td></tr>';
   });
   h+='</table></div>';
  });
@@ -3640,7 +3647,9 @@ function cmprDiffRender(){
 }
 // Same reasoning as cmprViewCell above: only wired up on cells actually clipped, reopens the
 // shared read-only cell-viewer rather than a one-off for this grid.
-function cmprDiffViewCell(ri,ci,which){const cd=_cmprDiffState.rows[ri].colDiffs[ci];const v=which==='src'?cd.src:cd.tgt;viewText(cd.col+' ('+(which==='src'?'Source':'Target')+')',v,{readonly:true});}
+function cmprDiffViewCell(ri,ci,which){const cd=_cmprDiffState.rows[ri].colDiffs[ci];
+ if(which==='col'){viewText('Column name',cd.col,{readonly:true});return;}
+ const v=which==='src'?cd.src:cd.tgt;viewText(cd.col+' ('+(which==='src'?'Source':'Target')+')',v,{readonly:true});}
 function cmprDiffUpdateSummary(){if(!_cmprDiffState){$('cmprDiffSummary').textContent='';return;}const n=_cmprDiffState.rows.filter(r=>r.checked).length;$('cmprDiffSummary').textContent=n+' of '+_cmprDiffState.rows.length+' selected';}
 function cmprDiffSetAll(on){if(!_cmprDiffState)return;_cmprDiffState.rows.forEach(r=>r.checked=on);cmprDiffRender();}
 async function cmprDiffApply(){
@@ -3664,7 +3673,9 @@ function cmprRender(){
  h+='</tr>';
  _cmprState.rows.forEach((r,ri)=>{
   h+='<tr style="border-top:1px solid var(--bd2)"><td style="padding:3px 6px"><input type="checkbox" '+(r.checked?'checked':'')+' onclick="_cmprState.rows['+ri+'].checked=this.checked;cmprUpdateSummary()"></td>';
-  r.data.forEach((v,ci)=>{const clipped=v!==null&&String(v).length>120;h+='<td style="padding:3px 6px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis'+(clipped?';cursor:pointer':'')+'" title="'+esc(v===null?'NULL':(clipped?'Click to view full value':v))+'"'+(clipped?' onclick="cmprViewCell('+ri+','+ci+')"':'')+'>'+(v===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(v,120)))+'</td>';});
+  // Every non-NULL field opens the viewer, not just ones long enough to be visibly clipped - a
+  // consistent click-to-inspect affordance across the whole grid, matching the column-diff table.
+  r.data.forEach((v,ci)=>{h+='<td style="padding:3px 6px;white-space:nowrap;max-width:220px;overflow:hidden;text-overflow:ellipsis'+(v===null?'':';cursor:pointer')+'" title="'+esc(v===null?'NULL':'Click to view full value')+'"'+(v===null?'':' onclick="cmprViewCell('+ri+','+ci+')"')+'>'+(v===null?'<span class="muted" style="font-style:italic">NULL</span>':esc(clip(v,120)))+'</td>';});
   h+='</tr>';
  });
  h+='</table>';box.innerHTML=h;cmprUpdateSummary();
