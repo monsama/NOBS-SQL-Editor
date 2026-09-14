@@ -2778,7 +2778,12 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
    const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('UPDATE '+tbl+' SET '+sets.join(',')+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
  t.pending.del.forEach(ri=>{const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('DELETE FROM '+tbl+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
  t.pending.ins.forEach(row=>{const cols=Object.keys(row);if(!cols.length)return;S.push('INSERT INTO '+tbl+' ('+cols.map(qid).join(',')+') VALUES ('+cols.map(c=>litForCol(t.cols.indexOf(c),row[c])).join(',')+');');});
- if(!S.length)return;log('APPLY:\n'+S.join('\n'));
+ // Reachable even though Apply is only enabled when something's pending: a +Row with every
+ // column left blank produces no INSERT (a deliberate no-op, not a bug - see the ins.forEach
+ // above), and if that's the ONLY thing pending, S ends up empty with nothing to tell the user
+ // apply didn't silently do something - say so instead of just doing nothing visibly.
+ if(!S.length){toast('Nothing to apply - new row(s) with no values are ignored. Fill in a column, or Revert to remove them.',true);return;}
+ log('APPLY:\n'+S.join('\n'));
  // Runs as one transaction, so a failure part-way leaves the table exactly as it was.
  // Foreign keys are NOT disabled here: they were, which let an edit point a row at a
  // parent that does not exist and silently break referential integrity the schema was
