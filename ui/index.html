@@ -2102,7 +2102,17 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
  }
 }
 
-function setRunning(id,running){const rb=$('runbtn_'+id),cb=$('cancelbtn_'+id);if(!rb||!cb)return;rb.style.visibility=running?'hidden':'';cb.style.visibility=running?'':'hidden';
+// Swapping to Cancel is delayed 900ms rather than instant: most runs - including every silent
+// background "fetch more rows on scroll" call, which goes through this exact same function -
+// finish well under that, so the button bar never flips at all for the common case instead of
+// flashing to Cancel and back within a fraction of a second on every one of them. A run that's
+// still going when the delay elapses shows Cancel immediately, same as before; cancelling (or
+// finishing) always clears the pending timer so a since-completed run can't pop it up late.
+const _runDelayTimers={};
+function setRunning(id,running){const rb=$('runbtn_'+id),cb=$('cancelbtn_'+id);if(!rb||!cb)return;
+ if(_runDelayTimers[id]){clearTimeout(_runDelayTimers[id]);delete _runDelayTimers[id];}
+ if(running){_runDelayTimers[id]=setTimeout(()=>{delete _runDelayTimers[id];rb.style.visibility='hidden';cb.style.visibility='';},900);}
+ else{rb.style.visibility='';cb.style.visibility='hidden';}
  const tb=$('tabbtn_'+id);if(tb){let dot=tb.querySelector('.runningdot');if(running){if(!dot){dot=document.createElement('span');dot.className='runningdot';dot.title='Query running';tb.insertBefore(dot,tb.firstChild);}}else if(dot){dot.remove();}}}
 async function cancelQuery(id){const t=T(id);if(!t)return;if(t.abortCtrl){try{t.abortCtrl.abort();}catch(e){}}
  const rid=t.runningReqId;
@@ -2325,10 +2335,19 @@ function renderBody(id){const t=T(id);const ed=!!t.pk;if(!t.selected)t.selected=
  $('tbody_'+id).innerHTML=h;
  if(wrap&&slice.length){const sampleTr=wrap.querySelector('tbody tr[data-r]');if(sampleTr){const mh=sampleTr.getBoundingClientRect().height;if(mh>4)t._rowH=mh;}}
  updateEditBar(id);}
-function updateEditBar(id){const t=T(id);if(!t.pk){$('edit_'+id).innerHTML='';return;}
+// renderBody() (the grid's own virtualized-scroll re-render, up to ~60/sec while actively
+// scrolling) calls this every time, but the pending count/selection it depends on almost never
+// actually changes between those calls - rebuilding the whole innerHTML anyway tore the buttons
+// down and recreated them dozens of times a second during plain scrolling, which is what read as
+// a flicker. Skip the rebuild entirely when the two values this bar's markup actually depends on
+// haven't changed since the last time it was built.
+function updateEditBar(id){const t=T(id);const el=$('edit_'+id);if(!el)return;if(!t.pk){if(el.innerHTML)el.innerHTML='';return;}
  const n=Object.keys(t.pending.upd).length+t.pending.del.size+t.pending.ins.length;
  const hasSel=t.selected&&t.selected.size>0;
- $('edit_'+id).innerHTML='<button class="write" onclick="addRow(\''+id+'\')">+ Row</button><button class="warn write" '+(hasSel?'':'disabled')+' title="Mark all checked rows for deletion (applied on Apply)" onclick="deleteSel(\''+id+'\')">Delete selected</button><span class="tbsep"></span><button class="go write" '+(n?'':'disabled')+' onclick="applyChanges(\''+id+'\')">Apply</button><button '+(n?'':'disabled')+' onclick="revertChanges(\''+id+'\')">Revert</button><span class="pill">'+n+' pending</span>';}
+ const sig=n+':'+hasSel;
+ if(el.dataset.sig===sig)return;
+ el.dataset.sig=sig;
+ el.innerHTML='<button class="write" onclick="addRow(\''+id+'\')">+ Row</button><button class="warn write" '+(hasSel?'':'disabled')+' title="Mark all checked rows for deletion (applied on Apply)" onclick="deleteSel(\''+id+'\')">Delete selected</button><span class="tbsep"></span><button class="go write" '+(n?'':'disabled')+' onclick="applyChanges(\''+id+'\')">Apply</button><button '+(n?'':'disabled')+' onclick="revertChanges(\''+id+'\')">Revert</button><span class="pill">'+n+' pending</span>';}
 // MySQL's own DATE/DATETIME/TIME text format <-> what a native <input type="date"/"datetime-
 // local"/"time"> needs. Deliberately conservative: anything the native widget can't faithfully
 // round-trip - a zero-date ('0000-00-00'), a zero month/day, a TIME past the widget's 00:00:00-
