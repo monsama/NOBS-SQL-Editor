@@ -1663,7 +1663,7 @@ function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqu
  tb.addEventListener('drop',e=>{e.preventDefault();tb.classList.remove('dragover');const srcId=e.dataTransfer.getData('text/plain');if(!srcId||srcId===id)return;reorderTab(srcId,id);});
  $('tabsbar').appendChild(tb);saveSession();
  const pane=document.createElement('div');pane.className='tabpane';pane.id='pane_'+id;
- const applyBtn=tab.ddl?'<button class="go write" onclick="applyDdl(\''+id+'\')">Apply (recreate)</button>':'';const lastBtn=tab.ddl?'':'<button title="Toggle between the current query and the last one you ran" onclick="toggleLast(\''+id+'\')">\u21C4 Last query</button>';const selBtn=tab.table?'<button title="Toggle between your query and SELECT * (the whole table)" onclick="toggleAll(\''+id+'\')">\u21C4 Base query</button>':'';
+ const applyBtn=tab.ddl?'<button class="go write" onclick="applyDdl(\''+id+'\')">Apply (recreate)</button>':'';const lastBtn=tab.ddl?'':'<button title="Toggle between the current query and the last one you ran" onclick="toggleLast(\''+id+'\')">\u21C4 Last query</button>';const selBtn='<span id="selbtn_'+id+'">'+selBtnHtml(id,tab.table)+'</span>';
  const pager='<span class="tbsep"></span><span id="pager_'+id+'" style="display:inline-flex;align-items:center;gap:6px"></span>';
  pane.innerHTML='<div class="edwrap" id="ew_'+id+'"><pre class="hl" id="hl_'+id+'"></pre><textarea class="editor" id="ed_'+id+'" spellcheck="false"></textarea></div>'+
   '<div class="edsplit" id="es_'+id+'" title="Drag to resize the editor"></div>'+
@@ -2056,6 +2056,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     t.cursorId=r.cursorId||null;t.hasMore=!!r.hasMore;t.cursorReqId=t.cursorId?reqId:null;
     if(!r.columns.length){st.textContent=r.message||'Query OK.';$('res_'+id).innerHTML='';updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';return;}
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
+    refreshRunTableBinding(id,lastStmt);
     if(t.table){const pk=await api('/api/pk',{db:t.db,table:t.table});if(pk.ok&&pk.pk.length){t.pk=pk.pk;t.pending={upd:{},del:new Set(),ins:[]};}
       const fk=await api('/api/fk',{db:t.db,table:t.table});if(fk.ok){t.fk=fk.fk||[];t.fkDetails=fk.fkDetails||[];}
       // Warms getColType's cache now (fire-and-forget) instead of waiting for the first cell click
@@ -2138,6 +2139,47 @@ function updatePager(id){const t=T(id);const p=$('pager_'+id);if(!p)return;const
  p.innerHTML='<span class="muted">'+fmtCount(total)+(t.hasMore?'+':'')+' row(s) loaded</span>';}
 function toggleLast(id){const t=T(id);const ta=$('ed_'+id);if(t.prevRun==null){log('No previous query to toggle to yet.');return;}ta.value=t.prevRun;if(typeof syncHl==='function')syncHl(id);runSql(id,t.prevRun);}
 function toggleAll(id){const t=T(id);if(!t.table)return;const ta=$('ed_'+id);const base='SELECT * FROM '+qid(t.db)+'.'+qid(t.table)+';';const cur=(ta.value||'').trim();if(cur!==base.trim()){t.beforeAll=ta.value;ta.value=base;}else if(t.beforeAll!=null){ta.value=t.beforeAll;}else{ta.value=base;}if(typeof syncHl==='function')syncHl(id);runSql(id,ta.value);}
+function selBtnHtml(id,table){return table?'<button title="Toggle between your query and SELECT * (the whole table)" onclick="toggleAll(\''+id+'\')">⇄ Base query</button>':'';}
+// t.table (and thus row-edit capability, export-as-table, quick filter, ...) used to be fixed
+// at whatever the tab was opened with and never revisited - so a tab opened as a non-editable
+// "SELECT COUNT(*)" stayed permanently non-editable even after retyping it into a plain
+// "SELECT * FROM x", AND (worse) a tab opened against one table that got hand-edited to query a
+// DIFFERENT one stayed silently bound to the ORIGINAL table for Apply's UPDATE/DELETE target -
+// editing rows that were never really identified by the PK it thought it had. Called once per
+// run with the statement actually about to execute, so t.table always reflects the query that
+// produced what's on screen right now, not whatever the tab happened to start as.
+function refreshRunTableBinding(id,lastStmt){
+ const t=T(id);if(!t||t.ddl)return;
+ const m=parseSingleEditableTable(lastStmt,t.db||curSchema);
+ const newTable=m?m.table:null, newDb=m?m.db:(t.db||curSchema);
+ if(t.table===newTable&&t.db===newDb)return;
+ t.table=newTable;t.db=newDb;
+ const sb=$('selbtn_'+id);if(sb)sb.innerHTML=selBtnHtml(id,t.table);
+}
+// Conservative on purpose: only recognizes "SELECT ... FROM <one table>" with no JOIN/comma-join,
+// UNION, GROUP BY, or DISTINCT - any of those can produce a result that isn't one row per primary
+// key, which is exactly what row-editing (and Apply's UPDATE/DELETE WHERE pk=...) assumes. No
+// alias support either, matching the one pattern this app itself ever generates (openRun/
+// toggleAll's own "SELECT * FROM db.table") - false negatives (a hand-written query that IS
+// safely editable but doesn't match) just mean no edit bar, never a false positive.
+function parseSingleEditableTable(sql,fallbackDb){
+ const head=sqlHead(sql).replace(/;\s*$/,'').trim();
+ if(!/^select\b/i.test(head))return null;
+ if(/^select\s+distinct\b/i.test(head))return null;
+ if(/\bunion\b/i.test(head))return null;
+ if(/\bgroup\s+by\b/i.test(head))return null;
+ const ID='(?:`(?:[^`]|``)+`|[A-Za-z_$][A-Za-z0-9_$]*)';
+ const m=head.match(new RegExp('\\bfrom\\s+('+ID+')(?:\\s*\\.\\s*('+ID+'))?','i'));
+ if(!m)return null;
+ // An aggregate call with no GROUP BY (already rejected above) still collapses the whole result
+ // to one row per group (or, with no grouping at all, ALL rows into one) - e.g. exactly the
+ // context menu's own "SELECT COUNT(*) FROM x", which must never be treated as row-editable.
+ if(/\b(count|sum|avg|min|max|group_concat|std|stddev|variance|bit_and|bit_or|bit_xor)\s*\(/i.test(head.slice(0,m.index)))return null;
+ const rest=head.slice(m.index+m[0].length).trim();
+ if(rest&&!/^(where|order\s+by|limit|having)\b/i.test(rest))return null;
+ const unq=s=>s.startsWith('`')?s.slice(1,-1).replace(/``/g,'`'):s;
+ return m[2]?{db:unq(m[1]),table:unq(m[2])}:{db:fallbackDb,table:unq(m[1])};
+}
 // t.filterClauses holds every active quick-filter condition (right-click "Quick filter"), ANDed
 // together - lets you stack e.g. status='active' AND created_at>'2024-01-01' instead of the last
 // pick replacing the one before it.
