@@ -2291,7 +2291,7 @@ function renderBody(id){const t=T(id);const ed=!!t.pk;if(!t.selected)t.selected=
 function updateEditBar(id){const t=T(id);if(!t.pk){$('edit_'+id).innerHTML='';return;}
  const n=Object.keys(t.pending.upd).length+t.pending.del.size+t.pending.ins.length;
  const hasSel=t.selected&&t.selected.size>0;
- $('edit_'+id).innerHTML='<span class="pill">'+n+' pending</span><button class="write" onclick="addRow(\''+id+'\')">+ Row</button><button class="warn write" '+(hasSel?'':'disabled')+' title="Mark all checked rows for deletion (applied on Apply)" onclick="deleteSel(\''+id+'\')">Delete selected</button><span class="tbsep"></span><button class="go write" '+(n?'':'disabled')+' onclick="applyChanges(\''+id+'\')">Apply</button><button '+(n?'':'disabled')+' onclick="revertChanges(\''+id+'\')">Revert</button>';}
+ $('edit_'+id).innerHTML='<button class="write" onclick="addRow(\''+id+'\')">+ Row</button><button class="warn write" '+(hasSel?'':'disabled')+' title="Mark all checked rows for deletion (applied on Apply)" onclick="deleteSel(\''+id+'\')">Delete selected</button><span class="tbsep"></span><button class="go write" '+(n?'':'disabled')+' onclick="applyChanges(\''+id+'\')">Apply</button><button '+(n?'':'disabled')+' onclick="revertChanges(\''+id+'\')">Revert</button><span class="pill">'+n+' pending</span>';}
 // MySQL's own DATE/DATETIME/TIME text format <-> what a native <input type="date"/"datetime-
 // local"/"time"> needs. Deliberately conservative: anything the native widget can't faithfully
 // round-trip - a zero-date ('0000-00-00'), a zero month/day, a TIME past the widget's 00:00:00-
