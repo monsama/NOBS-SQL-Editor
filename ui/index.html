@@ -75,7 +75,7 @@
  .toolbar{padding:4px 8px;background:var(--panel);border-bottom:1px solid var(--bd2);display:flex;gap:9px;align-items:center;flex-wrap:wrap}
  .tbsep{width:1px;align-self:stretch;background:var(--bd);margin:2px 8px}
  .result{flex:1;overflow:auto} table.grid{border-collapse:collapse;width:100%;table-layout:fixed} .grid th .rz{position:absolute;right:-3px;top:0;width:7px;height:100%;cursor:col-resize;z-index:3} .grid th .rz:hover,.grid th .rz.drag{background:var(--accent);opacity:.55}
- table.grid th{position:sticky;top:0;background:var(--gridh);border:none;border-right:1px solid var(--bd);box-shadow:inset 0 -2px 0 var(--bd);padding:3px 8px;text-align:left;white-space:nowrap;z-index:1;transform:translateZ(0);will-change:transform}
+ table.grid th{position:sticky;top:0;background:var(--gridh);border:none;border-right:1px solid var(--bd);box-shadow:inset 0 -2px 0 var(--bd);padding:3px 8px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;z-index:1;transform:translateZ(0);will-change:transform}
 table.grid td{border:none;border-right:1px solid var(--bd2);border-bottom:1px solid var(--bd2);padding:2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.grid td:first-child{text-align:center;vertical-align:middle;padding:0}
 table.grid td:first-child input[type="checkbox"]{display:block;margin:0 auto}
@@ -196,7 +196,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div id="side">
   <div class="hdr"><span>SCHEMAS</span><span><button class="sm" title="Create a new schema" onclick="newSchema()">+ Schema</button> <button class="sm" title="Open the table designer" onclick="designTable(null)">+ Table</button> <button class="sm" title="ER Diagram for the selected schema" onclick="openErdForCurSchema()">ER</button> <button class="sm" title="Refresh the schema list and tables" onclick="refreshSchemasAndTables()">&#8635;</button></span></div>
   <div id="schemas" tabindex="0"></div>
-  <div class="hdr"><span>OBJECTS</span><span id="objdb" class="muted"></span></div>
+  <div class="hdr"><span>OBJECTS</span><span id="objdb" class="muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px"></span></div>
 <div style="display:flex;gap:4px;margin:4px 6px;align-items:center">
 <input id="objFilter" placeholder="filter objects..." oninput="renderObjects()" onkeydown="if(event.key==='ArrowDown'){event.preventDefault();focusList($('objects'));}" style="flex:1;font-size:12px">
 <button class="sm" id="objTypeBtn" title="Show or hide object types (tables, views, procedures...)" onclick="event.stopPropagation();toggleObjTypePicker(this)" style="padding:2px 6px;font-size:11px">Types &#9662;</button>
@@ -209,7 +209,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 </div>
 <div id="loghdr"><span>Action Output</span><span style="cursor:pointer" onclick="document.getElementById('log').textContent=''">clear</span></div><div id="log"></div>
 <div id="ctx"></div>
-<div id="minimizedTray" style="display:none;position:fixed;bottom:10px;right:10px;gap:8px;z-index:9500"></div>
+<div id="minimizedTray" style="display:none;position:fixed;bottom:10px;right:10px;gap:8px;z-index:9500;max-width:70vw;flex-wrap:wrap;justify-content:flex-end"></div>
 <div id="colPicker"></div>
 <div id="objTypePicker"></div>
 <div id="impDbPicker"></div>
@@ -441,7 +441,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div id="inpFields" style="flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column"></div>
  <div class="row" style="justify-content:flex-end;margin-top:6px;flex:none"><button class="go" id="inpOk" onclick="inpOk()">OK</button><button onclick="inpCancel()">Cancel</button></div></div></div>
 <div class="modal floating" id="mLib"><div class="box" style="width:640px;max-width:92vw;height:560px;display:flex;flex-direction:column;overflow:hidden;top:60px;left:180px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mLib')" title="Drag to move"><h3 style="margin:0 0 10px">Query Library</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mLib')" title="Maximize" id="maxBtn_mLib" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mLib')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
- <div class="row" style="flex:none"><input id="libName" placeholder="Name for the current query" style="flex:1" onkeydown="if(event.key==='Enter')libSaveCurrent()"><button class="go" onclick="libSaveCurrent()">Save current query</button></div>
+ <div class="row" style="flex:none"><input id="libName" placeholder="Name for the current query" maxlength="80" style="flex:1" onkeydown="if(event.key==='Enter')libSaveCurrent()"><button class="go" onclick="libSaveCurrent()">Save current query</button></div>
  <div class="row" style="flex:none"><input id="libSearch" placeholder="Search saved queries..." oninput="libRender()" style="flex:1"></div>
  <div id="libList" style="overflow:auto;border:1px solid var(--bd);border-radius:4px;flex:1;min-height:0"></div>
  <div class="row" style="flex:none"><button class="warn" onclick="libClearAll()" title="Delete all saved queries">Clear all</button><button onclick="libExport()" title="Download the whole library as a JSON file">Export library</button><button onclick="$('libFile').click()" title="Load a query-library.json from another machine (merges)">Import library</button><input type="file" id="libFile" accept="application/json,.json" style="display:none" onchange="libImportFile(event)"><span style="flex:1"></span><button onclick="hide('mLib')">Close</button></div></div></div>
@@ -602,11 +602,14 @@ function floatRenderTray(){
  // inside a shared clickable wrapper - a click on either fires only its own handler and bubbles
  // up through elements with no onclick of their own, so there's no risk of clicking the x also
  // triggering restore (or vice versa), and no stopPropagation is needed for that reason.
- tray.innerHTML=ids.map(id=>
-  '<span class="chip" style="background:var(--panel);border-color:var(--bd2);color:var(--fg);gap:8px;cursor:default">'
-  +'<span onclick="floatRestore(\''+id+'\')" style="cursor:pointer" title="Restore">'+esc(floatTrayLabel(id))+'</span>'
+ // A minimized modal's title can be arbitrarily long (e.g. the ER Diagram title includes the
+ // schema name) - the label gets its own width cap + ellipsis so one long chip can't push earlier
+ // ones off the left edge of the tray (the tray itself wraps to a new row once it runs out of
+ // room - see its max-width/flex-wrap above).
+ tray.innerHTML=ids.map(id=>{const lbl=floatTrayLabel(id);return '<span class="chip" style="background:var(--panel);border-color:var(--bd2);color:var(--fg);gap:8px;cursor:default">'
+  +'<span onclick="floatRestore(\''+id+'\')" style="cursor:pointer;display:inline-block;max-width:160px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;vertical-align:middle" title="'+esc(lbl)+' — Restore">'+esc(lbl)+'</span>'
   +'<span onclick="modalClose(\''+id+'\')" style="cursor:pointer;font-weight:700;padding:0 1px" title="Close">&times;</span>'
-  +'</span>'
+  +'</span>';}
  ).join('');
 }
 function floatMinimize(id){
@@ -722,7 +725,7 @@ async function searchAllSchemas(){
     d.innerHTML='<span class="onm">'+esc(it.name)+'</span><span class="osz">'+esc(it.schema)+' \u00B7 '+esc(it.type)+'</span>';
     d.onclick=()=>{
       curSchema=it.schema;
-      $('objdb').textContent=it.schema;
+      $('objdb').textContent=it.schema;$('objdb').title=it.schema;
 
       // Highlight the schema in the schemas list
       const schemasBox = $('schemas');
@@ -1069,12 +1072,14 @@ async function loadSchemas() {
         d.className = 'item';
         const sizeStr = sc.size > 0 ? ' (' + fmtBytes(sc.size) + ')' : '';
         d.textContent = sc.name + sizeStr;
+        d.title = sc.name + sizeStr;
 
         d.onclick = () => {
             [...box.children].forEach(c => c.classList.remove('sel'));
             d.classList.add('sel');
             curSchema = sc.name;
             $('objdb').textContent = sc.name;
+            $('objdb').title = sc.name;
             // dbOf() gives curSchema priority for a plain query tab, so this click changes
             // where the next query runs - the badge has to say so, or it keeps advertising
             // the previous schema while queries go somewhere else.
@@ -1290,13 +1295,13 @@ function renderObjects(){const box=$('objects');box.innerHTML='';if(!objData)ret
  if(pinned.length){
    const fil=pinned.filter(n=>r.tables.includes(n)&&(!f||n.toLowerCase().includes(f)));
    if(fil.length){const h=document.createElement('div');h.className='ohdr';h.textContent='\u2605 Pinned ('+fil.length+')';box.appendChild(h);
-     fil.forEach(n=>{const d=document.createElement('div');d.className='item';if(objData.sizes&&(n in objData.sizes)){const a=document.createElement('span');a.className='onm';a.textContent=n;const b=document.createElement('span');b.className='osz';b.textContent=fmtBytes(objData.sizes[n]);d.appendChild(a);d.appendChild(b);}else{d.textContent=n;}
+     fil.forEach(n=>{const d=document.createElement('div');d.className='item';d.title=n;if(objData.sizes&&(n in objData.sizes)){const a=document.createElement('span');a.className='onm';a.textContent=n;const b=document.createElement('span');b.className='osz';b.textContent=fmtBytes(objData.sizes[n]);d.appendChild(a);d.appendChild(b);}else{d.textContent=n;}
       d.onclick=()=>{[...box.querySelectorAll('.item')].forEach(c=>c.classList.remove('sel'));d.classList.add('sel');objOpen(db,'table',n);};
       d.oncontextmenu=e=>{e.preventDefault();objMenu(e,db,'table',n);};box.appendChild(d);});}
  }
  const groups=[['Tables',r.tables,'table'],['Views',r.views,'view'],['Procedures',r.procedures,'procedure'],['Functions',r.functions,'function'],['Triggers',r.triggers,'trigger'],['Events',r.events,'event']];
  groups.forEach(([label,items,type])=>{if(!tf.has(type))return;const fil=(items||[]).filter(n=>!f||n.toLowerCase().includes(f));if(!fil.length)return;const h=document.createElement('div');h.className='ohdr';h.textContent=label+' ('+fil.length+(f?'/'+items.length:'')+')';box.appendChild(h);
-  fil.forEach(n=>{const d=document.createElement('div');d.className='item';if(type==='table'&&objData.sizes&&(n in objData.sizes)){const a=document.createElement('span');a.className='onm';a.textContent=n;const b=document.createElement('span');b.className='osz';b.textContent=fmtBytes(objData.sizes[n]);d.appendChild(a);d.appendChild(b);}else{d.textContent=n;}
+  fil.forEach(n=>{const d=document.createElement('div');d.className='item';d.title=n;if(type==='table'&&objData.sizes&&(n in objData.sizes)){const a=document.createElement('span');a.className='onm';a.textContent=n;const b=document.createElement('span');b.className='osz';b.textContent=fmtBytes(objData.sizes[n]);d.appendChild(a);d.appendChild(b);}else{d.textContent=n;}
    d.onclick=()=>{[...box.querySelectorAll('.item')].forEach(c=>c.classList.remove('sel'));d.classList.add('sel');objOpen(db,type,n);};
    d.oncontextmenu=e=>{e.preventDefault();objMenu(e,db,type,n);};box.appendChild(d);});});}
 async function buildColHints(db){try{const r=await api('/api/query',{sql:"SELECT DISTINCT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="+lit(db)});window.acColumns=(r.ok?r.rows.map(x=>x[0]):[]);}catch(e){window.acColumns=[];}}
@@ -1490,6 +1495,7 @@ function renderOverview() {
             });
             curSchema = db;
             $('objdb').textContent = db;
+            $('objdb').title = db;
             loadObjects(db);
         };
     });
@@ -2249,7 +2255,7 @@ function syncFilterRowTop(id){
  const h=hdr.getBoundingClientRect().height;
  if(h>0)[...fr.children].forEach(th=>th.style.top=h+'px');
 }
-function sortHeader(id,ed){const t=T(id);let h='<th style="width:22px"><input type="checkbox" title="Select/clear all shown rows" onclick="selAll(\''+id+'\',this.checked)"></th>'+(ed?'<th></th>':'');t.cols.forEach((c,ci)=>{const ar=t.sortCol===ci?(t.sortDir>0?' \u25B2':' \u25BC'):'';const isPk=t.pk&&t.pk.indexOf(c)>=0;const isFk=t.fk&&t.fk.indexOf(c)>=0;const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');h+='<th style="cursor:pointer" title="Click to sort (drag edge to resize, double-click edge to auto-fit)" onclick="sortBy(\''+id+'\','+ci+')">'+esc(c)+kb+ar+'<span class="rz" data-ci="'+ci+'"></span></th>';});return h+'<th></th>';}
+function sortHeader(id,ed){const t=T(id);let h='<th style="width:22px"><input type="checkbox" title="Select/clear all shown rows" onclick="selAll(\''+id+'\',this.checked)"></th>'+(ed?'<th></th>':'');t.cols.forEach((c,ci)=>{const ar=t.sortCol===ci?(t.sortDir>0?' \u25B2':' \u25BC'):'';const isPk=t.pk&&t.pk.indexOf(c)>=0;const isFk=t.fk&&t.fk.indexOf(c)>=0;const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');h+='<th style="cursor:pointer" title="'+esc(c)+' — click to sort (drag edge to resize, double-click edge to auto-fit)" onclick="sortBy(\''+id+'\','+ci+')">'+esc(c)+kb+ar+'<span class="rz" data-ci="'+ci+'"></span></th>';});return h+'<th></th>';}
 function setFilter(id,ci,v){const t=T(id);t.filters[ci]=v;renderBody(id);updatePager(id);updateStatusLine(id);}
 function sortBy(id,ci){const t=T(id);if(t.sortCol===ci){if(t.sortDir>0){t.sortDir=-1;}else{t.sortCol=-1;t.sortDir=1;}}else{t.sortCol=ci;t.sortDir=1;}$('sortrow_'+id).innerHTML=sortHeader(id,!!t.pk);renderBody(id);syncFilterRowTop(id);wireColResize(id);updatePager(id);updateStatusLine(id);}
 function viewIndices(id){const t=T(id);let view=t.rows.map((r,ri)=>ri);
@@ -2882,8 +2888,11 @@ function libRender(){const box=$('libList');const q=($('libSearch').value||'').t
  box.innerHTML='';if(!a.length){const e=document.createElement('div');e.className='muted';e.style.padding='10px';e.textContent=q?'No saved queries match.':'No saved queries yet. Type a name above and click Save current query.';box.appendChild(e);return;}
  a.forEach(x=>{const d=document.createElement('div');d.style.borderBottom='1px solid var(--bd2)';d.style.padding='6px 10px';
   const head=document.createElement('div');head.style.display='flex';head.style.justifyContent='space-between';head.style.alignItems='center';head.style.gap='8px';
-  const nm=document.createElement('div');const b=document.createElement('b');b.textContent=x.name;nm.appendChild(b);if(x.schema){const sp=document.createElement('span');sp.className='muted';sp.textContent=' ('+x.schema+')';nm.appendChild(sp);}
-  const btns=document.createElement('div');
+  // A saved query's name is free text with no length limit at the point of use (only a maxlength
+  // on #libName, as a soft cap) - min-width:0 + ellipsis keeps a long one from forcing this row
+  // wider than the modal and shoving Open/Edit/Delete out past its (clipped, unscrollable) edge.
+  const nm=document.createElement('div');nm.style.cssText='flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis';nm.title=x.name+(x.schema?' ('+x.schema+')':'');const b=document.createElement('b');b.textContent=x.name;nm.appendChild(b);if(x.schema){const sp=document.createElement('span');sp.className='muted';sp.textContent=' ('+x.schema+')';nm.appendChild(sp);}
+  const btns=document.createElement('div');btns.style.flex='none';
   const op=document.createElement('button');op.className='sm';op.textContent='Open';op.onclick=()=>{hide('mLib');openTab(x.name,x.sql,x.schema||curSchema,false,null);};
   const ed=document.createElement('button');ed.className='sm';ed.textContent='Edit';ed.style.marginLeft='6px';ed.onclick=()=>libEdit(x.name);
   const dl=document.createElement('button');dl.className='sm warn';dl.textContent='Delete';dl.style.marginLeft='6px';dl.onclick=async()=>{if(await ask('Delete saved query "'+x.name+'"?')){await api('/api/lib-delete',{name:x.name});await libLoad();libRender();}};
