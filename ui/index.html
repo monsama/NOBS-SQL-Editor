@@ -2044,7 +2044,15 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     if(r.aborted){if(T(id)){st.className='status';st.textContent='Query cancelled.';}return;}
     if(!T(id))return;
     if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));return;}
-    t.cols=r.columns;t.binCols=r.binaryCols||[];t.bitCols=r.bitCols||[];t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();$('edit_'+id).innerHTML='';
+    t.cols=r.columns;t.binCols=r.binaryCols||[];t.bitCols=r.bitCols||[];t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();
+    // Direct clear (not updateEditBar) since a fresh query's table-ness isn't known yet - gives
+    // instant feedback instead of showing stale buttons from whatever was loaded before while
+    // this one is still fetching. Must also drop updateEditBar's own "nothing changed" cache
+    // (dataset.sig) here, or a freshly-loaded editable table whose starting state (0 pending, no
+    // selection) happens to match whatever sig was last cached gets wrongly treated as "already
+    // showing this" and the bar - now genuinely empty from the innerHTML='' below - never gets
+    // rebuilt at all, even though this new table has a PK and should show +Row/Apply/etc.
+    {const eb=$('edit_'+id);eb.innerHTML='';delete eb.dataset.sig;}
     t.cursorId=r.cursorId||null;t.hasMore=!!r.hasMore;t.cursorReqId=t.cursorId?reqId:null;
     if(!r.columns.length){st.textContent=r.message||'Query OK.';$('res_'+id).innerHTML='';updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';return;}
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
@@ -2341,7 +2349,7 @@ function renderBody(id){const t=T(id);const ed=!!t.pk;if(!t.selected)t.selected=
 // down and recreated them dozens of times a second during plain scrolling, which is what read as
 // a flicker. Skip the rebuild entirely when the two values this bar's markup actually depends on
 // haven't changed since the last time it was built.
-function updateEditBar(id){const t=T(id);const el=$('edit_'+id);if(!el)return;if(!t.pk){if(el.innerHTML)el.innerHTML='';return;}
+function updateEditBar(id){const t=T(id);const el=$('edit_'+id);if(!el)return;if(!t.pk){if(el.innerHTML){el.innerHTML='';delete el.dataset.sig;}return;}
  const n=Object.keys(t.pending.upd).length+t.pending.del.size+t.pending.ins.length;
  const hasSel=t.selected&&t.selected.size>0;
  const sig=n+':'+hasSel;
