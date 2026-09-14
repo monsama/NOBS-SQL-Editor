@@ -2763,7 +2763,11 @@ function copySelRows(id){const t=T(id);const idxs=viewIndices(id).filter(ri=>t.s
 // target row - but a single-row paste shouldn't care which command put that one row there.
 // Falls back to _rowsClipboard when it holds exactly one row and _rowClipboard is empty/stale.
 function singleRowClipboard(){if(window._rowClipboard&&window._rowClipboard.length)return window._rowClipboard;if(window._rowsClipboard&&window._rowsClipboard.length===1)return window._rowsClipboard[0];return null;}
-function pasteRowInto(id,ri){const t=T(id);if(!t.pk){toast('This result is not editable (no primary key).',true);return;}const vals=singleRowClipboard();if(!vals||!vals.length){toast('Copy a row first, then right-click a target row to paste it.',true);return;}if(vals.length!==t.cols.length){toast('Copied row has '+vals.length+' column(s) but this table has '+t.cols.length+'. Cannot paste.',true);return;}
+// Distinguishes "nothing copied" from "multiple rows copied" for the two single-row-target paste
+// spots below - both used to show the same "Copy a row first" message for either case, which is
+// actively misleading when rows genuinely were copied, just more than the one this paste can use.
+function noSingleRowMsg(target){const n=window._rowsClipboard&&window._rowsClipboard.length;if(n>1)return 'You copied '+n+' rows - overwrite can only use one. Copy just the row you want, or use "Paste rows as new" instead.';return 'Copy a row first, then right-click a '+target+' row to paste it.';}
+function pasteRowInto(id,ri){const t=T(id);if(!t.pk){toast('This result is not editable (no primary key).',true);return;}const vals=singleRowClipboard();if(!vals||!vals.length){toast(noSingleRowMsg('target'),true);return;}if(vals.length!==t.cols.length){toast('Copied row has '+vals.length+' column(s) but this table has '+t.cols.length+'. Cannot paste.',true);return;}
  t.cols.forEach((c,ci)=>{if(t.pk.indexOf(c)>=0)return;const v=vals[ci];const key=ri+':'+ci;if(v===t.rows[ri][ci])delete t.pending.upd[key];else t.pending.upd[key]=v;});
  renderGrid(id);log('Pasted copied row into row '+(ri+1)+' (primary key column(s) left unchanged). Review and click Apply to commit.');}
 // Mirror image of singleRowClipboard() above: "Copy row" (singular) only ever fills
@@ -2814,7 +2818,7 @@ function insCellMenu(e,id,ii,col){e.preventDefault();const t=T(id);const cur=t.p
   ['Set empty',()=>{t.pending.ins[ii][col]='';renderGrid(id);}],'-',
   ['Delete this new row',()=>delIns(id,ii)]];
  menu(e.clientX,e.clientY,items);}
-function pasteRowIntoIns(id,ii){const t=T(id);const vals=singleRowClipboard();if(!vals||!vals.length){toast('Copy a row first, then right-click a new row to paste it.',true);return;}if(vals.length!==t.cols.length){toast('Copied row has '+vals.length+' column(s) but this table has '+t.cols.length+'. Cannot paste.',true);return;}
+function pasteRowIntoIns(id,ii){const t=T(id);const vals=singleRowClipboard();if(!vals||!vals.length){toast(noSingleRowMsg('new'),true);return;}if(vals.length!==t.cols.length){toast('Copied row has '+vals.length+' column(s) but this table has '+t.cols.length+'. Cannot paste.',true);return;}
  t.cols.forEach((c,ci)=>{t.pending.ins[ii][c]=vals[ci];});
  renderGrid(id);log('Pasted copied row into new row. Review and click Apply to commit.');}
 function revertChanges(id){const t=T(id);t.pending={upd:{},del:new Set(),ins:[]};renderGrid(id);}
