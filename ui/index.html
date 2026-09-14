@@ -40,7 +40,12 @@
  input,select,textarea{background:var(--in);color:var(--fg);border:1px solid var(--bd);border-radius:3px;padding:3px 6px;box-sizing:border-box}
  #bar input,#bar select{height:28px}
  #bar input.h{width:130px}#bar input.s{width:52px}#bar input.p{width:120px} #pass{-webkit-text-security:disc;text-security:disc}
- button{padding:0 9px;height:28px;box-sizing:border-box;border:1px solid var(--bd);border-radius:4px;background:var(--btn);color:var(--fg);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1;vertical-align:middle;font-size:13px}
+ /* white-space:nowrap: a button squeezed by a flex-shrinking sibling (e.g. the OBJECTS panel's
+    filter input) has no min-width floor otherwise, so its own label can wrap to two lines inside
+    the fixed 28px height instead of the button just staying its natural single-line width - this
+    caps its shrink at that natural width instead, same principle as everywhere else this session
+    that a control's own label shouldn't silently break under pressure from a neighbor. */
+ button{padding:0 9px;height:28px;box-sizing:border-box;border:1px solid var(--bd);border-radius:4px;background:var(--btn);color:var(--fg);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1;vertical-align:middle;font-size:13px;white-space:nowrap}
  button:hover:not(:disabled){filter:brightness(1.08)} button:active:not(:disabled){filter:brightness(.93)} button:disabled{opacity:.45;cursor:not-allowed;filter:none} button:focus-visible{outline:2px solid var(--accent);outline-offset:1px} .chip{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.4px;white-space:nowrap;border:1px solid transparent;box-shadow:inset 0 0 0 1px rgba(255,255,255,.10)} .chip.ok{background:#2e7d46;color:#fff} .chip.bad{background:#c0504d;color:#fff}
  /* A saved connection name or environment label is free text with no length limit at the point
     of use (only a maxlength on the input, as a soft cap) - without this, a long one would either
@@ -48,7 +53,12 @@
     attribute (set alongside the text in JS) carries the untruncated value on hover. */
  #connStatus,#envChip,#schemaBadge{overflow:hidden;text-overflow:ellipsis;max-width:220px} button.primary{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.18)} button.go{background:#2e7d32;color:#fff;border-color:#276b2b} button.sm{padding:0 6px;font-size:12px} button.warn{background:#b23b3b;color:#fff;border-color:#933}
  #main{flex:1;display:flex;min-height:0}
- #side{width:280px;min-width:170px;flex:0 0 auto;display:flex;flex-direction:column} #sideResize{flex:0 0 7px;cursor:col-resize;background:var(--bd);position:relative;touch-action:none;z-index:5} #sideResize:hover,#sideResize.drag{background:var(--accent)} body.disconnected #sideResize{pointer-events:auto !important;opacity:1 !important}
+ /* 280px is not an arbitrary floor - it's the narrowest the SCHEMAS header's label + its 4
+    buttons (+ Schema/+ Table/ER/refresh) fit on one line without wrapping into an overlapping
+    mess (measured empirically; wraps below ~270px, so 280 keeps a small safety margin for
+    font-metric differences across platforms). Below this, the header row that's been fixed to
+    never move (per the earlier top-bar/toolbar polish passes) would go right back to breaking. */
+ #side{width:280px;min-width:280px;flex:0 0 auto;display:flex;flex-direction:column} #sideResize{flex:0 0 7px;cursor:col-resize;background:var(--bd);position:relative;touch-action:none;z-index:5} #sideResize:hover,#sideResize.drag{background:var(--accent)} body.disconnected #sideResize{pointer-events:auto !important;opacity:1 !important}
  .hdr{background:var(--panel2);padding:4px 8px;font-weight:600;font-size:11px;letter-spacing:.5px;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;height:52px;box-sizing:border-box}
  #schemas{flex:0 0 40%;overflow:auto;border-bottom:1px solid var(--bd)} #objects{flex:1;overflow:auto}
  .item{padding:3px 10px 3px 16px;cursor:pointer;white-space:nowrap} #schemas .item{overflow:hidden;text-overflow:ellipsis} .uitem{padding:3px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .uitem:hover{background:var(--hover)} .uitem.sel{background:var(--accent);color:#fff} .item:hover{background:var(--hover)} .item.sel{background:var(--accent);color:#fff}
@@ -75,7 +85,7 @@
  .toolbar{padding:4px 8px;background:var(--panel);border-bottom:1px solid var(--bd2);display:flex;gap:9px;align-items:center;flex-wrap:wrap}
  .tbsep{width:1px;align-self:stretch;background:var(--bd);margin:2px 8px}
  .result{flex:1;overflow:auto} table.grid{border-collapse:collapse;width:100%;table-layout:fixed} .grid th .rz{position:absolute;right:-3px;top:0;width:7px;height:100%;cursor:col-resize;z-index:3} .grid th .rz:hover,.grid th .rz.drag{background:var(--accent);opacity:.55}
- table.grid th{position:sticky;top:0;background:var(--gridh);border:none;border-right:1px solid var(--bd);box-shadow:inset 0 -2px 0 var(--bd);padding:3px 8px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;z-index:1;transform:translateZ(0);will-change:transform}
+ table.grid th{position:sticky;top:0;background:var(--gridh);border:none;border-right:1px solid var(--bd);box-shadow:inset 0 -2px 0 var(--bd);padding:3px 8px;text-align:left;white-space:nowrap;z-index:1;transform:translateZ(0);will-change:transform}
 table.grid td{border:none;border-right:1px solid var(--bd2);border-bottom:1px solid var(--bd2);padding:2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.grid td:first-child{text-align:center;vertical-align:middle;padding:0}
 table.grid td:first-child input[type="checkbox"]{display:block;margin:0 auto}
@@ -194,11 +204,11 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 </div>
 <div id="main" class="needsconn">
  <div id="side">
-  <div class="hdr"><span>SCHEMAS</span><span><button class="sm" title="Create a new schema" onclick="newSchema()">+ Schema</button> <button class="sm" title="Open the table designer" onclick="designTable(null)">+ Table</button> <button class="sm" title="ER Diagram for the selected schema" onclick="openErdForCurSchema()">ER</button> <button class="sm" title="Refresh the schema list and tables" onclick="refreshSchemasAndTables()">&#8635;</button></span></div>
+  <div class="hdr"><span>SCHEMAS</span><span style="white-space:nowrap"><button class="sm" title="Create a new schema" onclick="newSchema()">+ Schema</button> <button class="sm" title="Open the table designer" onclick="designTable(null)">+ Table</button> <button class="sm" title="ER Diagram for the selected schema" onclick="openErdForCurSchema()">ER</button> <button class="sm" title="Refresh the schema list and tables" onclick="refreshSchemasAndTables()">&#8635;</button></span></div>
   <div id="schemas" tabindex="0"></div>
   <div class="hdr"><span>OBJECTS</span><span id="objdb" class="muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px"></span></div>
 <div style="display:flex;gap:4px;margin:4px 6px;align-items:center">
-<input id="objFilter" placeholder="filter objects..." oninput="renderObjects()" onkeydown="if(event.key==='ArrowDown'){event.preventDefault();focusList($('objects'));}" style="flex:1;font-size:12px">
+<input id="objFilter" placeholder="filter objects..." oninput="renderObjects()" onkeydown="if(event.key==='ArrowDown'){event.preventDefault();focusList($('objects'));}" style="flex:1;min-width:0;font-size:12px">
 <button class="sm" id="objTypeBtn" title="Show or hide object types (tables, views, procedures...)" onclick="event.stopPropagation();toggleObjTypePicker(this)" style="padding:2px 6px;font-size:11px">Types &#9662;</button>
 <button class="sm" id="allSchemasBtn" title="Search this name across all schemas" onclick="searchAllSchemas()" style="padding:2px 6px;font-size:11px">All DBs</button>
 </div>
@@ -1652,7 +1662,11 @@ function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqu
  const pager='<span class="tbsep"></span><span id="pager_'+id+'" style="display:inline-flex;align-items:center;gap:6px"></span>';
  pane.innerHTML='<div class="edwrap" id="ew_'+id+'"><pre class="hl" id="hl_'+id+'"></pre><textarea class="editor" id="ed_'+id+'" spellcheck="false"></textarea></div>'+
   '<div class="edsplit" id="es_'+id+'" title="Drag to resize the editor"></div>'+
-  '<div class="toolbar"><button class="primary" id="runbtn_'+id+'" title="Run the query (F5)" onclick="runTab(\''+id+'\')">Run Query</button><button title="Run the selected text (Ctrl+Enter) - or, if nothing is selected, whichever statement the cursor is currently inside" onclick="runSel(\''+id+'\')">Run Query Selection</button><button title="Prepend EXPLAIN to the current statement and run it" onclick="explainTab(\''+id+'\')">Explain</button><button title="Reformat the query for readability (safe - only changes whitespace/line breaks, never the query itself)" onclick="formatTabSql(\''+id+'\')">Format</button><button class="warn" id="cancelbtn_'+id+'" style="display:none" title="Cancel the running query" onclick="cancelQuery(\''+id+'\')">Cancel</button>'+
+  // Run Query and Cancel are mutually-exclusive states of the same "primary action" slot, not
+  // two independent buttons - stacked in one shared grid cell (both always in layout, only one
+  // ever visible) so swapping between them on every run/cancel never shifts Run Query Selection/
+  // Explain/Format, which display:none toggling used to do on every single query execution.
+  '<div class="toolbar"><span style="display:inline-grid"><button class="primary" id="runbtn_'+id+'" style="grid-area:1/1" title="Run the query (F5)" onclick="runTab(\''+id+'\')">Run Query</button><button class="warn" id="cancelbtn_'+id+'" style="grid-area:1/1;visibility:hidden" title="Cancel the running query" onclick="cancelQuery(\''+id+'\')">Cancel</button></span><button title="Run the selected text (Ctrl+Enter) - or, if nothing is selected, whichever statement the cursor is currently inside" onclick="runSel(\''+id+'\')">Run Query Selection</button><button title="Prepend EXPLAIN to the current statement and run it" onclick="explainTab(\''+id+'\')">Explain</button><button title="Reformat the query for readability (safe - only changes whitespace/line breaks, never the query itself)" onclick="formatTabSql(\''+id+'\')">Format</button>'+
   '<span class="tbsep"></span>'+
   lastBtn+selBtn+applyBtn+
   '<label title="If a statement fails, keep running the rest of the script instead of stopping at the first error - useful for bulk, mostly-independent statements like seed data or batch table creation. Every failure is reported, not just the first. Only applies to a script that does NOT end in a SELECT." style="display:inline-flex;align-items:center;gap:5px;margin-left:10px;font-size:12px;color:var(--muted)"><input type="checkbox" id="coe_'+id+'"> Continue on error</label>'+
@@ -2083,7 +2097,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
  }
 }
 
-function setRunning(id,running){const rb=$('runbtn_'+id),cb=$('cancelbtn_'+id);if(!rb||!cb)return;rb.style.display=running?'none':'';cb.style.display=running?'':'none';
+function setRunning(id,running){const rb=$('runbtn_'+id),cb=$('cancelbtn_'+id);if(!rb||!cb)return;rb.style.visibility=running?'hidden':'';cb.style.visibility=running?'':'hidden';
  const tb=$('tabbtn_'+id);if(tb){let dot=tb.querySelector('.runningdot');if(running){if(!dot){dot=document.createElement('span');dot.className='runningdot';dot.title='Query running';tb.insertBefore(dot,tb.firstChild);}}else if(dot){dot.remove();}}}
 async function cancelQuery(id){const t=T(id);if(!t)return;if(t.abortCtrl){try{t.abortCtrl.abort();}catch(e){}}
  const rid=t.runningReqId;
@@ -2255,7 +2269,7 @@ function syncFilterRowTop(id){
  const h=hdr.getBoundingClientRect().height;
  if(h>0)[...fr.children].forEach(th=>th.style.top=h+'px');
 }
-function sortHeader(id,ed){const t=T(id);let h='<th style="width:22px"><input type="checkbox" title="Select/clear all shown rows" onclick="selAll(\''+id+'\',this.checked)"></th>'+(ed?'<th></th>':'');t.cols.forEach((c,ci)=>{const ar=t.sortCol===ci?(t.sortDir>0?' \u25B2':' \u25BC'):'';const isPk=t.pk&&t.pk.indexOf(c)>=0;const isFk=t.fk&&t.fk.indexOf(c)>=0;const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');h+='<th style="cursor:pointer" title="'+esc(c)+' — click to sort (drag edge to resize, double-click edge to auto-fit)" onclick="sortBy(\''+id+'\','+ci+')">'+esc(c)+kb+ar+'<span class="rz" data-ci="'+ci+'"></span></th>';});return h+'<th></th>';}
+function sortHeader(id,ed){const t=T(id);let h='<th style="width:22px"><input type="checkbox" title="Select/clear all shown rows" onclick="selAll(\''+id+'\',this.checked)"></th>'+(ed?'<th></th>':'');t.cols.forEach((c,ci)=>{const ar=t.sortCol===ci?(t.sortDir>0?' \u25B2':' \u25BC'):'';const isPk=t.pk&&t.pk.indexOf(c)>=0;const isFk=t.fk&&t.fk.indexOf(c)>=0;const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');h+='<th style="cursor:pointer" title="'+esc(c)+' — click to sort (drag edge to resize, double-click edge to auto-fit)" onclick="sortBy(\''+id+'\','+ci+')"><span style="display:flex;align-items:center;gap:4px;height:100%;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+esc(c)+'</span>'+kb+ar+'</span><span class="rz" data-ci="'+ci+'"></span></th>';});return h+'<th></th>';}
 function setFilter(id,ci,v){const t=T(id);t.filters[ci]=v;renderBody(id);updatePager(id);updateStatusLine(id);}
 function sortBy(id,ci){const t=T(id);if(t.sortCol===ci){if(t.sortDir>0){t.sortDir=-1;}else{t.sortCol=-1;t.sortDir=1;}}else{t.sortCol=ci;t.sortDir=1;}$('sortrow_'+id).innerHTML=sortHeader(id,!!t.pk);renderBody(id);syncFilterRowTop(id);wireColResize(id);updatePager(id);updateStatusLine(id);}
 function viewIndices(id){const t=T(id);let view=t.rows.map((r,ri)=>ri);
@@ -4246,7 +4260,7 @@ if(!(window.__TAURI__)){
 }
 document.body.classList.add('disconnected');
 window.addEventListener('beforeunload',e=>{saveSession();if(anyPending()){e.preventDefault();e.returnValue='';return '';}});
-(function(){function initSideResize(){const sd=$('side'),rz=$('sideResize'),mn=$('main');if(!sd||!rz||!mn){setTimeout(initSideResize,300);return;}const saved=parseInt(localStorage.getItem('sideW')||'',10);if(saved&&saved>=180)sd.style.width=saved+'px';let drag=false;rz.addEventListener('pointerdown',e=>{drag=true;rz.classList.add('drag');try{rz.setPointerCapture(e.pointerId);}catch(_){}document.body.style.userSelect='none';e.preventDefault();});rz.addEventListener('pointermove',e=>{if(!drag)return;const left=mn.getBoundingClientRect().left;let w=e.clientX-left;const max=Math.max(200,window.innerWidth-320);w=Math.max(180,Math.min(w,max));sd.style.width=w+'px';});const end=e=>{if(!drag)return;drag=false;rz.classList.remove('drag');try{rz.releasePointerCapture(e.pointerId);}catch(_){}document.body.style.userSelect='';localStorage.setItem('sideW',String(parseInt(sd.style.width,10)||280));};rz.addEventListener('pointerup',end);rz.addEventListener('pointercancel',end);rz.addEventListener('dblclick',()=>{sd.style.width='280px';localStorage.setItem('sideW','280');});}initSideResize();})();
+(function(){function initSideResize(){const sd=$('side'),rz=$('sideResize'),mn=$('main');if(!sd||!rz||!mn){setTimeout(initSideResize,300);return;}const saved=parseInt(localStorage.getItem('sideW')||'',10);if(saved&&saved>=280)sd.style.width=saved+'px';let drag=false;rz.addEventListener('pointerdown',e=>{drag=true;rz.classList.add('drag');try{rz.setPointerCapture(e.pointerId);}catch(_){}document.body.style.userSelect='none';e.preventDefault();});rz.addEventListener('pointermove',e=>{if(!drag)return;const left=mn.getBoundingClientRect().left;let w=e.clientX-left;const max=Math.max(280,window.innerWidth-320);w=Math.max(280,Math.min(w,max));sd.style.width=w+'px';});const end=e=>{if(!drag)return;drag=false;rz.classList.remove('drag');try{rz.releasePointerCapture(e.pointerId);}catch(_){}document.body.style.userSelect='';localStorage.setItem('sideW',String(parseInt(sd.style.width,10)||280));};rz.addEventListener('pointerup',end);rz.addEventListener('pointercancel',end);rz.addEventListener('dblclick',()=>{sd.style.width='280px';localStorage.setItem('sideW','280');});}initSideResize();})();
 if(window.__TAURI__&&window.__TAURI__.window&&window.__TAURI__.window.getCurrentWindow){try{const _w=window.__TAURI__.window.getCurrentWindow();_w.onCloseRequested(async(ev)=>{
  // Quitting with a query still running must cancel it the same way closing its tab would -
  // otherwise it keeps executing against the DB after the window (and the user's ability to
