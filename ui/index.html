@@ -59,7 +59,7 @@
     font-metric differences across platforms). Below this, the header row that's been fixed to
     never move (per the earlier top-bar/toolbar polish passes) would go right back to breaking. */
  #side{width:280px;min-width:280px;flex:0 0 auto;display:flex;flex-direction:column} #sideResize{flex:0 0 7px;cursor:col-resize;background:var(--bd);position:relative;touch-action:none;z-index:5} #sideResize:hover,#sideResize.drag{background:var(--accent)} body.disconnected #sideResize{pointer-events:auto !important;opacity:1 !important}
- .hdr{background:var(--panel2);padding:4px 8px;font-weight:600;font-size:11px;letter-spacing:.5px;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;height:52px;box-sizing:border-box}
+ .hdr{background:var(--panel2);padding:4px 8px;font-weight:600;font-size:11px;letter-spacing:.5px;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;gap:8px;height:52px;box-sizing:border-box}
  #schemas{flex:0 0 40%;overflow:auto;border-bottom:1px solid var(--bd)} #objects{flex:1;overflow:auto}
  .item{padding:3px 10px 3px 16px;cursor:pointer;white-space:nowrap} #schemas .item{overflow:hidden;text-overflow:ellipsis} .uitem{padding:3px 10px;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis} .uitem:hover{background:var(--hover)} .uitem.sel{background:var(--accent);color:#fff} .item:hover{background:var(--hover)} .item.sel{background:var(--accent);color:#fff}
  .ohdr{padding:3px 8px;font-weight:600;font-size:11px;color:var(--muted);background:var(--panel);border-top:1px solid var(--bd2);position:sticky;top:0}
@@ -206,7 +206,12 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div id="side">
   <div class="hdr"><span>SCHEMAS</span><span style="white-space:nowrap"><button class="sm" title="Create a new schema" onclick="newSchema()">+ Schema</button> <button class="sm" title="Open the table designer" onclick="designTable(null)">+ Table</button> <button class="sm" title="ER Diagram for the selected schema" onclick="openErdForCurSchema()">ER</button> <button class="sm" title="Refresh the schema list and tables" onclick="refreshSchemasAndTables()">&#8635;</button></span></div>
   <div id="schemas" tabindex="0"></div>
-  <div class="hdr"><span>OBJECTS</span><span id="objdb" class="muted" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px"></span></div>
+  <!-- The schema name gets its own row under the "OBJECTS" label rather than squeezed onto the
+       same line - a flat width cap, and later flex:1 sharing the line with the label, both still
+       truncated a real schema name ("moving_appcustomer_900000", 213px of text) that only just
+       didn't fit alongside "OBJECTS" (~200px available) but comfortably fits on a full-width
+       line of its own (sidebar width minus padding, ~264px at the 280px default). -->
+  <div class="hdr" style="flex-direction:column;align-items:flex-start;justify-content:center;gap:2px"><span>OBJECTS</span><span id="objdb" class="muted" style="width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span></div>
 <div style="display:flex;gap:4px;margin:4px 6px;align-items:center">
 <input id="objFilter" placeholder="filter objects..." oninput="renderObjects()" onkeydown="if(event.key==='ArrowDown'){event.preventDefault();focusList($('objects'));}" style="flex:1;min-width:0;font-size:12px">
 <button class="sm" id="objTypeBtn" title="Show or hide object types (tables, views, procedures...)" onclick="event.stopPropagation();toggleObjTypePicker(this)" style="padding:2px 6px;font-size:11px">Types &#9662;</button>
@@ -2269,7 +2274,14 @@ function syncFilterRowTop(id){
  const h=hdr.getBoundingClientRect().height;
  if(h>0)[...fr.children].forEach(th=>th.style.top=h+'px');
 }
-function sortHeader(id,ed){const t=T(id);let h='<th style="width:22px"><input type="checkbox" title="Select/clear all shown rows" onclick="selAll(\''+id+'\',this.checked)"></th>'+(ed?'<th></th>':'');t.cols.forEach((c,ci)=>{const ar=t.sortCol===ci?(t.sortDir>0?' \u25B2':' \u25BC'):'';const isPk=t.pk&&t.pk.indexOf(c)>=0;const isFk=t.fk&&t.fk.indexOf(c)>=0;const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');h+='<th style="cursor:pointer" title="'+esc(c)+' — click to sort (drag edge to resize, double-click edge to auto-fit)" onclick="sortBy(\''+id+'\','+ci+')"><span style="display:flex;align-items:center;gap:4px;height:100%;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+esc(c)+'</span>'+kb+ar+'</span><span class="rz" data-ci="'+ci+'"></span></th>';});return h+'<th></th>';}
+// Header cells force an explicit height (28px, matching the app's button height) on both the
+// th AND its inner flex wrapper, instead of centering via height:100% (percentage) or the
+// browser's default table vertical-align - a sticky th (position:sticky, which every header
+// cell here is) doesn't reliably get treated as having a "definite" height for either of those
+// in every rendering engine, which is what let header text and the select-all checkbox render
+// top-aligned instead of centered even after an earlier percentage-based attempt at this fix.
+// An explicit pixel height on both sides of the relationship sidesteps the question entirely.
+function sortHeader(id,ed){const t=T(id);const H=28;let h='<th style="width:22px;height:'+H+'px;padding:0"><span style="display:flex;align-items:center;justify-content:center;height:'+H+'px"><input type="checkbox" title="Select/clear all shown rows" onclick="selAll(\''+id+'\',this.checked)"></span></th>'+(ed?'<th></th>':'');t.cols.forEach((c,ci)=>{const ar=t.sortCol===ci?(t.sortDir>0?' \u25B2':' \u25BC'):'';const isPk=t.pk&&t.pk.indexOf(c)>=0;const isFk=t.fk&&t.fk.indexOf(c)>=0;const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');h+='<th style="cursor:pointer;height:'+H+'px;padding:0 8px" title="'+esc(c)+' — click to sort (drag edge to resize, double-click edge to auto-fit)" onclick="sortBy(\''+id+'\','+ci+')"><span style="display:flex;align-items:center;gap:4px;height:'+H+'px;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+esc(c)+'</span>'+kb+ar+'</span><span class="rz" data-ci="'+ci+'"></span></th>';});return h+'<th></th>';}
 function setFilter(id,ci,v){const t=T(id);t.filters[ci]=v;renderBody(id);updatePager(id);updateStatusLine(id);}
 function sortBy(id,ci){const t=T(id);if(t.sortCol===ci){if(t.sortDir>0){t.sortDir=-1;}else{t.sortCol=-1;t.sortDir=1;}}else{t.sortCol=ci;t.sortDir=1;}$('sortrow_'+id).innerHTML=sortHeader(id,!!t.pk);renderBody(id);syncFilterRowTop(id);wireColResize(id);updatePager(id);updateStatusLine(id);}
 function viewIndices(id){const t=T(id);let view=t.rows.map((r,ri)=>ri);
