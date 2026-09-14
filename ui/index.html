@@ -41,7 +41,12 @@
  #bar input,#bar select{height:28px}
  #bar input.h{width:130px}#bar input.s{width:52px}#bar input.p{width:120px} #pass{-webkit-text-security:disc;text-security:disc}
  button{padding:0 9px;height:28px;box-sizing:border-box;border:1px solid var(--bd);border-radius:4px;background:var(--btn);color:var(--fg);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;line-height:1;vertical-align:middle;font-size:13px}
- button:hover:not(:disabled){filter:brightness(1.08)} button:active:not(:disabled){filter:brightness(.93)} button:disabled{opacity:.45;cursor:not-allowed;filter:none} button:focus-visible{outline:2px solid var(--accent);outline-offset:1px} .chip{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.4px;white-space:nowrap;border:1px solid transparent;box-shadow:inset 0 0 0 1px rgba(255,255,255,.10)} .chip.ok{background:#2e7d46;color:#fff} .chip.bad{background:#c0504d;color:#fff} button.primary{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.18)} button.go{background:#2e7d32;color:#fff;border-color:#276b2b} button.sm{padding:0 6px;font-size:12px} button.warn{background:#b23b3b;color:#fff;border-color:#933}
+ button:hover:not(:disabled){filter:brightness(1.08)} button:active:not(:disabled){filter:brightness(.93)} button:disabled{opacity:.45;cursor:not-allowed;filter:none} button:focus-visible{outline:2px solid var(--accent);outline-offset:1px} .chip{display:inline-flex;align-items:center;padding:2px 9px;border-radius:999px;font-size:10.5px;font-weight:600;line-height:1.5;letter-spacing:.4px;white-space:nowrap;border:1px solid transparent;box-shadow:inset 0 0 0 1px rgba(255,255,255,.10)} .chip.ok{background:#2e7d46;color:#fff} .chip.bad{background:#c0504d;color:#fff}
+ /* A saved connection name or environment label is free text with no length limit at the point
+    of use (only a maxlength on the input, as a soft cap) - without this, a long one would either
+    stretch the bar past the window or wrap it onto a second line. Ellipsize instead; the title
+    attribute (set alongside the text in JS) carries the untruncated value on hover. */
+ #connStatus,#envChip,#schemaBadge{overflow:hidden;text-overflow:ellipsis;max-width:220px} button.primary{background:var(--accent);color:#fff;border-color:var(--accent);font-weight:600;box-shadow:0 1px 2px rgba(0,0,0,.18)} button.go{background:#2e7d32;color:#fff;border-color:#276b2b} button.sm{padding:0 6px;font-size:12px} button.warn{background:#b23b3b;color:#fff;border-color:#933}
  #main{flex:1;display:flex;min-height:0}
  #side{width:280px;min-width:170px;flex:0 0 auto;display:flex;flex-direction:column} #sideResize{flex:0 0 7px;cursor:col-resize;background:var(--bd);position:relative;touch-action:none;z-index:5} #sideResize:hover,#sideResize.drag{background:var(--accent)} body.disconnected #sideResize{pointer-events:auto !important;opacity:1 !important}
  .hdr{background:var(--panel2);padding:4px 8px;font-weight:600;font-size:11px;letter-spacing:.5px;border-bottom:1px solid var(--bd);display:flex;justify-content:space-between;align-items:center;height:52px;box-sizing:border-box}
@@ -177,7 +182,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
   <b class="brand">NOBS SQL Editor</b>
 	<select id="connlist" onchange="pickConnGuarded();connTitle()" title="Saved connections" style="width:210px;max-width:210px"><option value="" disabled hidden selected>Connections</option></select>
   <button class="sm" title="Start a new connection (clear the form)" onclick="newConn()">New</button><button class="sm" title="Save these connection details" onclick="saveConn()">Save</button><button id="mgrBtn" class="sm" title="Edit, clone, delete or set primary for the selected connection" onclick="connMenu(event)">Manage &#9662;</button>
-  <span style="flex:1"></span><span id="connStatusGroup" style="display:inline-flex;gap:6px;align-items:center"><span id="pwChip" title="This connection has a saved password" style="display:none;font-size:14px;cursor:default">&#128274;</span><span id="connStatus" class="chip bad">Not connected</span><span id="envChip" class="chip bad" style="display:none"></span><span id="schemaBadge" class="chip ok" style="display:none"></span></span>
+  <span id="connStatusGroup" style="display:inline-flex;gap:6px;align-items:center;min-width:0;margin-left:4px"><span id="pwChip" title="This connection has a saved password" style="display:none;font-size:14px;cursor:default;flex:none">&#128274;</span><span id="connStatus" class="chip bad">Not connected</span><span id="envChip" class="chip bad" style="display:none"></span><span id="schemaBadge" class="chip ok" style="display:none"></span></span>
   <span style="flex:1"></span><span id="topActions" class="needsconn" style="display:inline-flex;gap:9px;align-items:center"><button class="primary" onclick="newTab()" title="Open a new query tab">+ New Query</button><span class="tbsep"></span><button class="sm" title="View users and privileges" onclick="openUsers()">Users</button><button class="sm" title="View and kill server processes/queries (SHOW FULL PROCESSLIST)" onclick="openProcessList()">Processes</button><button class="sm" title="Browse and reopen previous queries" onclick="openHistory()">History</button><button class="sm" title="Save and browse reusable queries" onclick="openLibrary()">Library</button><span class="tbsep"></span><button class="sm" title="Export databases with mysqldump" onclick="openExport()">Export</button><button class="sm" title="Import SQL files or a whole folder" onclick="openImport()">Import</button><button class="sm" title="Compare table structure between two databases" onclick="openCompare()">Compare DB</button></span><button class="sm" title="Configure or download the mysql / mysqldump client tools" onclick="openSettings()">Settings</button><span class="tbsep" style="margin:2px 10px"></span><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" onclick="openSupportLink()" title="Buy me a coffee, if NOBS SQL Editor saved you some time" style="cursor:pointer;height:26px;vertical-align:middle;opacity:.85;border-radius:4px" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.85"><button class="sm warn" title="Stop the local server and exit (the clean way to close the app)" onclick="quit()" style="margin-left:10px">Quit</button>
  </div>
  <div class="barrow" id="connFormRow">
@@ -488,7 +493,7 @@ window.readOnly=false;window.curEnv='';
 // Pure DOM rendering for the env chip - no side effects on window.readOnly/curEnv, so it's
 // safe to call for a merely-selected (not yet connected) connection as a preview, same as the
 // password lock icon already does. Only applyEnv() (below) touches the real enforcement state.
-function renderEnvChip(env,ro,acc){const el=$('envChip');if(!el)return;if(env||ro){el.style.display='inline-flex';el.textContent=(env||'')+(ro?(env?' - ':'')+'READ-ONLY':'');if(acc){el.className='chip';el.style.background=acc;el.style.color='#fff';el.style.borderColor='transparent';}else{el.className='chip '+(ro?'bad':'ok');el.style.background='';el.style.color='';el.style.borderColor='';}}else{el.style.display='none';}}
+function renderEnvChip(env,ro,acc){const el=$('envChip');if(!el)return;if(env||ro){el.style.display='inline-flex';el.textContent=(env||'')+(ro?(env?' - ':'')+'READ-ONLY':'');el.title=el.textContent;if(acc){el.className='chip';el.style.background=acc;el.style.color='#fff';el.style.borderColor='transparent';}else{el.className='chip '+(ro?'bad':'ok');el.style.background='';el.style.color='';el.style.borderColor='';}}else{el.style.display='none';}}
 function applyEnv(name){const m=connMeta()[name]||{};window.readOnly=!!m.readonly;window.curEnv=m.env||'';const acc=window.curAccent||accMap()[name]||'';renderEnvChip(window.curEnv,window.readOnly,acc);document.body.classList.toggle('ro',window.readOnly);}
 function roBlock(){if(window.readOnly){alert('This connection is marked READ-ONLY (safe mode). Writes are disabled.\n\nUncheck "Read-only" in the saved connection to allow changes.');return true;}return false;}
 function accMap(){const m=window._connMeta||{};const o={};for(const k in m){if(m[k]&&m[k].accent)o[k]=m[k].accent;}return o;}
@@ -805,7 +810,7 @@ function inputBox(opts){return new Promise(res=>{_inpResolve=res;$('inpTitle').t
    // lets it claim that space; the dialog is given a real default height below specifically so
    // there's space to claim in the first place.
    w.style.cssText+=';display:flex;flex-direction:column;flex:1;min-height:0';lb.style.flex='none';inp.style.flex='1';inp.style.minHeight='0';
-  }if(f.value!=null)inp.value=f.value;if(f.placeholder)inp.placeholder=f.placeholder;
+  }if(f.value!=null)inp.value=f.value;if(f.placeholder)inp.placeholder=f.placeholder;if(f.maxlength)inp.maxLength=f.maxlength;
   inp.onkeydown=e=>{if(e.key==='Enter'&&!isTa){e.preventDefault();inpOk();}else if(e.key==='Escape'){e.preventDefault();inpCancel();}};w.appendChild(lb);w.appendChild(inp);box.appendChild(w);});
  // A textarea field (e.g. editing a saved query's SQL) already resizes both ways like any browser
  // textarea, but the dialog's normal 460px width cramps that - widen it so there's real room to
@@ -933,14 +938,14 @@ async function saveConn(){
  const m0=n0?(connMeta()[n0]||{}):{};
  const dn=n0||($('user').value+'@'+$('host').value);
  const res=await inputBox({title:'Save connection',okText:'Save',fields:[
-  {key:'name',label:'Save connection as',value:dn},
+  {key:'name',label:'Save connection as',value:dn,maxlength:60},
   {key:'host',label:'Host',value:$('host').value},
   {key:'port',label:'Port',value:$('port').value},
   {key:'user',label:'User',value:$('user').value},
   {key:'password',label:'Password',type:'password',value:$('pass').value},
   {key:'ssl',label:'SSL',type:'select',options:[{value:'default',label:'default'},{value:'disabled',label:'disabled'},{value:'required',label:'required'},{value:'verify',label:'verify'}],value:$('ssl').value},
   {key:'color',label:'Accent color (tell servers apart at a glance)',type:'color',value:n0?(accMap()[n0]||'#3b82f6'):'#3b82f6'},
-  {key:'env',label:'Environment label (e.g. Production, Dev) - optional',value:m0.env||''},
+  {key:'env',label:'Environment label (e.g. Production, Dev) - optional',value:m0.env||'',maxlength:40},
   {key:'ro',label:'Read-only / safe mode (block all writes)',type:'checkbox',value:!!m0.readonly},
   {key:'savepw',label:'Save password (unchecked = type it each time)',type:'checkbox',value:n0?!!$('pass').value:true}
  ]});
@@ -960,14 +965,14 @@ async function editConn(){const n0=$('connlist').value;if(!n0){toast('Select a s
  const g=await api('/api/conn-get',{name:n0});if(!g.ok){toast('Could not load connection.',true);return;}
  const m0=connMeta()[n0]||{};
  const res=await inputBox({title:'Edit connection',okText:'Save',fields:[
-  {key:'name',label:'Name',value:n0},
+  {key:'name',label:'Name',value:n0,maxlength:60},
   {key:'host',label:'Host',value:g.conn.host},
   {key:'port',label:'Port',value:g.conn.port},
   {key:'user',label:'User',value:g.conn.user},
   {key:'password',label:'Password',type:'password',value:g.conn.password||''},
   {key:'ssl',label:'SSL',type:'select',options:[{value:'default',label:'default'},{value:'disabled',label:'disabled'},{value:'required',label:'required'},{value:'verify',label:'verify'}],value:g.conn.ssl},
   {key:'color',label:'Accent color',type:'color',value:accMap()[n0]||'#3b82f6'},
-  {key:'env',label:'Environment label (optional)',value:m0.env||''},
+  {key:'env',label:'Environment label (optional)',value:m0.env||'',maxlength:40},
   {key:'ro',label:'Read-only / safe mode (block all writes)',type:'checkbox',value:!!m0.readonly},
   {key:'savepw',label:'Save password (uncheck to remove the saved password)',type:'checkbox',value:!!(g.ok&&g.conn.password)}
  ]});
@@ -983,7 +988,7 @@ async function editConn(){const n0=$('connlist').value;if(!n0){toast('Select a s
 async function cloneConn(){const n0=$('connlist').value;
  if(n0){const g=await api('/api/conn-get',{name:n0});if(g.ok){$('host').value=g.conn.host;$('port').value=g.conn.port;$('user').value=g.conn.user;$('ssl').value=g.conn.ssl;$('pass').value=g.conn.password;}}
  const base=n0||($('user').value+'@'+$('host').value);
- const res=await inputBox({title:'Clone connection',okText:'Clone',fields:[{key:'name',label:'New connection name',value:base+' (copy)'}]});
+ const res=await inputBox({title:'Clone connection',okText:'Clone',fields:[{key:'name',label:'New connection name',value:base+' (copy)',maxlength:60}]});
  if(!res||!res.name.trim())return;const nn=res.name.trim();
  const r=await api('/api/conn-save',{name:nn,conn:getConn()});if(!r.ok){toast(r.error,true);return;}
  if(n0){const c=accMap()[n0];if(c)accSet(nn,c);const m=connMeta()[n0];if(m)connMetaSet(nn,m);}
@@ -1012,7 +1017,7 @@ async function connect() {
   window.mariadb = !!r.mariadb;
   document.body.classList.remove('disconnected');
   document.body.classList.remove('show-connform');
-  const _cs = $('connStatus'); if (_cs) { const _sel=$('connlist'); _cs.textContent = 'Connected: ' + (_sel && _sel.value ? _sel.options[_sel.selectedIndex].text.replace(/^\u2605 /, '') : ($('user').value + '@' + $('host').value)); _cs.className = 'chip ok'; }
+  const _cs = $('connStatus'); if (_cs) { const _sel=$('connlist'); _cs.textContent = 'Connected: ' + (_sel && _sel.value ? _sel.options[_sel.selectedIndex].text.replace(/^\u2605 /, '') : ($('user').value + '@' + $('host').value)); _cs.title = _cs.textContent; _cs.className = 'chip ok'; }
   applyAccent(window.curAccent || '');
   applyEnv($('connlist').value);
   // IMPORTANT: snapshot the active connection BEFORE restoring any tabs below - restoring a
@@ -1763,7 +1768,7 @@ function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqu
  });
  syncHl(id);activate(id);if(run)runTab(id);return id;}
 function activate(id){activeTab=id;const _ov=$('overview');if(_ov)_ov.style.display='none';tabs.forEach(t=>{$('tabbtn_'+t.id).classList.toggle('active',t.id===id);$('pane_'+t.id).classList.toggle('active',t.id===id);});const ta=$('ed_'+id);if(ta)setTimeout(()=>ta.focus(),0);updateSchemaBadge(id);const _t=T(id);if(_t&&_t.cols&&_t.cols.length&&!_t.colsFitted){requestAnimationFrame(()=>autofitAll(id));}}
-function updateSchemaBadge(id){const el=$('schemaBadge');if(!el)return;if(document.body.classList.contains('disconnected')){el.style.display='none';el.textContent='';return;}const t=T(id);const db=t?dbOf(t):null;el.textContent=db?('Schema: '+db):'';el.style.display=db?'inline-flex':'none';}
+function updateSchemaBadge(id){const el=$('schemaBadge');if(!el)return;if(document.body.classList.contains('disconnected')){el.style.display='none';el.textContent='';return;}const t=T(id);const db=t?dbOf(t):null;el.textContent=db?('Schema: '+db):'';el.title=el.textContent;el.style.display=db?'inline-flex':'none';}
 function pendingCount(t){if(!t||!t.pending)return 0;return Object.keys(t.pending.upd||{}).length+((t.pending.del&&t.pending.del.size)||0)+((t.pending.ins&&t.pending.ins.length)||0);}
 function uniqueTabTitle(base){
   let title=base, n=2;
