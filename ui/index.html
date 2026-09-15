@@ -156,8 +156,9 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  table.dz{border-collapse:collapse;width:100%;margin:8px 0} table.dz th{border:none;border-bottom:2px solid var(--bd);padding:6px 6px;text-align:left;color:var(--muted);font-weight:600;font-size:12px} table.dz td{border:none;border-bottom:1px solid var(--bd2);padding:6px 4px} table.dz tr:last-child td{border-bottom:none} table.dz input,table.dz select{width:100%}
 .pill{background:var(--accent);color:#fff;border-radius:10px;padding:0 7px;font-size:11px}
 #toasts{position:fixed;bottom:16px;right:16px;z-index:99997;display:flex;flex-direction:column;gap:8px;max-width:360px}
-.toast{background:var(--panel2);border:1px solid var(--bd);border-left:4px solid var(--accent);border-radius:6px;padding:10px 14px;font-size:13px;box-shadow:0 4px 14px rgba(0,0,0,.3);animation:toastin .2s ease-out}
+.toast{background:var(--panel2);border:1px solid var(--bd);border-left:4px solid var(--accent);border-radius:6px;padding:10px 14px;font-size:13px;white-space:pre-wrap;box-shadow:0 4px 14px rgba(0,0,0,.3);animation:toastin .2s ease-out}
 .toast.err{border-left-color:#c0504d}
+.toast.ok{border-left-color:#2e8f4f}
 @keyframes toastin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
  @keyframes expmove{0%{margin-left:-40%}50%{margin-left:60%}100%{margin-left:-40%}}
  body.disconnected .needsconn{display:none !important}
@@ -510,7 +511,7 @@ window.readOnly=false;window.curEnv='';
 // password lock icon already does. Only applyEnv() (below) touches the real enforcement state.
 function renderEnvChip(env,ro,acc){const el=$('envChip');if(!el)return;if(env||ro){el.style.display='inline-flex';el.textContent=(env||'')+(ro?(env?' - ':'')+'READ-ONLY':'');el.title=el.textContent;if(acc){el.className='chip';el.style.background=acc;el.style.color='#fff';el.style.borderColor='transparent';}else{el.className='chip '+(ro?'bad':'ok');el.style.background='';el.style.color='';el.style.borderColor='';}}else{el.style.display='none';}}
 function applyEnv(name){const m=connMeta()[name]||{};window.readOnly=!!m.readonly;window.curEnv=m.env||'';const acc=window.curAccent||accMap()[name]||'';renderEnvChip(window.curEnv,window.readOnly,acc);document.body.classList.toggle('ro',window.readOnly);}
-function roBlock(){if(window.readOnly){alert('This connection is marked READ-ONLY (safe mode). Writes are disabled.\n\nUncheck "Read-only" in the saved connection to allow changes.');return true;}return false;}
+function roBlock(){if(window.readOnly){toast('This connection is marked READ-ONLY (safe mode). Writes are disabled.\nUncheck "Read-only" in the saved connection to allow changes.',true);return true;}return false;}
 function accMap(){const m=window._connMeta||{};const o={};for(const k in m){if(m[k]&&m[k].accent)o[k]=m[k].accent;}return o;}
 function accSet(n,c){window._connMeta=window._connMeta||{};const cur=window._connMeta[n]||{};window._connMeta[n]={accent:c||'',env:cur.env||'',readonly:!!cur.readonly};}
 function hexA(hex,a){hex=(hex||'').replace('#','');if(hex.length===3)hex=hex.split('').map(c=>c+c).join('');const v=parseInt(hex,16);if(isNaN(v)||hex.length!==6)return '';return 'rgba('+((v>>16)&255)+','+((v>>8)&255)+','+(v&255)+','+a+')';}
@@ -518,10 +519,14 @@ function applyAccent(color){const bar=$('bar');if(!bar)return;if(!color){bar.sty
 window.curAccent='';
 function getConn(){return {host:$('host').value,port:$('port').value,user:$('user').value,password:$('pass').value,ssl:$('ssl').value};}
 function log(s){const l=$('log');l.textContent+=s+"\n";l.scrollTop=l.scrollHeight;}
-function toast(msg,isErr){
+// kind: true (legacy) or 'err' -> red, 6s; 'ok' -> green success, 3.5s; omitted/falsy -> neutral
+// info, 3.5s. The boolean form is kept working so none of this function's many existing callers
+// needed to change - only call sites that want the new green "success" variant pass 'ok'.
+function toast(msg,kind){
+  const cls=(kind===true||kind==='err')?'err':(kind==='ok'?'ok':'');
   let box=$('toasts');if(!box){box=document.createElement('div');box.id='toasts';document.body.appendChild(box);}
-  const t=document.createElement('div');t.className='toast'+(isErr?' err':'');t.textContent=msg;box.appendChild(t);
-  setTimeout(()=>{t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(()=>t.remove(),300);},isErr?6000:3500);
+  const t=document.createElement('div');t.className='toast'+(cls?' '+cls:'');t.textContent=msg;box.appendChild(t);
+  setTimeout(()=>{t.style.opacity='0';t.style.transition='opacity .3s';setTimeout(()=>t.remove(),300);},cls==='err'?6000:3500);
 }
 function showDead(){const d=$('deadOverlay');if(d)d.style.display='flex';}
 function hideDead(){const d=$('deadOverlay');if(d)d.style.display='none';}
@@ -882,7 +887,7 @@ function connTitle(){const s=$('connlist');if(s)s.title=(s.selectedIndex>0?s.opt
 // --- Connections: dropdown, New/Save/pick, and the 'primary' (auto-open) flag.
 function updatePrimeBtn(){const b=$('primeBtn');if(!b)return;const n=$('connlist').value;const isP=(n&&n===window._primaryConn);b.textContent=(isP?'\u2605':'\u2606')+' Primary';b.style.color=isP?'#f5c518':'';b.title=isP?'This is the primary connection (opens on startup). Click to unset.':'Set as primary connection (opens automatically on startup)';}
 function connMenu(e){e.stopPropagation();if(!$('connlist').value){toast('Select a saved connection first.',true);return;}const b=e.currentTarget.getBoundingClientRect();const isP=($('connlist').value===window._primaryConn);const items=[['Edit\u2026',()=>editConn()],['Clone\u2026',()=>cloneConn()],[(isP?'Unset primary':'Set as primary'),()=>setPrimary()],['Clear password',()=>forgetPassword()]];if(!document.body.classList.contains('disconnected')){items.push('-');items.push(['Connect with different details\u2026',()=>toggleConnForm()]);}items.push('-');items.push(['Delete\u2026',()=>delConn()]);menu(b.left,b.bottom+2,items);}
-async function forgetPassword(){const n=$('connlist').value;if(!n){toast('Select a connection first.',true);return;}if(!(await ask('Remove the saved password for "'+n+'"? You will type it on next connect.')))return;const g=await api('/api/conn-get',{name:n});if(!g.ok){toast('Could not load connection.',true);return;}const r=await api('/api/conn-save',{name:n,conn:{host:g.conn.host,port:g.conn.port,user:g.conn.user,ssl:g.conn.ssl,password:''},savepw:false});if(r.ok){log('Removed saved password for '+n+'.');if($('connlist').value===n)setPass('');}else alert(r.error||'Failed');}
+async function forgetPassword(){const n=$('connlist').value;if(!n){toast('Select a connection first.',true);return;}if(!(await ask('Remove the saved password for "'+n+'"? You will type it on next connect.')))return;const g=await api('/api/conn-get',{name:n});if(!g.ok){toast('Could not load connection.',true);return;}const r=await api('/api/conn-save',{name:n,conn:{host:g.conn.host,port:g.conn.port,user:g.conn.user,ssl:g.conn.ssl,password:''},savepw:false});if(r.ok){log('Removed saved password for '+n+'.');if($('connlist').value===n)setPass('');}else toast(r.error||'Failed',true);}
 async function setPrimary(){const n=$('connlist').value;if(!n){toast('Select a connection first.',true);return;}const target=(n===window._primaryConn)?'':n;const r=await api('/api/conn-primary',{name:target});if(!r.ok){toast(r.error||'Failed',true);return;}await refreshConns();$('connlist').value=n;updatePrimeBtn();log(target?('Primary connection set: '+n+' (opens on startup)'):'Primary connection cleared.');}
 async function refreshConns(){const r=await api('/api/conn-list');const sel=$('connlist');sel.innerHTML='<option value="" disabled hidden>Connections</option>';const n=(r.ok&&r.items)?r.items.length:0;window._primaryConn='';window._connMeta={};if(r.ok)r.items.forEach(c=>{if(c.primary)window._primaryConn=c.name;window._connMeta[c.name]={accent:c.accent||'',env:c.env||'',readonly:!!c.readonly};const o=document.createElement('option');o.value=c.name;
   // Only READ-ONLY here: the environment label has its own chip (envChip) beside the
@@ -1570,7 +1575,7 @@ async function exec(sql,note,btn){if(roBlock())return false;
  let orig=null;if(btn){orig=btn.textContent;btn.disabled=true;btn.textContent='Working...';}
  const r=await api('/api/exec',{sql});
  if(btn){btn.disabled=false;btn.textContent=orig;}
- if(r.ok){log((note||'OK')+': '+sql);}else{log('ERROR: '+r.error);alert(r.error);}return r.ok;}
+ if(r.ok){log((note||'OK')+': '+sql);}else{log('ERROR: '+r.error);toast(r.error,true);}return r.ok;}
 async function newSchema(){const res=await inputBox({title:'New schema',okText:'Create',fields:[{key:'name',label:'Schema name'}]});if(!res||!res.name.trim())return;if(await exec('CREATE DATABASE '+qid(res.name.trim()),'Created schema'))loadSchemas();}
 // Reuse the SAME DELIMITER-wrapped scaffold openDdl() already uses for EDITING an existing
 // procedure/function/trigger - applyDdl() sends it through /api/script, which both PS and Tauri
@@ -1624,7 +1629,7 @@ async function duplicateTable(db,name){
  if(res.data){sql+='\nINSERT INTO '+qid(db)+'.'+qid(newName)+' SELECT * FROM '+qid(db)+'.'+qid(name)+';';}
  const r=await api('/api/script',{sql,db});
  if(r.ok){log('Duplicated '+name+' as '+newName+(res.data?' (with data)':' (structure only)')+'.');loadObjects(db);}
- else{alert(r.error||'Duplicate failed');}
+ else{toast(r.error||'Duplicate failed',true);}
 }
 async function maint(db,name,op){const kw=op==='OPTIMIZE'?'OPTIMIZE TABLE':op==='ANALYZE'?'ANALYZE TABLE':op==='CHECK'?'CHECK TABLE':'REPAIR TABLE';const r=await api('/api/query',{sql:kw+' '+qid(db)+'.'+qid(name)});if(r.ok&&r.rows&&r.rows.length){log(op+': '+r.rows.map(x=>x.join(' | ')).join(' ; '));}else if(r.ok){log(op+' OK');}else{log(op+' error: '+r.error);}}
 async function genTemplate(db,name){const r=await api('/api/query',{sql:"SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="+lit(db)+" AND TABLE_NAME="+lit(name)+" ORDER BY ORDINAL_POSITION"});if(!r.ok||!r.rows.length){toast('Could not read columns.',true);return;}const cols=r.rows.map(x=>x[0]);const tbl=qid(db)+'.'+qid(name);const cl=cols.map(qid).join(', ');const vals=cols.map(()=>'?').join(', ');const sets=cols.map(c=>qid(c)+' = ?').join(',\n  ');const sql='-- SELECT\nSELECT '+cl+'\nFROM '+tbl+'\nWHERE 1=1\nLIMIT 100;\n\n-- INSERT\nINSERT INTO '+tbl+' ('+cl+')\nVALUES ('+vals+');\n\n-- UPDATE\nUPDATE '+tbl+' SET\n  '+sets+'\nWHERE /* key */ ;';openTab(name+' templates',sql,db,false,null);}
@@ -2804,7 +2809,7 @@ function rowForm(id,ri){const t=T(id);_rf={id:id,ri:ri};$('rfTitle').textContent
  show('mRowForm');}
 function rfSave(){if(!_rf)return;const t=T(_rf.id),ri=_rf.ri;if(!t.pending){hide('mRowForm');_rf=null;toast('This result is not editable (no primary key detected) - nothing was saved.',true);return;}t.cols.forEach((c,ci)=>{const ta=$('rf_'+ci);if(!ta)return;const v=(ta.dataset.null==='1')?null:ta.value;const orig=t.rows[ri][ci];const key=ri+':'+ci;if(v===orig){if(t.pending&&key in t.pending.upd)delete t.pending.upd[key];}else{if(v===null&&t.pk&&t.pk.indexOf(t.cols[ci])>=0){/* skip PK->null */}else if(t.pending){t.pending.upd[key]=v;}}});hide('mRowForm');renderGrid(_rf.id);_rf=null;}
 function toggleDel(id,ri){const t=T(id);if(t.pending.del.has(ri))t.pending.del.delete(ri);else t.pending.del.add(ri);renderGrid(id);}
-function deleteSel(id){const t=T(id);if(!t.pk){alert('This result is not editable (no primary key).');return;}const ids=[...(t.selected||[])];if(!ids.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}ids.forEach(ri=>t.pending.del.add(ri));renderGrid(id);log(ids.length+' row(s) marked for deletion - click Apply to commit.');}
+function deleteSel(id){const t=T(id);if(!t.pk){toast('This result is not editable (no primary key).',true);return;}const ids=[...(t.selected||[])];if(!ids.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}ids.forEach(ri=>t.pending.del.add(ri));renderGrid(id);log(ids.length+' row(s) marked for deletion - click Apply to commit.');}
 function addRow(id){const t=T(id);t.pending.ins.push({});renderGrid(id);}
 function delIns(id,ii){const t=T(id);t.pending.ins.splice(ii,1);renderGrid(id);}
 async function editIns(td,id,ii,col){clearTimeout(clickTimer);const t=T(id);const cur=t.pending.ins[ii][col];
@@ -2862,8 +2867,8 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
   if(v!==null&&!isHex(v)&&!isPlainInt(v)) badBin.push(cn+' = '+JSON.stringify(String(v)));
  });});
  if(badBin.length){
-  alert('These are BIT columns and only accept a plain integer or a 0x hex value:\n\n'+badBin.join('\n')
-    +'\n\nUse 1 or 0x01 for on, 0 or 0x00 for off/zero.');
+  toast('These are BIT columns and only accept a plain integer or a 0x hex value:\n'+badBin.join('\n')
+    +'\nUse 1 or 0x01 for on, 0 or 0x00 for off/zero.',true);
   return;
  }
  // updates grouped by row
@@ -2883,7 +2888,7 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
  // parent that does not exist and silently break referential integrity the schema was
  // written to guarantee.
  const r=await api('/api/script',{sql:S.join('\n'),transaction:true});
- if(r.ok){log('Applied '+S.length+' change(s).');invalidateTableCache(t.db,t.table);openRun(id).then(()=>refreshTabDirty(id));}else{log('APPLY error: '+r.error);alert('Apply failed:\n\n'+r.error);}}
+ if(r.ok){log('Applied '+S.length+' change(s).');toast('Applied '+S.length+' change(s).','ok');invalidateTableCache(t.db,t.table);openRun(id).then(()=>refreshTabDirty(id));}else{log('APPLY error: '+r.error);toast('Apply failed: '+r.error,true);}}
 
 async function applyDdl(id){if(roBlock())return;const t=T(id);const st=$('st_'+id);st.className='status';st.textContent='Applying...';const r=await api('/api/script',{sql:$('ed_'+id).value,db:(t.ddl&&t.ddl.db)||dbOf(t)});if(r.ok){st.textContent='Applied OK.';log('APPLY OK: '+t.title);if(t.ddl)loadObjects(t.ddl.db);}else{st.className='status err';st.textContent=r.error;log('APPLY ERROR: '+r.error);}}
 
@@ -2942,7 +2947,7 @@ function insSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!r
 async function dl(text,name){
  const ext=(name.split('.').pop()||'').toLowerCase();const filters=ext?[{name:ext.toUpperCase()+' file',extensions:[ext]}]:undefined;
  // Tauri: native Save As + backend write
- try{if(window.__TAURI__&&window.__TAURI__.dialog&&window.__TAURI__.dialog.save){const p=await window.__TAURI__.dialog.save({defaultPath:name,filters});if(!p)return;const r=await window.__TAURI__.core.invoke('save_text',{req:{path:p,content:text}});if(r&&r.ok===false){alert('Save failed: '+r.error);}else{log('Saved: '+p);}return;}}catch(e){toast('Save failed: '+e,true);return;}
+ try{if(window.__TAURI__&&window.__TAURI__.dialog&&window.__TAURI__.dialog.save){const p=await window.__TAURI__.dialog.save({defaultPath:name,filters});if(!p)return;const r=await window.__TAURI__.core.invoke('save_text',{req:{path:p,content:text}});if(r&&r.ok===false){toast('Save failed: '+r.error,true);}else{log('Saved: '+p);toast('Saved: '+p,'ok');}return;}}catch(e){toast('Save failed: '+e,true);return;}
  // Chromium browsers (Edge/Chrome): File System Access "Save As"
  try{if(window.showSaveFilePicker){const opts={suggestedName:name};if(ext)opts.types=[{description:ext.toUpperCase()+' file',accept:{'text/plain':['.'+ext]}}];const h=await window.showSaveFilePicker(opts);const w=await h.createWritable();await w.write(text);await w.close();log('Saved: '+name);return;}}catch(e){if(e&&e.name==='AbortError')return;}
  // Fallback: classic download to the default folder
@@ -2956,7 +2961,7 @@ async function dl(text,name){
 // two paths (File System Access, classic download) already accept a Blob natively as-is.
 async function dlBinary(blob,name){
  const ext=(name.split('.').pop()||'').toLowerCase();const filters=ext?[{name:ext.toUpperCase()+' file',extensions:[ext]}]:undefined;
- try{if(window.__TAURI__&&window.__TAURI__.dialog&&window.__TAURI__.dialog.save){const p=await window.__TAURI__.dialog.save({defaultPath:name,filters});if(!p)return;const buf=await blob.arrayBuffer();const bytes=Array.from(new Uint8Array(buf));const r=await window.__TAURI__.core.invoke('save_binary',{req:{path:p,bytes:bytes}});if(r&&r.ok===false){alert('Save failed: '+r.error);}else{log('Saved: '+p);}return;}}catch(e){toast('Save failed: '+e,true);return;}
+ try{if(window.__TAURI__&&window.__TAURI__.dialog&&window.__TAURI__.dialog.save){const p=await window.__TAURI__.dialog.save({defaultPath:name,filters});if(!p)return;const buf=await blob.arrayBuffer();const bytes=Array.from(new Uint8Array(buf));const r=await window.__TAURI__.core.invoke('save_binary',{req:{path:p,bytes:bytes}});if(r&&r.ok===false){toast('Save failed: '+r.error,true);}else{log('Saved: '+p);toast('Saved: '+p,'ok');}return;}}catch(e){toast('Save failed: '+e,true);return;}
  try{if(window.showSaveFilePicker){const opts={suggestedName:name};if(ext)opts.types=[{description:ext.toUpperCase()+' file',accept:{'image/png':['.'+ext]}}];const h=await window.showSaveFilePicker(opts);const w=await h.createWritable();await w.write(blob);await w.close();log('Saved: '+name);return;}}catch(e){if(e&&e.name==='AbortError')return;}
  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();}
 
@@ -2987,7 +2992,7 @@ function libImportFile(e){const f=e.target.files&&e.target.files[0];if(!f)return
   arr.forEach(x=>{if(x&&x.name&&typeof x.sql==='string'){map[x.name]={name:x.name,sql:x.sql,schema:x.schema||'',ts:x.ts||Date.now()};n++;}});
   const merged=Object.keys(map).map(k=>map[k]).sort((a,b)=>(b.ts||0)-(a.ts||0));api('/api/lib-replace',{items:merged}).then(()=>libLoad()).then(()=>libRender());
   log('Imported '+n+' quer'+(n===1?'y':'ies')+' into the library.');}
-  catch(err){alert('That file is not a valid query-library JSON export.');}
+  catch(err){toast('That file is not a valid query-library JSON export.',true);}
   e.target.value='';};
  r.readAsText(f);}
 async function openLibrary(){$('libName').value='';$('libSearch').value='';show('mLib');await libLoad();libRender();}
@@ -3530,7 +3535,7 @@ async function changePassword(){const v=window._selUser;if(!v){toast('Select a u
  // like hex as raw bytes instead of the literal text the user typed.
  const sql="ALTER USER "+lit(u)+"@"+lit(h)+" IDENTIFIED BY "+strLit(res.pw)+";";
  const r=await api('/api/exec',{sql:sql});
- if(r.ok){log('Password changed for '+u+'@'+h+'.');}else{alert('Failed: '+(r.error||'unknown'));}}
+ if(r.ok){log('Password changed for '+u+'@'+h+'.');toast('Password changed for '+u+'@'+h+'.','ok');}else{toast('Failed: '+(r.error||'unknown'),true);}}
 async function dropUser(){const v=window._selUser;if(!v)return;const[u,h]=v.split('\x01');if(!(await ask('DROP USER '+u+'@'+h+' ?')))return;if(await exec("DROP USER "+lit(u)+"@"+lit(h),'Dropped user'))openUsers();}
 async function grantUser(){const v=window._selUser;if(!v){toast('Select a user first.',true);return;}const[u,h]=v.split('\x01');const res=await grantRevokeDialog('grant');if(!res||!res.g.trim())return;
  const sql="GRANT "+res.g.trim()+" TO "+lit(u)+"@"+lit(h)+(res.wgo?' WITH GRANT OPTION':'');
@@ -4221,7 +4226,7 @@ let brState={filter:'',mode:'file',cb:null,cur:'',parent:'ROOT'};
 // fully expanded once the file browser closes.
 function browse(opts){const open=[...document.querySelectorAll('.modal.show')].map(m=>m.id).filter(x=>x!=='mBrowse'&&!window._floatingMinimized[x]);brState={filter:opts.filter||'',mode:opts.mode||'file',cb:opts.onPick,cur:'',parent:'ROOT',hidden:open};open.forEach(id=>hide(id));$('brTitle').textContent=opts.title||'Browse';show('mBrowse');brNav(opts.start||'ROOT');}
 async function brNav(path){const r=await api('/api/browse',{path,filter:brState.filter,dirsOnly:brState.mode==='folder'});
- if(!r.ok){if(path!=='ROOT'){brNav('ROOT');}else{alert(r.error);}return;}
+ if(!r.ok){if(path!=='ROOT'){brNav('ROOT');}else{toast(r.error,true);}return;}
  brState.cur=r.path;brState.parent=r.parent;$('brPath').textContent=r.path||'(drives)';
  const list=$('brList');list.innerHTML='';
  r.dirs.forEach(d=>{const el=document.createElement('div');el.className='item';el.innerHTML='&#128193; '+esc(d.name);el.onclick=()=>brNav(d.path);list.appendChild(el);});
@@ -4239,7 +4244,7 @@ function brPickFolder(){const c=brState.cb,v=brState.cur;brClose();c(v);}
 function brPickFiles(){const sel=[...document.querySelectorAll('.brf:checked')].map(c=>c.value);const c=brState.cb;brClose();c(sel);}
 function impAppend(paths){const cur=$('impFiles').value.trim();const add=paths.filter(Boolean).join('\n');$('impFiles').value=(cur?cur+'\n':'')+add;}
 function impAddFiles(){browse({title:'Select SQL files',filter:'*.sql',mode:'files',onPick:ps=>{impAppend(ps);log('Added '+ps.length+' file(s).');}});}
-function impAddFolder(){browse({title:'Select a folder (imports all .sql inside)',mode:'folder',onPick:async folder=>{const r=await api('/api/browse',{path:folder,filter:'*.sql',dirsOnly:false});if(r.ok){const ps=r.files.map(f=>f.path);impAppend(ps);log('Added '+ps.length+' .sql file(s) from '+folder);}else alert(r.error);}});}
+function impAddFolder(){browse({title:'Select a folder (imports all .sql inside)',mode:'folder',onPick:async folder=>{const r=await api('/api/browse',{path:folder,filter:'*.sql',dirsOnly:false});if(r.ok){const ps=r.files.map(f=>f.path);impAppend(ps);log('Added '+ps.length+' .sql file(s) from '+folder);}else toast(r.error,true);}});}
 // ---- close tabs ----
 async function closeAll(){const dirty=tabs.filter(t=>pendingCount(t)>0);if(dirty.length){if(!(await ask(dirty.length+' tab(s) have unsaved changes. Close all and discard them?')))return;}
  // Same reasoning as closeTab(): a tab being removed while its query is still in flight must go
@@ -4298,7 +4303,7 @@ function acAccept(id){const ta=acTa||$('ed_'+id);const pos=ta.selectionStart;con
 
 let csvTarget={db:null,table:null};
 async function exportFull(db,name,fmt){fmt=fmt||'csv';const ext=(fmt==='inserts')?'sql':'csv';const defName=name+(fmt==='inserts'?'_inserts.sql':'.csv');
- if(window.__TAURI__&&window.__TAURI__.core){let path;try{path=await window.__TAURI__.dialog.save({defaultPath:defName,filters:[{name:ext.toUpperCase()+' file',extensions:[ext]}]});}catch(e){toast('Save dialog failed: '+e,true);return;}if(!path)return;log('Exporting all rows of '+db+'.'+name+'...');const r=await window.__TAURI__.core.invoke('export_table',{req:{conn:getConn(),db:db,table:name,file:path,format:fmt,nullValue:csvNullMarker()}});if(r&&r.ok)log(r.message);else alert('Export failed: '+(r?r.error:'unknown'));return;}
+ if(window.__TAURI__&&window.__TAURI__.core){let path;try{path=await window.__TAURI__.dialog.save({defaultPath:defName,filters:[{name:ext.toUpperCase()+' file',extensions:[ext]}]});}catch(e){toast('Save dialog failed: '+e,true);return;}if(!path)return;log('Exporting all rows of '+db+'.'+name+'...');const r=await window.__TAURI__.core.invoke('export_table',{req:{conn:getConn(),db:db,table:name,file:path,format:fmt,nullValue:csvNullMarker()}});if(r&&r.ok){log(r.message);toast(r.message,'ok');}else toast('Export failed: '+(r?r.error:'unknown'),true);return;}
  try{
    const cq=await api('/api/query',{sql:"SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA="+lit(db)+" AND TABLE_NAME="+lit(name)});
    const est=(cq.ok&&cq.rows.length&&cq.rows[0][0]!=null)?+cq.rows[0][0]:null;
