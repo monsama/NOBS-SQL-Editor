@@ -617,6 +617,18 @@ fn sql_is_readonly(sql: &str) -> bool {
         if t.is_empty() { continue; }
         let w = t.split_whitespace().next().unwrap_or("").to_uppercase();
         if !ALLOW.contains(&w.as_str()) { return false; }
+        // SELECT ... INTO OUTFILE / INTO DUMPFILE writes a file on the DATABASE SERVER's
+        // filesystem, as the mysqld user. It changes no table data, which is presumably why it
+        // was never considered here - but a connection the user marked "read-only / safe mode"
+        // being able to drop files on the server is not read-only. Verified against a live
+        // MariaDB whose secure_file_priv was empty: the statement was reported as read-only and
+        // wrote the file. Only the OUTFILE/DUMPFILE forms are refused; SELECT ... INTO @var is an
+        // ordinary variable assignment and stays allowed, and an INTO inside a string literal is
+        // not a clause at all - which is why this looks for the keyword outside quotes.
+        if let Some(rest) = split_off_keyword(t, "INTO") {
+            let head = rest.split_whitespace().next().unwrap_or("").to_uppercase();
+            if head == "OUTFILE" || head == "DUMPFILE" { return false; }
+        }
         // SET is allowed because a session variable is harmless, but SET GLOBAL / SET PERSIST -
         // and their @@GLOBAL. / @@PERSIST. spellings - reconfigure the server for every
         // connection, which is not something a read-only connection should be able to do.
@@ -3418,6 +3430,33 @@ mod tests {
 // SET is allow-listed because a session variable is harmless, and that allow-listing was
     // letting three SET forms that are not variable assignments at all straight through on a
     // connection the user had marked read-only.
+    // SELECT is allow-listed, and INTO OUTFILE / INTO DUMPFILE hang off a SELECT. They write no
+    // table data - they write a FILE, on the database server, as the mysqld user. Verified against
+    // a live MariaDB with an empty secure_file_priv: read-only mode reported the statement as
+    // allowed and the file appeared on disk with the expected contents.
+    #[test]
+    fn read_only_blocks_select_into_outfile() {
+        assert!(!sql_is_readonly("SELECT * FROM t INTO OUTFILE '/tmp/x.csv'"));
+        assert!(!sql_is_readonly("SELECT * FROM t INTO DUMPFILE '/tmp/x.bin'"));
+        assert!(!sql_is_readonly("select 1 into outfile '/tmp/x'"));
+        // MySQL also accepts the clause before FROM.
+        assert!(!sql_is_readonly("SELECT * INTO OUTFILE '/tmp/x' FROM t"));
+        // Reachable behind the other allow-listed prefixes too.
+        assert!(!sql_is_readonly("WITH x AS (SELECT 1) SELECT * FROM x INTO OUTFILE '/tmp/x'"));
+        assert!(!sql_is_readonly("SELECT 1; SELECT * FROM t INTO OUTFILE '/tmp/x'"));
+
+        // SELECT ... INTO @var is an ordinary variable assignment, not a file write.
+        assert!(sql_is_readonly("SELECT COUNT(*) INTO @n FROM t"));
+        assert!(sql_is_readonly("SELECT a, b INTO @x, @y FROM t"));
+        // An INTO OUTFILE that is only ever text inside a string is not a clause.
+        assert!(sql_is_readonly("SELECT 'INTO OUTFILE' AS s"));
+        assert!(sql_is_readonly("SELECT * FROM t WHERE note = 'dump INTO OUTFILE now'"));
+        // A column that merely happens to be called outfile is not the clause either.
+        assert!(sql_is_readonly("SELECT outfile FROM t"));
+        // Ordinary reads keep working.
+        assert!(sql_is_readonly("SELECT * FROM t"));
+    }
+
     #[test]
     fn read_only_blocks_set_forms_that_are_not_session_variables() {
         // Changes an account's credentials - any account, root included.
