@@ -2466,6 +2466,31 @@ function hexToStrictText(hexStr){
   return text;
  }catch(e){return null;}
 }
+// Accepts the hex people actually have to hand and returns the canonical 0x.. form this app
+// stores, or null when the input is not usable hex. Whitespace goes first, so a value copied out
+// of MySQL Workbench's hex view - "24 37 24 43", or several lines of it - works as well as the
+// plain "0x2437.." a cell here copies. The 0x prefix is optional for the same reason.
+//
+// Validation matters as much as the tidying: hexToBytes() slices off two characters and runs
+// parseInt on each pair, so "zz" silently became byte 0 and a stray character turned into a hole
+// in the data. An odd number of digits is half a byte and is not a value either.
+function normalizeHexInput(s){
+ const t=String(s==null?'':s).replace(/\s+/g,'');
+ const body=/^0[xX]/.test(t)?t.slice(2):t;
+ if(body==='')return '0x';
+ if(!/^[0-9A-Fa-f]+$/.test(body))return null;
+ if(body.length%2)return null;
+ return '0x'+body.toLowerCase();
+}
+// True when Text-mode content looks like a hex value pasted into the wrong tab. Text mode runs
+// textToHex() over the box, so saving "0x2437.." there stores the CHARACTERS 0,x,2,4,3,7 - not
+// the bytes they denote. That is how a blob in this database came to hold 307 bytes of hex-dump
+// text in place of a 102-byte hash. Only the 0x-prefixed form is flagged: a bare run of hex
+// digits is very often a genuine value (an MD5 written out as text, say).
+function looksLikePastedHex(s){
+ return /^0[xX][0-9A-Fa-f]{8,}$/.test(String(s==null?'':s).replace(/\s+/g,''));
+}
+
 function textToHex(text){return bytesToHex(new TextEncoder().encode(text));}
 const IMAGE_SIGS=[[[0x89,0x50,0x4E,0x47],'image/png'],[[0xFF,0xD8,0xFF],'image/jpeg'],[[0x47,0x49,0x46,0x38],'image/gif'],[[0x42,0x4D],'image/bmp']];
 function detectImageMime(bytes){
@@ -2593,7 +2618,7 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
   // string goes unquoted via litForCol's existing BIT-integer path, a "0x.." string goes unquoted
   // via lit()'s existing hex-literal passthrough. Neither needs re-encoding here.
   if(opts.bitNumeric)return ta.value;
-  if(opts.hexText)return _vHexState.mode==='text'?textToHex(ta.value):ta.value;
+  if(opts.hexText)return _vHexState.mode==='text'?textToHex(ta.value):normalizeHexInput(ta.value);
   return opts.options?sel.value:ta.value;
  };
  if(!opts.options&&!opts.multiOptions&&!opts.dateType){
@@ -2611,7 +2636,26 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
  // modal's own action-row convention in this app (Save/Apply/Import/Run.../then Close), not a
  // one-off choice for just this dialog.
  if(opts.onNull)add('Set NULL','',()=>{opts.onNull();hide('mView');});
- if(opts.onSave)add('Save','go',()=>{opts.onSave(getVal());hide('mView');});
+ // Binary cells get two checks before anything is written. Hex mode: the box must actually hold
+// hex, because an unusable value used to be stored as literal text or quietly padded with zero
+// bytes. Text mode: content that looks like a pasted hex value is almost certainly meant for the
+// Hex tab, and saving it here stores the characters rather than the bytes - confirmed rather
+// than blocked, since a token really can begin with 0x.
+if(opts.onSave)add('Save','go',async()=>{
+ if(opts.hexText&&_vHexState){
+  if(_vHexState.mode==='hex'&&normalizeHexInput(ta.value)===null){
+   toast('That is not a usable hex value. Expected hex digits, optionally 0x-prefixed, an even number of them - spaces and line breaks are fine.',true);return;
+  }
+  if(_vHexState.mode==='text'&&looksLikePastedHex(ta.value)){
+   if(!(await ask('This looks like a hex value pasted into the Text tab.
+
+Saved as Text it stores the characters "0x24..." themselves, not the bytes they stand for. Switch to the Hex tab to store the bytes.
+
+Save it as literal text anyway?')))return;
+  }
+ }
+ opts.onSave(getVal());hide('mView');
+});
  add('Close','',()=>hide('mView'));
  show('mView');setTimeout(()=>{if(opts.multiOptions){}else if(opts.options){sel.focus();}else if(opts.dateType){dt.focus();}else if(!opts.readonly){ta.focus();}},60);}
 // Column type info, fetched once per table (lazily, only when the user actually starts editing

@@ -148,3 +148,55 @@ test('a single-statement DDL failure is not given that warning', () => {
   assert.equal(note(err, 'ALTER TABLE t ADD COLUMN c INT;'), err);
   assert.equal(note(err, 'ALTER TABLE t ADD COLUMN c INT'), err);
 });
+
+// --- binary cell editing: hex in, hex out ----------------------------------------------------
+// A blob in a real database was found holding 307 bytes of hex-dump TEXT where a 102-byte hash
+// belonged. The value editor opens a binary cell in Text mode when the bytes decode as UTF-8, and
+// Text mode runs textToHex() over the box - so a hex value pasted there is stored as the
+// characters "0x24.." rather than the bytes they denote. These pin both directions of the guard.
+const hexFns = () => new Function(
+  extractFunction(html, 'normalizeHexInput') + '\n' +
+  extractFunction(html, 'looksLikePastedHex') + '\nreturn {normalizeHexInput,looksLikePastedHex};')();
+
+test('hex copied from this app is accepted as-is', () => {
+  const { normalizeHexInput } = hexFns();
+  assert.equal(normalizeHexInput('0x00ff10'), '0x00ff10');
+  assert.equal(normalizeHexInput('0x00FF10'), '0x00ff10');
+});
+
+test('hex copied from Workbench survives its formatting', () => {
+  const { normalizeHexInput } = hexFns();
+  // Workbench's hex view separates bytes, and a long value wraps across lines. Neither should
+  // matter, and the 0x prefix it omits should not either.
+  assert.equal(normalizeHexInput('24 37 24 43'), '0x24372443');
+  assert.equal(normalizeHexInput('2437\n2443'), '0x24372443');
+  assert.equal(normalizeHexInput('  0x24 37\t24 43  '), '0x24372443');
+  assert.equal(normalizeHexInput('24372443'), '0x24372443');
+});
+
+test('input that is not usable hex is rejected rather than silently mangled', () => {
+  const { normalizeHexInput } = hexFns();
+  // hexToBytes() parseInts each pair, so "zz" used to become byte 0 - a hole in the data.
+  assert.equal(normalizeHexInput('0xzz'), null);
+  assert.equal(normalizeHexInput('$7$C6..../....'), null);
+  // Half a byte is not a value.
+  assert.equal(normalizeHexInput('0x123'), null);
+  assert.equal(normalizeHexInput('24 37 2'), null);
+  // An empty box means an empty value, not an error.
+  assert.equal(normalizeHexInput(''), '0x');
+  assert.equal(normalizeHexInput('0x'), '0x');
+});
+
+test('a hex value pasted into the Text tab is recognised', () => {
+  const { looksLikePastedHex } = hexFns();
+  assert.equal(looksLikePastedHex('0x24372443362e2e2e'), true);
+  assert.equal(looksLikePastedHex('  0x2437 2443 362e 2e2e  '), true);
+  // The actual decoded value must NOT trip it - that is the normal thing to save from Text mode.
+  assert.equal(looksLikePastedHex('$7$C6..../....RYngpNxf'), false);
+  assert.equal(looksLikePastedHex('hello world'), false);
+  // A bare run of hex digits is very often a genuine value (an MD5 written as text), so only the
+  // 0x-prefixed form is flagged.
+  assert.equal(looksLikePastedHex('d41d8cd98f00b204e9800998ecf8427e'), false);
+  // Too short to be worth second-guessing.
+  assert.equal(looksLikePastedHex('0x24'), false);
+});
