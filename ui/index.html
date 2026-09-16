@@ -370,7 +370,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 
 <div class="modal floating" id="mUserTransfer"><div class="box" style="width:820px;max-width:94vw;height:640px;display:flex;flex-direction:column;overflow:hidden;top:60px;left:130px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mUserTransfer')" title="Drag to move"><h3 style="margin:0 0 10px">Generate User Transfer Script</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mUserTransfer')" title="Maximize" id="maxBtn_mUserTransfer" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mUserTransfer')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
  <div class="muted" style="margin-bottom:8px;flex:none">Uses SHOW CREATE USER and SHOW GRANTS FOR against this connection - the same statements the server itself would emit, so the correct auth plugin, password hash, column/routine grants, and grant options all come through correctly (works on MySQL and MariaDB alike). CREATE USER statements are listed first so the grants below can reference them. Copy or save the result and run it on the TARGET server.</div>
- <div class="row" style="flex:none"><b>Exclude these accounts</b> <input id="utExclude" style="flex:1" value="mysql.sys,root,debian-sys-maint,mariadb.sys,healthcheck,mariabackup,galera,replica,PUBLIC"></div>
+ <div class="row" style="flex:none"><b>Exclude these accounts</b> <input id="utExclude" style="flex:1" value="mysql.sys,mysql.session,mysql.infoschema,root,debian-sys-maint,mariadb.sys,healthcheck,mariabackup,galera,replica,PUBLIC"></div>
  <div class="row" style="flex:none"><button class="go" onclick="genUserTransfer()">Generate</button><span id="utStatus" class="muted" style="margin-left:8px"></span></div>
  <textarea id="utResult" readonly style="width:100%;box-sizing:border-box;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px;margin-top:8px;flex:1;min-height:0"></textarea>
  <div class="row" style="justify-content:flex-end;flex:none"><button onclick="copyUserTransfer()">Copy</button><button onclick="saveUserTransferFile()">Save to file...</button><button onclick="hide('mUserTransfer')">Close</button></div>
@@ -536,7 +536,14 @@ function showDead(){const d=$('deadOverlay');if(d)d.style.display='flex';}
 function hideDead(){const d=$('deadOverlay');if(d)d.style.display='none';}
 // --- api(): the ONE way the UI talks to the server. Adds token + connection + read-only flag, returns parsed JSON, and shows the 'server down' overlay on failure.
 async function api(path,p,signal){p=p||{};p.token=TOKEN;
+ // Every call goes to the server you are actually CONNECTED to, never to whatever profile happens
+ // to be loaded in the form - so the connection is filled in here rather than trusted from the
+ // caller. conn-save is the one exception, because its conn is not a server to talk to at all:
+ // it is the profile being saved. Overwriting it made Save, Edit, Clone and Forget-password
+ // store the CONNECTED server's host, port, user, SSL settings and CA - and hand its password to
+ // the keychain under the other profile's name - whenever you were connected somewhere else.
  if(path==='/api/connect'){p.conn=getConn();p.ro=!!window.readOnly;}
+ else if(path==='/api/conn-save'&&p.conn){p.ro=false;}
  else{p.conn=window._activeConn||getConn();p.ro=(window._activeConn?!!window._activeReadOnly:!!window.readOnly);}
  busyStart();const cmd=path.replace('/api/','').replace(/-/g,'_');try{const invoke=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke);if(!invoke)return {ok:false,error:'Tauri bridge unavailable'};return await invoke(cmd,{req:p});}catch(e){return {ok:false,error:String(e)};}finally{busyStop();}}
 window._floatingPos = {};
@@ -1057,7 +1064,9 @@ async function connect() {
   const r = await api('/api/connect');
   if (!r.ok) {
     log('  ' + r.error);
-    toast('Connection failed: ' + r.error, true);
+    // Both backends already open their message with "Connection failed:", so adding it here too
+    // printed it twice.
+    toast(/^Connection failed/i.test(String(r.error)) ? r.error : 'Connection failed: ' + r.error, true);
     disconnect();
     if (tabs.length) { await closeAll(); }
     return;
@@ -1611,7 +1620,7 @@ async function newSchema(){const res=await inputBox({title:'New schema',okText:'
 async function newProcedure(db){
  const res=await inputBox({title:'New procedure',okText:'Create',fields:[{key:'name',label:'Procedure name'}]});
  if(!res||!res.name.trim())return;
- const name=res.name.trim();
+ const name=res.name.trim();if(!(await ddlConfirmNew(db,'procedure',name)))return;
  const body=window.mariadb
   ?('-- Fill in the procedure body, then click "Apply (recreate)".\nDELIMITER $$\nCREATE OR REPLACE PROCEDURE '+qid(db)+'.'+qid(name)+'()\nBEGIN\n\n  -- your logic here\n\nEND$$\nDELIMITER ;\n')
   :('-- Fill in the procedure body, then click "Apply (recreate)".\nDROP PROCEDURE IF EXISTS '+qid(db)+'.'+qid(name)+';\nDELIMITER $$\nCREATE PROCEDURE '+qid(db)+'.'+qid(name)+'()\nBEGIN\n\n  -- your logic here\n\nEND$$\nDELIMITER ;\n');
@@ -1620,7 +1629,7 @@ async function newProcedure(db){
 async function newFunction(db){
  const res=await inputBox({title:'New function',okText:'Create',fields:[{key:'name',label:'Function name'},{key:'returns',label:'Return type',value:'INT'}]});
  if(!res||!res.name.trim())return;
- const name=res.name.trim();const rt=(res.returns||'INT').trim()||'INT';
+ const name=res.name.trim();if(!(await ddlConfirmNew(db,'function',name)))return;const rt=(res.returns||'INT').trim()||'INT';
  const body=window.mariadb
   ?('-- Fill in the function body, then click "Apply (recreate)".\nDELIMITER $$\nCREATE OR REPLACE FUNCTION '+qid(db)+'.'+qid(name)+'() RETURNS '+rt+'\nDETERMINISTIC\nBEGIN\n\n  -- your logic here\n  RETURN NULL;\n\nEND$$\nDELIMITER ;\n')
   :('-- Fill in the function body, then click "Apply (recreate)".\nDROP FUNCTION IF EXISTS '+qid(db)+'.'+qid(name)+';\nDELIMITER $$\nCREATE FUNCTION '+qid(db)+'.'+qid(name)+'() RETURNS '+rt+'\nDETERMINISTIC\nBEGIN\n\n  -- your logic here\n  RETURN NULL;\n\nEND$$\nDELIMITER ;\n');
@@ -1633,7 +1642,7 @@ async function newTrigger(db,table){
   {key:'event',label:'Event',type:'select',options:['INSERT','UPDATE','DELETE'],value:'INSERT'}
  ]});
  if(!res||!res.name.trim())return;
- const name=res.name.trim();
+ const name=res.name.trim();if(!(await ddlConfirmNew(db,'trigger',name)))return;
  const body=window.mariadb
   ?('-- Fill in the trigger body, then click "Apply (recreate)".\nDELIMITER $$\nCREATE OR REPLACE TRIGGER '+qid(db)+'.'+qid(name)+'\n'+res.timing+' '+res.event+' ON '+qid(db)+'.'+qid(table)+'\nFOR EACH ROW\nBEGIN\n\n  -- your logic here\n\nEND$$\nDELIMITER ;\n')
   :('-- Fill in the trigger body, then click "Apply (recreate)".\nDROP TRIGGER IF EXISTS '+qid(db)+'.'+qid(name)+';\nDELIMITER $$\nCREATE TRIGGER '+qid(db)+'.'+qid(name)+'\n'+res.timing+' '+res.event+' ON '+qid(db)+'.'+qid(table)+'\nFOR EACH ROW\nBEGIN\n\n  -- your logic here\n\nEND$$\nDELIMITER ;\n');
@@ -1679,7 +1688,7 @@ async function openDdl(db,type,name){const r=await api('/api/ddl',{db,type,name}
    body='-- Edit then "Apply (recreate)".\nDROP '+kw+' IF EXISTS '+qid(db)+'.'+qid(name)+';\nDELIMITER $$\n'+body+'$$\nDELIMITER ;\n';
   }}
  else if(type==='view'){body='-- Edit then "Apply (recreate)".\n'+body.replace(/^CREATE/i,'CREATE OR REPLACE')+';\n';}
- openTab(type+': '+name,body,db,false,null,{type,db,name});}
+ openTab(type+': '+name,body,db,false,null,{type,db,name,orig:r.ddl});}
 
 // ---- tabs & editor ----
 // --- Query tabs: each tab has its own editor + result grid + pending edits.
@@ -3088,7 +3097,48 @@ function ddlFailureNote(err, sql){
  if (stmts < 2) return e;
  return e + "\n\nDDL is not transactional: any statements before this one have already been applied and cannot be rolled back. Check the object before re-running.";
 }
-async function applyDdl(id){if(roBlock())return;const t=T(id);const st=$('st_'+id);st.className='status';st.textContent='Applying...';const r=await api('/api/script',{sql:$('ed_'+id).value,db:(t.ddl&&t.ddl.db)||dbOf(t)});if(r.ok){st.textContent='Applied OK.';log('APPLY OK: '+t.title);if(t.ddl)loadObjects(t.ddl.db);}else{st.className='status err';const _n=ddlFailureNote(r.error,$('ed_'+id).value);st.textContent=_n;log('APPLY ERROR: '+_n);}}
+// MySQL has no CREATE OR REPLACE for procedures, functions or triggers, so the editor recreates
+// them as DROP then CREATE - and when the CREATE fails, the DROP has already happened. Measured on
+// MySQL 8.0.46: a syntax error in an edited procedure left the procedure gone, with its code
+// surviving only in the unsaved editor tab. (MariaDB's CREATE OR REPLACE is atomic and keeps the
+// old version.)
+//
+// So the editor remembers the definition it was opened with, refreshes it after every successful
+// apply, and after a failure checks whether the object still exists. If it does not, the previous
+// definition is put back and the user is told; if even that fails, the definition is opened in a
+// tab of its own and the message says plainly that the object is gone.
+async function ddlExists(db,type,name){
+ const q={procedure:"SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_TYPE='PROCEDURE' AND ROUTINE_SCHEMA="+lit(db)+" AND ROUTINE_NAME="+lit(name),
+          function:"SELECT COUNT(*) FROM information_schema.ROUTINES WHERE ROUTINE_TYPE='FUNCTION' AND ROUTINE_SCHEMA="+lit(db)+" AND ROUTINE_NAME="+lit(name),
+          trigger:"SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA="+lit(db)+" AND TRIGGER_NAME="+lit(name)}[type];
+ if(!q)return null;
+ const r=await api('/api/query',{sql:q});
+ return r.ok&&r.rows[0]?String(r.rows[0][0])!=='0':null;
+}
+async function ddlRememberCurrent(d){
+ if(!d||!/^(procedure|function|trigger)$/.test(d.type))return;
+ const r=await api('/api/ddl',{db:d.db,type:d.type,name:d.name});
+ if(r.ok&&r.ddl)d.orig=r.ddl;
+}
+async function ddlRestoreIfDropped(d){
+ if(!d||!d.orig||!/^(procedure|function|trigger)$/.test(d.type))return '';
+ if((await ddlExists(d.db,d.type,d.name))!==false)return '';
+ const script='DELIMITER $$\n'+d.orig+'$$\nDELIMITER ;\n';
+ const r=await api('/api/script',{sql:script,db:d.db});
+ if(r.ok&&(await ddlExists(d.db,d.type,d.name))){
+  loadObjects(d.db);
+  return '\n\nThe '+d.type+' had already been dropped when this failed, so its previous version has been put back. Your edit is still here in the editor.';
+ }
+ openTab(d.type+': '+d.name+' (previous version)','-- '+d.type+' '+d.name+' could not be restored automatically: '+String(r.error||'unknown error').split('\n')[0]+'\n-- This is its definition from before your edit. Apply this tab to put it back.\n'+script,d.db,false,null,{type:d.type,db:d.db,name:d.name,orig:d.orig});
+ return '\n\n'+d.type.toUpperCase()+' '+d.name+' IS GONE: it was dropped, the new version failed, and putting the old one back failed too. Its previous definition is open in a new tab.';
+}
+// "New procedure" with the name of one that already exists would replace it without a word - by
+// DROP on MySQL, by CREATE OR REPLACE on MariaDB. Ask first.
+async function ddlConfirmNew(db,type,name){
+ if(!(await ddlExists(db,type,name)))return true;
+ return await ask('A '+type+' named '+name+' already exists in '+db+'.\n\nApplying the new one will REPLACE it. Continue?');
+}
+async function applyDdl(id){if(roBlock())return;const t=T(id);const st=$('st_'+id);st.className='status';st.textContent='Applying...';const sql=$('ed_'+id).value;const r=await api('/api/script',{sql,db:(t.ddl&&t.ddl.db)||dbOf(t)});if(r.ok){st.textContent='Applied OK.';log('APPLY OK: '+t.title);if(t.ddl){await ddlRememberCurrent(t.ddl);loadObjects(t.ddl.db);}}else{st.className='status err';const _n=ddlFailureNote(r.error,sql)+(await ddlRestoreIfDropped(t.ddl));st.textContent=_n;log('APPLY ERROR: '+_n);}}
 
 function bTSV(cols,rows){return cols.join('\t')+'\n'+rows.map(r=>r.map(v=>v===null?'NULL':v).join('\t')).join('\n');}
 // How a NULL is written to CSV. A NULL and an empty string both used to come out as an empty
@@ -3742,34 +3792,132 @@ async function grantUser(){const v=window._selUser;if(!v){toast('Select a user f
 // ---- table designer ----
 const DTYPES=['INT','BIGINT','TINYINT','SMALLINT','MEDIUMINT','DECIMAL','FLOAT','DOUBLE','BIT','BOOLEAN','CHAR','VARCHAR','TEXT','MEDIUMTEXT','LONGTEXT','DATE','DATETIME','TIMESTAMP','TIME','YEAR','JSON','BLOB','LONGBLOB','ENUM','BINARY','VARBINARY'];
 let dOrig=null,dEdited=false;
+// The designer shows a column as name / type / length / flags / default / comment, but a real
+// column carries more than that: UNSIGNED, a character set and collation, ON UPDATE, INVISIBLE, a
+// fractional-seconds precision, a DECIMAL scale, an ENUM's value list, and a default that may be an
+// expression rather than a literal. None of those used to survive a MODIFY. The length box was
+// filled from CHARACTER_MAXIMUM_LENGTH or NUMERIC_PRECISION alone, so editing nothing but the
+// comment on a column rewrote it - measured on MySQL 8.0.46, from a comment-only edit:
+//
+//   DECIMAL(10,2)   12.34                       ->  DECIMAL(10,0)  12
+//   INT UNSIGNED                                ->  INT (signed)
+//   DATETIME(6)     2024-01-01 12:34:56.123456  ->  DATETIME       2024-01-01 12:34:56
+//   latin1 text                                 ->  utf8mb4, re-encoded
+//   ENUM('alpha','beta')                        ->  ENUM(5), a syntax error
+//
+// dColFromInfo() reads everything from COLUMN_TYPE and friends instead. What the form cannot show
+// is kept on the row (keep) and written back unchanged, and only dropped where the user's own edit
+// makes it meaningless - UNSIGNED on a column changed to VARCHAR, a character set on one changed
+// to INT. Top-level and DOM-free so tests can drive them with real information_schema rows.
+const D_TEXTY=/^(CHAR|VARCHAR|TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT|ENUM|SET)$/;
+const D_NUMERIC=/^(TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT|DECIMAL|NUMERIC|FLOAT|DOUBLE|REAL)$/;
+const D_TEMPORAL=/^(DATETIME|TIMESTAMP)$/;
+// row: COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, EXTRA, COLUMN_KEY,
+//      COLUMN_COMMENT, CHARACTER_SET_NAME, COLLATION_NAME, GENERATION_EXPRESSION
+// tableColl: the table's default collation. A column that merely inherits it gets no clause of its
+// own, so SHOW CREATE TABLE - and Compare DB - still read it as inheriting after an edit.
+function dColFromInfo(row,isMaria,tableColl){
+ const [name,dataType,colType,nullable,rawDef,extraRaw,key,comment,cs,coll,genExpr]=row;
+ const extra=extraRaw||'';
+ const type=String(dataType).toUpperCase();
+ // "decimal(10,2) unsigned zerofill", "enum('a)','b')", "bigint unsigned", "datetime(6)".
+ // The greedy group runs to the LAST ')' that still leaves only modifiers after it, so a ')'
+ // inside an ENUM value does not end the list early.
+ const m=/^[a-z ]+?(?:\((.*)\))?((?:\s+(?:unsigned|signed|zerofill))*)\s*$/i.exec(String(colType||''));
+ const len=m&&m[1]!=null?m[1]:'';
+ const mods=m&&m[2]?m[2].trim().toUpperCase():'';
+ // Defaults. MySQL gives a literal unquoted and marks an expression with DEFAULT_GENERATED;
+ // MariaDB quotes a literal, spells an explicit NULL default as the word NULL, and gives an
+ // expression bare. defShown is what the form displays; defSql is the exact SQL to write back
+ // while the displayed value is left alone.
+ let defShown='',defSql=null;
+ if(rawDef!=null){
+  const v=String(rawDef);
+  if(isMaria){
+   if(v==='NULL'){defShown='NULL';defSql='NULL';}
+   else if(/^'[\s\S]*'$/.test(v)){defShown=v.slice(1,-1).replace(/''/g,"'").replace(/\\\\/g,'\\');defSql=v;}
+   else{defShown=v;defSql=v;}
+  } else {
+   defShown=v;
+   if(/DEFAULT_GENERATED/i.test(extra))defSql=/^current_timestamp(\(\d*\))?$/i.test(v)?v:'('+v+')';
+   else if(/^b'[01]*'$/i.test(v)||/^0x[0-9a-f]*$/i.test(v))defSql=v;
+   else defSql=strLit(v);
+  }
+ }
+ const onUp=/on update\s+(\S+)/i.exec(extra);
+ const generated=/GENERATED/i.test(extra.replace(/DEFAULT_GENERATED/ig,''));
+ const col={name,type,len,nn:nullable==='NO',def:defShown,ai:/auto_increment/i.test(extra),pk:key==='PRI',comment:comment||''};
+ const inherits=!!coll&&coll===tableColl;
+ col.keep={origName:name,origType:type,origLen:len,mods,cs:inherits?'':(cs||''),coll:inherits?'':(coll||''),onUpdate:onUp?onUp[1]:'',
+   invisible:/\bINVISIBLE\b/i.test(extra),defShown,defSql,generated,genExpr:genExpr||''};
+ return col;
+}
+function colDef(c){
+ const k=c.keep||{};
+ let s=qid(c.name)+' '+c.type;if(c.len)s+='('+c.len+')';
+ if(k.mods&&D_NUMERIC.test(c.type))s+=' '+k.mods;
+ if(k.cs&&D_TEXTY.test(c.type))s+=' CHARACTER SET '+k.cs+(k.coll?' COLLATE '+k.coll:'');
+ if(c.nn)s+=' NOT NULL';if(c.ai)s+=' AUTO_INCREMENT';
+ // An untouched default is written back exactly as it was read - including an empty-string
+ // default, which the form cannot tell apart from "no default" by looking at the box.
+ if(k.defSql!=null&&c.def===k.defShown)s+=' DEFAULT '+k.defSql;
+ else if(c.def!==''&&c.def!=null){s+=' DEFAULT '+(/^(CURRENT_TIMESTAMP(\(\d*\))?|NULL|TRUE|FALSE|-?\d+(\.\d+)?)$/i.test(c.def)?c.def:lit(c.def));}
+ if(k.onUpdate&&D_TEMPORAL.test(c.type))s+=' ON UPDATE '+k.onUpdate;
+ if(k.invisible)s+=' INVISIBLE';
+ if(c.comment)s+=' COMMENT '+strLit(c.comment);return s;}
+// The ALTER for a set of edited columns against what was read. A row keeps the name it was read
+// with, so renaming one is a CHANGE COLUMN; it used to be DROP COLUMN old + ADD COLUMN new, which
+// throws away every value in it.
+function dAlterSql(orig,cols,tbl){
+ const alt=[],notes=[];
+ const seen=new Set();
+ const same=(o,c)=>JSON.stringify({t:o.type,l:''+o.len,nn:o.nn,ai:o.ai,d:o.def,cm:o.comment})===JSON.stringify({t:c.type,l:''+c.len,nn:c.nn,ai:c.ai,d:c.def,cm:c.comment});
+ cols.forEach(c=>{
+  const on=c.keep&&c.keep.origName;
+  const o=on!=null?orig.find(x=>x.name===on):null;
+  if(!o){alt.push('ADD COLUMN '+colDef(c));return;}
+  seen.add(o.name);
+  const renamed=c.name!==o.name;
+  if(!renamed&&same(o,c))return;
+  // A generated column's expression comes back from information_schema with its quoting
+  // mangled on some versions, so rewriting it is not safe. Leave it, and say so.
+  if(o.keep&&o.keep.generated){notes.push('-- '+qid(o.name)+' is a generated column; change it with SQL, not the designer (left unchanged)');return;}
+  alt.push((renamed?'CHANGE COLUMN '+qid(o.name)+' ':'MODIFY COLUMN ')+colDef(c));
+ });
+ orig.filter(o=>!seen.has(o.name)).forEach(o=>alt.push('DROP COLUMN '+qid(o.name)));
+ const oldPk=orig.filter(c=>c.pk).map(c=>c.name).join(',');
+ const newPk=cols.filter(c=>c.pk).map(c=>(c.keep&&c.keep.origName)||c.name).join(',');
+ if(oldPk!==newPk){if(oldPk)alt.push('DROP PRIMARY KEY');const pk=cols.filter(c=>c.pk).map(c=>qid(c.name));if(pk.length)alt.push('ADD PRIMARY KEY ('+pk.join(',')+')');}
+ const head=notes.length?notes.join('\n')+'\n':'';
+ return alt.length?head+'ALTER TABLE '+tbl+'\n  '+alt.join(',\n  ')+';':head+'-- no changes detected';
+}
 async function designTable(name,db){dEdited=false;db=db||curSchema||'';$('dSchema').value=db;$('dName').value=name||'';$('dCols').innerHTML='';$('dLog').textContent='';dOrig=null;
  if(name){$('dTitle').textContent='Alter table';$('dMode').textContent='(existing - generates ALTER)';
-   const r=await api('/api/query',{sql:"SELECT COLUMN_NAME,DATA_TYPE,CHARACTER_MAXIMUM_LENGTH,NUMERIC_PRECISION,NUMERIC_SCALE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,COLUMN_KEY,COLUMN_COMMENT FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="+lit(db)+" AND TABLE_NAME="+lit(name)+" ORDER BY ORDINAL_POSITION"});
-   dOrig=[];if(r.ok)r.rows.forEach(c=>{const col={name:c[0],type:c[1].toUpperCase(),len:(c[2]||c[3]||''),nn:c[5]==='NO',def:c[6],ai:/auto_increment/i.test(c[7]||''),pk:c[8]==='PRI',comment:c[9]||''};dOrig.push(JSON.parse(JSON.stringify(col)));dAddCol(col);});
+   const r=await api('/api/query',{sql:"SELECT COLUMN_NAME,DATA_TYPE,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,COLUMN_KEY,COLUMN_COMMENT,CHARACTER_SET_NAME,COLLATION_NAME,GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="+lit(db)+" AND TABLE_NAME="+lit(name)+" ORDER BY ORDINAL_POSITION"});
+   const tc=await api('/api/query',{sql:"SELECT TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA="+lit(db)+" AND TABLE_NAME="+lit(name)});
+   const tableColl=tc.ok&&tc.rows[0]?tc.rows[0][0]:null;
+   dOrig=[];if(r.ok)r.rows.forEach(row=>{const col=dColFromInfo(row,!!window.mariadb,tableColl);dOrig.push(col);dAddCol(col);});
+   else{$('dLog').textContent='Could not read the table: '+r.error;}
  } else {$('dTitle').textContent='Create table';$('dMode').textContent='(new - generates CREATE)';dAddCol({name:'id',type:'INT',len:'',nn:true,ai:true,pk:true,def:null,comment:''});dAddCol({name:'',type:'VARCHAR',len:'255',nn:false,ai:false,pk:false,def:null,comment:''});}
  dGen();show('mDesign');}
 function dAddCol(c){c=c||{name:'',type:'VARCHAR',len:'255',nn:false,ai:false,pk:false,def:null,comment:''};const tr=document.createElement('tr');
- tr.innerHTML='<td><input class="dn" value="'+esc(c.name)+'"></td><td><select class="dt">'+DTYPES.map(t=>'<option'+(t===c.type?' selected':'')+'>'+t+'</option>').join('')+'</select></td>'+
+ // A type the list does not carry (SET, TINYTEXT, GEOMETRY...) must still be offered, or the
+ // select falls back to its first entry and the column is silently read back as INT.
+ const types=DTYPES.includes(c.type)?DTYPES:DTYPES.concat([c.type]);
+ tr.innerHTML='<td><input class="dn" value="'+esc(c.name)+'"></td><td><select class="dt">'+types.map(t=>'<option'+(t===c.type?' selected':'')+'>'+esc(t)+'</option>').join('')+'</select></td>'+
   '<td><input class="dl" value="'+esc(c.len==null?'':c.len)+'" style="width:70px"></td><td><input type="checkbox" class="dnn"'+(c.nn?' checked':'')+'></td>'+
   '<td><input type="checkbox" class="dai"'+(c.ai?' checked':'')+'></td><td><input type="checkbox" class="dpk"'+(c.pk?' checked':'')+'></td>'+
   '<td><input class="dd" value="'+esc(c.def==null?'':c.def)+'" style="width:90px"></td><td><input class="dc" value="'+esc(c.comment||'')+'"></td>'+
   '<td><button class="sm" title="Remove this column" onclick="this.closest(\'tr\').remove();dGen()">x</button></td>';
+ tr._keep=c.keep||null;
+ if(c.keep){const hint=[c.keep.mods,c.keep.cs&&('CHARACTER SET '+c.keep.cs),c.keep.onUpdate&&('ON UPDATE '+c.keep.onUpdate),c.keep.invisible&&'INVISIBLE',c.keep.generated&&'GENERATED'].filter(Boolean).join(', ');if(hint)tr.title='Kept as is: '+hint;}
  $('dCols').appendChild(tr);tr.querySelectorAll('input,select').forEach(el=>el.addEventListener('change',dGen));}
-function dMark(){dEdited=true;$('dEditNote').textContent='\u270E manually edited - auto-update paused; use Regenerate to rebuild';}
-function dReadCols(){return [...$('dCols').children].map(tr=>({name:tr.querySelector('.dn').value.trim(),type:tr.querySelector('.dt').value,len:tr.querySelector('.dl').value.trim(),nn:tr.querySelector('.dnn').checked,ai:tr.querySelector('.dai').checked,pk:tr.querySelector('.dpk').checked,def:tr.querySelector('.dd').value,comment:tr.querySelector('.dc').value.trim()})).filter(c=>c.name);}
-function colDef(c){let s=qid(c.name)+' '+c.type;if(c.len)s+='('+c.len+')';if(c.nn)s+=' NOT NULL';if(c.ai)s+=' AUTO_INCREMENT';
- if(c.def!==''&&c.def!=null){s+=' DEFAULT '+(/^(CURRENT_TIMESTAMP|NULL|TRUE|FALSE|\d+(\.\d+)?)$/i.test(c.def)?c.def:lit(c.def));}
- if(c.comment)s+=' COMMENT '+strLit(c.comment);return s;}
+function dMark(){dEdited=true;$('dEditNote').textContent='✎ manually edited - auto-update paused; use Regenerate to rebuild';}
+function dReadCols(){return [...$('dCols').children].map(tr=>({name:tr.querySelector('.dn').value.trim(),type:tr.querySelector('.dt').value,len:tr.querySelector('.dl').value.trim(),nn:tr.querySelector('.dnn').checked,ai:tr.querySelector('.dai').checked,pk:tr.querySelector('.dpk').checked,def:tr.querySelector('.dd').value,comment:tr.querySelector('.dc').value.trim(),keep:tr._keep||null})).filter(c=>c.name);}
 function dGen(force){if(dEdited&&!force)return;const db=$('dSchema').value.trim(),name=$('dName').value.trim();const cols=dReadCols();const pk=cols.filter(c=>c.pk).map(c=>qid(c.name));
  if(!name){$('dSql').value='-- enter a table name';return;}const tbl=qid(db)+'.'+qid(name);
  if(!dOrig){let s='CREATE TABLE '+tbl+' (\n  '+cols.map(colDef).join(',\n  ');if(pk.length)s+=',\n  PRIMARY KEY ('+pk.join(',')+')';s+='\n);';$('dSql').value=s;dEdited=false;$('dEditNote').textContent='';return;}
- // ALTER diff by name
- const oNames=dOrig.map(c=>c.name);const nNames=cols.map(c=>c.name);const alt=[];
- cols.forEach(c=>{const o=dOrig.find(x=>x.name===c.name);if(!o){alt.push('ADD COLUMN '+colDef(c));}else if(JSON.stringify({t:o.type,l:''+o.len,nn:o.nn,ai:o.ai,d:o.def,cm:o.comment})!==JSON.stringify({t:c.type,l:''+c.len,nn:c.nn,ai:c.ai,d:(c.def===''?null:c.def),cm:c.comment})){alt.push('MODIFY COLUMN '+colDef(c));}});
- oNames.filter(n=>!nNames.includes(n)).forEach(n=>alt.push('DROP COLUMN '+qid(n)));
- const oldPk=dOrig.filter(c=>c.pk).map(c=>c.name).join(','),newPk=cols.filter(c=>c.pk).map(c=>c.name).join(',');
- if(oldPk!==newPk){if(oldPk)alt.push('DROP PRIMARY KEY');if(newPk)alt.push('ADD PRIMARY KEY ('+pk.join(',')+')');}
- $('dSql').value=alt.length?('ALTER TABLE '+tbl+'\n  '+alt.join(',\n  ')+';'):'-- no changes detected';dEdited=false;$('dEditNote').textContent='';}
+ $('dSql').value=dAlterSql(dOrig,cols,tbl);dEdited=false;$('dEditNote').textContent='';}
 async function dApply(){if(roBlock())return;const sql=$('dSql').value;$('dLog').textContent='Applying...';const r=await api('/api/script',{sql,db:curSchema});if(r.ok){$('dLog').textContent='Applied OK.';log('DESIGN OK');if(curSchema)loadObjects(curSchema);}else{const _n=ddlFailureNote(r.error,sql);$('dLog').textContent=_n;log('DESIGN error: '+_n);}}
 
 // ---- export/import ----

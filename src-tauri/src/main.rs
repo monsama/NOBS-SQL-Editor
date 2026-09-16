@@ -104,7 +104,18 @@ fn kill_child(c: &mut std::process::Child) {
 fn kill_child(c: &mut std::process::Child) { let _ = c.kill(); }
 
 fn run_job_child(job: Option<&std::sync::Arc<Job>>, cmd: &mut Command) -> std::io::Result<std::process::Output> {
+    run_job_child_fed(job, cmd, None)
+}
+
+// A writer for the child's stdin, run on its own thread while the child is watched for cancel.
+type StdinFeed = Box<dyn FnOnce(std::process::ChildStdin) + Send>;
+
+fn run_job_child_fed(job: Option<&std::sync::Arc<Job>>, cmd: &mut Command, feed: Option<StdinFeed>) -> std::io::Result<std::process::Output> {
+    if feed.is_some() { cmd.stdin(Stdio::piped()); }
     let mut child = cmd.stderr(Stdio::piped()).spawn()?;
+    // The feeder ends when the file does or when the child stops reading (a failed statement
+    // exits it), whichever comes first; dropping stdin is what tells the client it has everything.
+    if let (Some(f), Some(stdin)) = (feed, child.stdin.take()) { std::thread::spawn(move || f(stdin)); }
     let mut pipe = child.stderr.take();
     let reader = std::thread::spawn(move || {
         let mut buf = Vec::new();
@@ -1738,6 +1749,127 @@ async fn import(app: tauri::AppHandle, req: Value) -> R {
     import_run(req, mbin).await
 }
 
+// ---------- restoring a dump into a database of your choosing ----------
+// A dump made per database - the export dialog's default - opens with its own
+//
+//   /*!40000 DROP DATABASE IF EXISTS `shop`*/;
+//   CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop` ...;
+//   USE `shop`;
+//
+// and the import dialog's "Target database" was only handed to the client as its default
+// database, which the file's own USE overrides on line three. So "import shop.sql into shop_copy"
+// dropped and rebuilt `shop` itself and left `shop_copy` empty - and when the file then failed
+// partway (MySQL rejecting a generated column's value, measured on 8.0.46), `shop` was left with
+// the tables up to that point and nothing after them.
+//
+// When a target is chosen, those statements now name the target instead. Only whole statements
+// of those three kinds at the start of a line are touched, and only their database identifier;
+// data rows never start a line with them, because mysqldump escapes newlines inside values.
+// A file that names more than one database is refused rather than squashed into one.
+
+// The span and unescaped name of the database identifier in a USE / CREATE DATABASE /
+// DROP DATABASE line, or None for any other line.
+fn dump_db_ident(line: &[u8]) -> Option<(usize, usize, String)> {
+    let n = line.len();
+    let mut i = 0;
+    let ws = |i: &mut usize| { while *i < n && (line[*i] == b' ' || line[*i] == b'\t') { *i += 1; } };
+    let kw = |i: &mut usize, word: &str| -> bool {
+        let w = word.as_bytes();
+        if *i + w.len() <= n && line[*i..*i + w.len()].eq_ignore_ascii_case(w)
+            && (*i + w.len() == n || !(line[*i + w.len()].is_ascii_alphanumeric() || line[*i + w.len()] == b'_')) {
+            *i += w.len(); true
+        } else { false }
+    };
+    let skip_comment = |i: &mut usize| {
+        if *i + 3 <= n && &line[*i..*i + 3] == b"/*!" {
+            if let Some(end) = line[*i..].windows(2).position(|w| w == b"*/") { *i += end + 2; }
+        }
+    };
+    ws(&mut i);
+    // mysqldump wraps DROP DATABASE in a version comment: /*!40000 DROP DATABASE ... */
+    if i + 3 <= n && &line[i..i + 3] == b"/*!" {
+        let mut j = i + 3;
+        while j < n && line[j].is_ascii_digit() { j += 1; }
+        let mut k = j; ws(&mut k);
+        if kw(&mut k.clone(), "DROP") { i = k; } else { return None; }
+    }
+    if kw(&mut i, "USE") {
+        ws(&mut i);
+    } else if kw(&mut i, "CREATE") {
+        ws(&mut i);
+        if !(kw(&mut i, "DATABASE") || kw(&mut i, "SCHEMA")) { return None; }
+        ws(&mut i); skip_comment(&mut i); ws(&mut i);
+        if kw(&mut i, "IF") { ws(&mut i); if !kw(&mut i, "NOT") { return None; } ws(&mut i); if !kw(&mut i, "EXISTS") { return None; } ws(&mut i); }
+    } else if kw(&mut i, "DROP") {
+        ws(&mut i);
+        if !(kw(&mut i, "DATABASE") || kw(&mut i, "SCHEMA")) { return None; }
+        ws(&mut i);
+        if kw(&mut i, "IF") { ws(&mut i); if !kw(&mut i, "EXISTS") { return None; } ws(&mut i); }
+    } else {
+        return None;
+    }
+    if i >= n { return None; }
+    let start = i;
+    if line[i] == b'`' {
+        let mut name = Vec::new();
+        i += 1;
+        loop {
+            if i >= n { return None; }
+            if line[i] == b'`' {
+                if i + 1 < n && line[i + 1] == b'`' { name.push(b'`'); i += 2; continue; }
+                i += 1; break;
+            }
+            name.push(line[i]); i += 1;
+        }
+        Some((start, i, String::from_utf8_lossy(&name).to_string()))
+    } else {
+        while i < n && (line[i].is_ascii_alphanumeric() || line[i] == b'_' || line[i] == b'$') { i += 1; }
+        if i == start { return None; }
+        Some((start, i, String::from_utf8_lossy(&line[start..i]).to_string()))
+    }
+}
+
+// Every database a dump file refers to, in first-seen order.
+fn dump_db_names(path: &str) -> std::io::Result<Vec<String>> {
+    use std::io::BufRead;
+    let mut r = std::io::BufReader::with_capacity(1 << 20, std::fs::File::open(path)?);
+    let mut seen: Vec<String> = Vec::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if r.read_until(b'\n', &mut line)? == 0 { break; }
+        if let Some((_, _, name)) = dump_db_ident(&line) {
+            if !seen.contains(&name) { seen.push(name); }
+        }
+    }
+    Ok(seen)
+}
+
+// One line, with the database identifier renamed if it is `from`.
+fn dump_rewrite_line(line: &[u8], from: &str, to: &str) -> Vec<u8> {
+    match dump_db_ident(line) {
+        Some((s, e, name)) if name == from => {
+            let mut out = Vec::with_capacity(line.len() + to.len());
+            out.extend_from_slice(&line[..s]);
+            out.extend_from_slice(format!("`{}`", to.replace('`', "``")).as_bytes());
+            out.extend_from_slice(&line[e..]);
+            out
+        }
+        _ => line.to_vec(),
+    }
+}
+
+// What an import should do with a file, given the chosen target.
+enum DumpPlan { AsIs, Rename(String), Refuse(String) }
+fn dump_plan(names: &[String], target: &str) -> DumpPlan {
+    if target.is_empty() || names.is_empty() || (names.len() == 1 && names[0] == target) { return DumpPlan::AsIs; }
+    if names.len() == 1 { return DumpPlan::Rename(names[0].clone()); }
+    DumpPlan::Refuse(format!(
+        "this file contains {} databases ({}), so it cannot be restored into the single target '{}'. \
+Clear \"Target database\" to restore each under its own name.",
+        names.len(), names.join(", "), target))
+}
+
 // The body, split out so a test can drive it without a tauri::AppHandle - resolving the mysql
 // path is the only thing the handle provided.
 async fn import_run(req: Value, mbin: String) -> R {
@@ -1772,11 +1904,36 @@ async fn import_run(req: Value, mbin: String) -> R {
             // exported with a larger packet size fails with "MySQL server has gone away".
             if let Some(mp) = req["maxpacket"].as_str() { if !mp.is_empty() { args.push(format!("--max-allowed-packet={}", mp)); } }
             if !target.is_empty() { args.push(target.clone()); }
-            let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
-            let mut cmd = Command::new(&mbin);
-            cmd.args(&args).stdin(Stdio::from(file)).stdout(Stdio::null());
-            let out = run_job_child(job.as_ref(), &mut cmd);
             let short = || std::path::Path::new(&f).file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_else(|| f.clone());
+            let names = match dump_db_names(&f) { Ok(n) => n, Err(e) => { log.push(format!("FAILED {} : cannot read the file: {}", short(), e)); continue; } };
+            let mut cmd = Command::new(&mbin);
+            cmd.args(&args).stdout(Stdio::null());
+            let out = match dump_plan(&names, &target) {
+                DumpPlan::Refuse(why) => { log.push(format!("SKIPPED {} : {}", short(), why)); continue; }
+                DumpPlan::AsIs => {
+                    let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
+                    cmd.stdin(Stdio::from(file));
+                    run_job_child(job.as_ref(), &mut cmd)
+                }
+                DumpPlan::Rename(from) => {
+                    log.push(format!("{} holds database '{}' - restoring it into '{}' instead", short(), from, target));
+                    let (path, to) = (f.clone(), target.clone());
+                    let feed: StdinFeed = Box::new(move |mut stdin| {
+                        use std::io::{BufRead, Write};
+                        let Ok(file) = std::fs::File::open(&path) else { return };
+                        let mut r = std::io::BufReader::with_capacity(1 << 20, file);
+                        let mut w = std::io::BufWriter::with_capacity(1 << 20, &mut stdin);
+                        let mut line = Vec::new();
+                        loop {
+                            line.clear();
+                            match r.read_until(b'\n', &mut line) { Ok(0) | Err(_) => break, Ok(_) => {} }
+                            if w.write_all(&dump_rewrite_line(&line, &from, &to)).is_err() { return; }
+                        }
+                        let _ = w.flush();
+                    });
+                    run_job_child_fed(job.as_ref(), &mut cmd, Some(feed))
+                }
+            };
             match out {
                 Ok(o) if o.status.success() => {
                     // "Continue on error" passes --force, and mysql then exits 0 even when every
@@ -1812,6 +1969,22 @@ async fn import_run(req: Value, mbin: String) -> R {
         }
         Ok(json!({"ok":true,"cancelled":cancelled,"errorsSkipped":errors_skipped,"log":log}))
     }).await.map_err(|e| e.to_string())?
+}
+
+// Tables in the given databases that have a generated column - but only when the server is
+// MySQL; MariaDB's own tool understands MariaDB's generated columns. None means the check could
+// not be made (no connection), in which case the export goes ahead as before.
+fn mysql_generated_tables(connj: &Value, dbs: &[String], excl: &std::collections::HashSet<String>) -> Option<Vec<String>> {
+    let mut c = build_conn(connj).ok()?;
+    let ver: String = c.query_first("SELECT VERSION()").ok().flatten().unwrap_or_default();
+    if ver.to_lowercase().contains("mariadb") || dbs.is_empty() { return Some(Vec::new()); }
+    let list = dbs.iter().map(|d| sql_val_lit(d)).collect::<Vec<_>>().join(",");
+    let (_c, rows) = run_select(&mut c, &format!(
+        "SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME FROM information_schema.COLUMNS          WHERE TABLE_SCHEMA IN ({}) AND GENERATION_EXPRESSION IS NOT NULL AND GENERATION_EXPRESSION <> ''          ORDER BY TABLE_SCHEMA, TABLE_NAME", list)).ok()?;
+    Some(rows.iter().filter_map(|r| {
+        let key = format!("{}.{}", r.first().cloned().flatten()?, r.get(1).cloned().flatten()?);
+        if excl.contains(&key) { None } else { Some(key) }
+    }).collect())
 }
 
 // Mirrors the PowerShell version's Api-Export exactly: three modes (table = one file per
@@ -1886,6 +2059,21 @@ async fn export_run(req: Value, dbin: String) -> R {
         // Only meaningful in "single" mode - db/table mode each produce one file per object, so
         // a single manual name has nowhere to go. A trailing .sql the user typed themselves is
         // stripped so it doesn't end up doubled ("backup.sql" + mkfile's own ".sql" suffix).
+        // MariaDB's dump tool does not recognise a MySQL generated column as generated, so it
+        // writes a value for it into every INSERT - and MySQL refuses exactly that on restore
+        // ("The value specified for generated column ... is not allowed"). MySQL's own mysqldump
+        // leaves those columns out. Measured on MySQL 8.0.46: the export reported OK and the file
+        // could not be restored. A backup that looks fine and is not is worse than no backup, so
+        // refuse up front and say what to change.
+        if client_is_mariadb(&dbin) {
+            if let Some(tables) = mysql_generated_tables(&req["conn"], &dbs, &excl) {
+                if !tables.is_empty() {
+                    return Ok(json!({"ok":false,"error":format!(
+                        "Not exported: {} table(s) on this MySQL server have generated columns ({}). The MariaDB dump tool writes values into those columns, which MySQL refuses when the file is restored - the dump would not restore. In Settings, point mysqldump at MySQL's own mysqldump.exe (for example C:\\Program Files\\MySQL\\MySQL Server 8.0\\bin\\mysqldump.exe), or exclude those tables.",
+                        tables.len(), tables.join(", "))}));
+                }
+            }
+        }
         let custom_name = req["filename"].as_str().unwrap_or("").trim().to_string();
         let single_base = if custom_name.is_empty() { "all_selected".to_string() } else {
             custom_name.strip_suffix(".sql").or_else(|| custom_name.strip_suffix(".SQL")).unwrap_or(&custom_name).to_string()
@@ -2144,6 +2332,10 @@ async fn importcsv(req: Value) -> R {
                         // sql_lit()'s hex-literal passthrough only applies to a column information_schema
                         // actually reports as binary/BIT - anything else always gets a real quoted string,
                         // even if the cell's text happens to look like hex (see bin_cols above).
+                        // An empty binary value is exported as the bare "0x" - its hex display form -
+                        // and sql_lit() only reads 0x as hex when a digit follows, so it used to store
+                        // the two characters "0x" instead of zero bytes. Measured: X'' came back as 0x3078.
+                        Some("0x") | Some("0X") if bin_cols.contains(&use_cols[ci]) => "X''".to_string(),
                         Some(s) if bin_cols.contains(&use_cols[ci]) => sql_lit(s),
                         Some(s) => sql_str_lit(s),
                     }
@@ -2478,6 +2670,22 @@ async fn compare_rows_fetch_by_pk(req: Value) -> R {
 // CREATE USER statements are emitted before any GRANT statements (genuinely grouped that way,
 // not just alphabetically) so replaying the result on a target server never grants to a user
 // that doesn't exist yet.
+// True for MySQL 8.0.17 and later - the first version with print_identified_with_as_hex.
+fn mysql_supports_hex_identified(conn: &mut Conn) -> bool {
+    let v: String = conn.query_first("SELECT VERSION()").ok().flatten().unwrap_or_default();
+    mysql_version_has_hex_identified(&v)
+}
+fn mysql_version_has_hex_identified(v: &str) -> bool {
+    if v.to_lowercase().contains("mariadb") { return false; }
+    let n: Vec<u64> = v.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).take(3)
+        .map(|s| s.parse().unwrap_or(0)).collect();
+    n.len() >= 3 && (n[0], n[1], n[2]) >= (8, 0, 17)
+}
+
+// Accounts MySQL and MariaDB create for their own use. Listed by name rather than matched as
+// "mysql.%": a user is free to create an account called mysql.backup, and that one is theirs.
+const SYSTEM_ACCOUNTS: [&str; 4] = ["mysql.sys", "mysql.session", "mysql.infoschema", "mariadb.sys"];
+
 #[tauri::command]
 async fn gen_user_transfer(req: Value) -> R {
     let exclude_raw = req["exclude"].as_str().unwrap_or("").to_string();
@@ -2487,8 +2695,24 @@ async fn gen_user_transfer(req: Value) -> R {
         if excl.is_empty() {
             excl = ["mysql.sys","root","debian-sys-maint","mariadb.sys","healthcheck","mariabackup","galera","replica","PUBLIC"].iter().map(|s| s.to_string()).collect();
         }
+        // The server's own internal accounts are never moved, whatever the list says. They exist
+        // on every install of that server and are managed by it, so a script carrying them cannot
+        // run: on MySQL 8 it opened with CREATE USER `mysql.infoschema` and `mysql.session` -
+        // which already exist on the target - and handed SUPER and SYSTEM_USER grants to them.
+        // Only mysql.sys was on the default list; the other two came through.
+        for sys in SYSTEM_ACCOUNTS {
+            if !excl.iter().any(|e| e == sys) { excl.push(sys.to_string()); }
+        }
         let in_list = excl.iter().map(|s| sql_val_lit(s)).collect::<Vec<_>>().join(",");
         let mut conn = build_conn(&conn_json)?;
+        // A MySQL 8 caching_sha2_password hash carries a salt of arbitrary 7-bit bytes, control
+        // characters included, and SHOW CREATE USER prints it raw inside the quoted literal. That
+        // is valid SQL, but not text: pasted, saved or shown in a text box, a control character can
+        // be dropped or changed, and the account then arrives with a password nobody knows. With
+        // print_identified_with_as_hex (8.0.17+) the hash comes out as a plain 0x... literal.
+        if mysql_supports_hex_identified(&mut conn) {
+            let _ = conn.query_drop("SET SESSION print_identified_with_as_hex = ON");
+        }
         let (_cols, user_rows) = run_select(&mut conn, &format!("SELECT user, host FROM mysql.user WHERE user NOT IN ({}) AND user <> ''", in_list))?;
         if user_rows.is_empty() {
             return Ok(json!({"ok":true,"sql":"-- No accounts matched (everything was excluded, or mysql.user is empty).","userCount":0,"errorCount":0}));
@@ -4343,6 +4567,39 @@ mod interop_tests {
         }
         q("DROP TABLE IF EXISTS csv_interop").await;
     }
+
+    // The app's own CSV export read back by its own import, for the binary values that have
+    // tripped it: an empty value is written as the bare "0x", and the importer used to store that
+    // as the two characters 0x (hex 3078) instead of zero bytes. Measured through the GUI.
+    #[tokio::test]
+    #[ignore]
+    async fn binary_values_survive_the_apps_own_csv_round_trip() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let q = |sql: &str| { let c = conn.clone(); let s = sql.to_string();
+            async move { query(json!({"sql":s,"conn":c,"db":"nobs_test"})).await.unwrap() } };
+        q("DROP TABLE IF EXISTS csv_bin_src").await;
+        q("DROP TABLE IF EXISTS csv_bin_dst").await;
+        q("CREATE TABLE csv_bin_src (id INT PRIMARY KEY, b VARBINARY(16) NULL, t VARCHAR(16) NULL)").await;
+        q("INSERT INTO csv_bin_src VALUES (1, X'', '0x'), (2, NULL, NULL), (3, 0x00, '0x00'), (4, 0x0A0D, 'a'), (5, 0x3078, 'x')").await;
+        q("CREATE TABLE csv_bin_dst LIKE csv_bin_src").await;
+        let f = std::env::temp_dir().join("csv_bin_roundtrip.csv");
+        let ex = export_table_run(None, json!({"conn":conn,"db":"nobs_test","table":"csv_bin_src",
+                                               "file":f.to_string_lossy(),"format":"csv","nullValue":"\\N"})).await.unwrap();
+        assert_eq!(ex["ok"], true, "export failed: {ex}");
+        let im = importcsv(json!({"conn":conn,"db":"nobs_test","table":"csv_bin_dst",
+                                  "file":f.to_string_lossy(),"hasHeader":true,"nullValue":"\\N"})).await.unwrap();
+        assert_eq!(im["ok"], true, "import failed: {im}");
+        let shape = |t: &str| format!("SELECT GROUP_CONCAT(CONCAT_WS('|', id, IFNULL(HEX(b),'N'), IFNULL(t,'N')) ORDER BY id SEPARATOR ';') FROM {t}");
+        let a = q(&shape("csv_bin_src")).await; let b = q(&shape("csv_bin_dst")).await;
+        assert_eq!(a["rows"], b["rows"], "binary values changed on the way through the app's own CSV");
+        // And specifically: an empty binary value is empty, and text that reads '0x' stays text.
+        let one = q("SELECT HEX(b), t FROM csv_bin_dst WHERE id = 1").await;
+        assert_eq!(one["rows"][0][0], "", "an empty binary value came back as {}", one["rows"][0][0]);
+        assert_eq!(one["rows"][0][1], "0x", "a text column holding '0x' must stay text");
+        q("DROP TABLE IF EXISTS csv_bin_src").await;
+        q("DROP TABLE IF EXISTS csv_bin_dst").await;
+        let _ = std::fs::remove_file(&f);
+    }
 }
 
 #[cfg(test)]
@@ -4531,6 +4788,11 @@ mod compare_tests {
         assert_eq!(mr2["missingTotal"].as_u64().unwrap_or(9), 0, "every source row should now be present on the target");
         assert_eq!(mr2["extraTotal"].as_u64().unwrap_or(0), 1,
                    "with nothing missing, the target's extra row must still be reported - otherwise this reads as 'no differences'");
+
+        // These used to be dropped only at the START of the next run, so every server this ran
+        // against kept two stray databases in its schema list in between.
+        raw("DROP DATABASE IF EXISTS cmp_src");
+        raw("DROP DATABASE IF EXISTS cmp_tgt");
     }
 
     // compare_rows_apply_diff updates existing target rows one at a time, unlike the insert-only
@@ -5183,6 +5445,101 @@ s+GblpHbDz1GCdRkiTPZKgv8QnJrmZQthFmp2EzeKamcSe1q+U4O
             let e = build_conn(&conn).err().unwrap_or_else(|| panic!("ssl={mode} with a missing CA file connected anyway"));
             assert!(e.contains("IoError") || e.contains("cannot find"),
                 "ssl={mode}: a missing CA file should fail as a missing file, which proves the path is read: {e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod dump_target_tests {
+    use super::*;
+
+    // Verbatim lines from dumps the app's own export produced (MySQL 8.0.46 and MariaDB 12.2).
+    #[test]
+    fn database_statements_are_recognised_in_every_form_the_dump_tools_write() {
+        let cases: [(&str, &str); 9] = [
+            ("/*!40000 DROP DATABASE IF EXISTS `shop`*/;", "shop"),
+            ("CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop` /*!40100 DEFAULT CHARACTER SET utf8mb4 */;", "shop"),
+            ("USE `shop`;", "shop"),
+            ("use shop;", "shop"),
+            ("DROP DATABASE IF EXISTS `we``ird`;", "we`ird"),
+            ("CREATE DATABASE IF NOT EXISTS plain_name;", "plain_name"),
+            ("  CREATE SCHEMA `s2`;", "s2"),
+            ("DROP SCHEMA s3;", "s3"),
+            ("USE `sp ace`;", "sp ace"),
+        ];
+        for (line, want) in cases {
+            let got = dump_db_ident(line.as_bytes()).map(|x| x.2);
+            assert_eq!(got.as_deref(), Some(want), "not recognised: {line}");
+        }
+    }
+
+    // A row of data, a table statement or a comment must never be taken for one.
+    #[test]
+    fn nothing_else_is_touched() {
+        for line in [
+            "INSERT INTO `t` VALUES (1,'USE `shop`;');",
+            "DROP TABLE IF EXISTS `shop`;",
+            "CREATE TABLE `shop` (id INT);",
+            "-- USE `shop`;",
+            "/*!50001 CREATE VIEW `v` AS SELECT 1 */;",
+            "USER `shop`;",
+            "USED shop;",
+            "",
+        ] {
+            assert!(dump_db_ident(line.as_bytes()).is_none(), "wrongly recognised: {line}");
+            assert_eq!(dump_rewrite_line(line.as_bytes(), "shop", "copy"), line.as_bytes());
+        }
+    }
+
+    #[test]
+    fn only_the_identifier_changes() {
+        let rw = |l: &str| String::from_utf8(dump_rewrite_line(l.as_bytes(), "shop", "shop_copy")).unwrap();
+        assert_eq!(rw("/*!40000 DROP DATABASE IF EXISTS `shop`*/;\n"), "/*!40000 DROP DATABASE IF EXISTS `shop_copy`*/;\n");
+        assert_eq!(rw("CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop` /*!40100 DEFAULT CHARACTER SET utf8mb4 */;\r\n"),
+                   "CREATE DATABASE /*!32312 IF NOT EXISTS*/ `shop_copy` /*!40100 DEFAULT CHARACTER SET utf8mb4 */;\r\n");
+        assert_eq!(rw("USE shop;\n"), "USE `shop_copy`;\n");
+        // A different database is left alone.
+        assert_eq!(rw("USE `other`;\n"), "USE `other`;\n");
+        // A target with a backtick is quoted properly.
+        let q = String::from_utf8(dump_rewrite_line(b"USE `shop`;", "shop", "a`b")).unwrap();
+        assert_eq!(q, "USE `a``b`;");
+        // Bytes that are not UTF-8 pass through untouched.
+        let raw = b"INSERT INTO t VALUES (0x\xff\xfe);\n";
+        assert_eq!(dump_rewrite_line(raw, "shop", "x"), raw.to_vec());
+    }
+
+    #[test]
+    fn the_plan_follows_what_the_file_contains() {
+        let n = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(matches!(dump_plan(&n(&["shop"]), ""), DumpPlan::AsIs), "no target: restore where the file says");
+        assert!(matches!(dump_plan(&n(&[]), "copy"), DumpPlan::AsIs), "a per-table dump just uses the target");
+        assert!(matches!(dump_plan(&n(&["copy"]), "copy"), DumpPlan::AsIs));
+        assert!(matches!(dump_plan(&n(&["shop"]), "copy"), DumpPlan::Rename(ref f) if f == "shop"));
+        match dump_plan(&n(&["shop", "crm"]), "copy") {
+            DumpPlan::Refuse(why) => assert!(why.contains("shop, crm") && why.contains("Target database"), "{why}"),
+            _ => panic!("a file with two databases must not be squashed into one target"),
+        }
+    }
+
+    #[test]
+    fn names_are_collected_from_the_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("d.sql");
+        std::fs::write(&p, "/*!40000 DROP DATABASE IF EXISTS `a`*/;\nCREATE DATABASE `a`;\nUSE `a`;\nINSERT INTO t VALUES (1);\n\
+USE `a`;\n-- later, a second database\nUSE `b`;\n").unwrap();
+        assert_eq!(dump_db_names(p.to_str().unwrap()).unwrap(), vec!["a".to_string(), "b".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod transfer_hex_tests {
+    use super::*;
+    #[test]
+    fn the_hex_setting_is_used_only_where_it_exists() {
+        for (v, want) in [("8.0.46", true), ("8.0.17", true), ("8.4.2-commercial", true), ("9.1.0", true),
+                          ("8.0.16", false), ("5.7.44-log", false), ("12.2.2-MariaDB", false),
+                          ("10.11.8-MariaDB-log", false), ("", false), ("garbage", false)] {
+            assert_eq!(mysql_version_has_hex_identified(v), want, "{v}");
         }
     }
 }

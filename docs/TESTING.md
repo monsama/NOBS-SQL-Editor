@@ -11,10 +11,14 @@ read-only enforcement, literal escaping, CSV edge cases — and needs nothing se
 up.
 
 `npm test` runs the frontend tests in `tests/ui/`, which cover the grid logic
-that lives in `ui/index.html` and so is out of `cargo test`'s reach — currently
-the sort/filter ordering in `viewIndices`. They pull the functions straight out
+that lives in `ui/index.html` and so is out of `cargo test`'s reach: the grid's
+sort/filter ordering, the SQL the Users dialog builds, the connection store and its
+request bridge, the table designer (driven with real `information_schema` rows
+from MySQL 8 and MariaDB 12), and recovery from a failed procedure/trigger recreate. They pull the functions straight out
 of the HTML file rather than keeping a copy, so a change to the real code is
-what they measure. No dependencies, no `npm ci` needed.
+what they measure. No dependencies, no `npm ci` needed. The PowerShell edition runs
+the same files against its own inline copy of the UI (`NOBS_UI_SOURCE`), so a
+change to one of them changes both editions' tests.
 
 Everything below is what neither of those can reach.
 
@@ -26,8 +30,8 @@ count and the timing (`finished in 0.00s` means nothing happened), or run with
 
 | Variable | Gates | Without it |
 |---|---|---|
-| `NOBS_TEST_DSN` | all 21 live tests | skipped silently |
-| `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 4 import/export/compare tests *within* those 21 | they run, then **fail** with `program not found` |
+| `NOBS_TEST_DSN` | all 22 live tests (and the live SSL/CA tests, which are not `#[ignore]`d) | skipped silently |
+| `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 5 import/export/CSV/compare tests *within* those 22 | they run, then **fail** with `program not found` |
 | `NOBS_TEST_SERVER_CA` | the 2 CA tests that need the server's **own** CA | skipped, with a message |
 
 `NOBS_TEST_SERVER_CA` exists because a CA test without it proves very little. `verify` refuses a

@@ -121,3 +121,77 @@ test('the CA is a path the app browses for, not a browser file input', () => {
   assert.match(html, /onPick:pp=>\$\('sslca'\)\.value=pp/,
     'the CA field should use the app\'s own file browser');
 });
+
+// --- the request bridge must not swap out the profile being saved ---------------------------------
+// api() fills in the connection for every request, so that queries always go to the server you
+// are connected to rather than whatever profile is loaded in the form. It did that for conn-save
+// as well, where conn is not a server to talk to but the profile being SAVED - so Save, Edit, Clone
+// and Forget-password all stored the connected server's host, port, user, SSL mode, CA and
+// password under the other profile's name whenever you were connected somewhere else. Found by
+// driving the real Save dialog while connected to a different server: the dialog sent 3308 /
+// verify-ca / a CA, and the store received 3306 / default / nothing.
+//
+// This runs the real api() from the file under test. The Tauri edition sends through
+// window.__TAURI__.core.invoke and the PowerShell edition through fetch, so both are stubbed and
+// whichever one the function uses is the one that gets checked.
+function extractFn(src, name) {
+  const start = src.indexOf(`async function ${name}(`);
+  assert.ok(start >= 0, `${name}() not found`);
+  let depth = 0;
+  for (let j = src.indexOf('{', start); j < src.length; j++) {
+    if (src[j] === '{') depth++;
+    else if (src[j] === '}' && --depth === 0) return src.slice(start, j + 1);
+  }
+  throw new Error('unbalanced braces in ' + name);
+}
+
+function bridge() {
+  const sent = [];
+  const connected = { host: 'prod.example', port: '3306', user: 'admin', password: 'PROD-SECRET', ssl: 'default', sslCa: '' };
+  const form = { host: 'form.example', port: '3310', user: 'formuser', password: 'form-pw', ssl: 'required', sslCa: '' };
+  const window = {
+    _activeConn: connected, _activeReadOnly: true, readOnly: false,
+    __TAURI__: { core: { invoke: async (cmd, args) => { sent.push({ cmd, p: args.req }); return { ok: true }; } } },
+  };
+  const fetch = async (path, init) => { sent.push({ cmd: path, p: JSON.parse(init.body) }); return { json: async () => ({ ok: true }) }; };
+  const api = new Function('window', 'fetch', 'getConn', 'busyStart', 'busyStop', 'showDead', 'TOKEN',
+    extractFn(html, 'api') + '\nreturn api;')(window, fetch, () => ({ ...form }), () => {}, () => {}, () => {}, 't');
+  return { api, sent, connected, form, window };
+}
+
+test('saving a profile stores that profile, not the server you are connected to', async () => {
+  const b = bridge();
+  const profile = { host: 'other.example', port: '3308', user: 'someone', password: 'OTHER-PW', ssl: 'verify-ca', sslCa: 'C:/certs/ca.pem' };
+  await b.api('/api/conn-save', { name: 'Other', conn: { ...profile } });
+  assert.equal(b.sent.length, 1);
+  assert.deepEqual(b.sent[0].p.conn, profile,
+    'conn-save must carry the profile being saved - it was replaced with the connected server');
+  assert.notEqual(b.sent[0].p.conn.password, b.connected.password,
+    'the connected server\'s password must never be saved under another profile\'s name');
+});
+
+test('everything else still goes to the server you are connected to', async () => {
+  // The reason the override exists: a profile merely selected in the dropdown must not redirect
+  // live queries, or read-only enforcement, to a different server.
+  const b = bridge();
+  await b.api('/api/query', { sql: 'SELECT 1', conn: { host: 'sneaky.example' } });
+  await b.api('/api/conn-get', { name: 'Other' });
+  for (const s of b.sent) {
+    assert.equal(s.p.conn.host, 'prod.example', `${s.cmd} was not sent to the connected server`);
+    assert.equal(s.p.ro, true, `${s.cmd} lost the connected server's read-only flag`);
+  }
+  // Not connected at all: the form is all there is.
+  b.window._activeConn = null; b.sent.length = 0;
+  await b.api('/api/query', { sql: 'SELECT 1' });
+  assert.equal(b.sent[0].p.conn.host, 'form.example');
+  // And connect always uses the form - that is what connecting means.
+  b.window._activeConn = b.connected; b.sent.length = 0;
+  await b.api('/api/connect', {});
+  assert.equal(b.sent[0].p.conn.host, 'form.example');
+});
+
+test('a conn-save without a conn still gets one, rather than sending nothing', async () => {
+  const b = bridge();
+  await b.api('/api/conn-save', { name: 'x' });
+  assert.ok(b.sent[0].p.conn, 'the exception is only for a caller that supplied the profile');
+});
