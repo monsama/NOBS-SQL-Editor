@@ -274,6 +274,23 @@ fn ssl_opts_for(ssl: &str) -> Option<SslOpts> {
 // not a broken server but a perfectly normal one. MariaDB and MySQL both auto-generate a
 // self-signed certificate when none is configured, so "verify" rejects the default install of
 // either. The note says which knob to turn instead of leaving the user guessing at the server.
+// What to say when COMMIT itself fails.
+//
+// A statement failing BEFORE the commit is genuinely undone, either by the ROLLBACK we send or,
+// if the connection is already gone, by the server discarding the open transaction when it
+// notices - so telling the user nothing was applied is true.
+//
+// COMMIT is not like that. If it failed because the connection broke while it was in flight, the
+// server may have committed and simply had nowhere to send the acknowledgement; we cannot tell
+// that apart from a commit that never happened. This used to say "No changes were applied", which
+// is a coin flip stated as a fact - and the reassuring side of it, which is the wrong way round
+// for a message someone will act on by re-applying their edits.
+fn commit_failure_message(err: &str) -> String {
+    format!("Could not commit: {err}\n\nThe changes may or may not have been saved - if the \
+connection dropped while the commit was in flight, the server may have completed it anyway. \
+Check the table before applying these changes again.")
+}
+
 fn explain_conn_error(ssl: &str, err: &str) -> String {
     let tls_related = err.contains("TlsError") || err.contains("certificate") || err.contains("Certificate");
     if ssl == "verify" && tls_related {
@@ -1541,7 +1558,7 @@ async fn script(req: Value) -> R {
             if transactional {
                 if let Err(e) = c.query_drop("COMMIT") {
                     let _ = c.query_drop("ROLLBACK");
-                    return Ok(json!({"ok":false,"error":format!("Could not commit: {}\n\nNo changes were applied.", db_err(e))}));
+                    return Ok(json!({"ok":false,"error":commit_failure_message(&db_err(e))}));
                 }
             }
             return Ok(json!({"ok":true}));
@@ -4448,5 +4465,103 @@ mod ssl_tests {
         // verify mode should not be answered with advice about certificates.
         assert_eq!(explain_conn_error("required", tls), tls);
         assert_eq!(explain_conn_error("verify", "Access denied for user 'x'"), "Access denied for user 'x'");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Losing the connection in the middle of applying changes
+// ---------------------------------------------------------------------------
+// Staged grid edits, a table-designer apply and a compare-apply all send several statements that
+// only make sense together, wrapped in START TRANSACTION/COMMIT. That protects against a statement
+// FAILING. It says nothing about the connection going away halfway through, which is the failure
+// mode a laptop lid, a VPN drop or a server restart actually produces.
+//
+// These sever the connection for real - a second session KILLs the one running the batch - rather
+// than simulating it, because what is being checked is the server's behaviour as much as ours.
+#[cfg(test)]
+mod conn_loss_tests {
+    use super::*;
+
+    fn dsn_json() -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some(json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"}))
+    }
+
+    fn exec(sql: &str) {
+        let mut c = build_conn(&dsn_json().unwrap()).unwrap();
+        c.query_drop(sql).unwrap();
+    }
+    fn count(sql: &str) -> i64 {
+        let mut c = build_conn(&dsn_json().unwrap()).unwrap();
+        c.query_first::<i64, _>(sql).unwrap().unwrap_or(-1)
+    }
+
+    // Kills whichever connection is running a statement containing `needle`, waiting for it to
+    // show up. Returns false if it never did.
+    fn kill_running(needle: &str) -> bool {
+        let mut c = build_conn(&dsn_json().unwrap()).unwrap();
+        for _ in 0..100 {
+            let found: Vec<(u64, Option<String>)> = c
+                .query("SELECT ID, INFO FROM information_schema.PROCESSLIST")
+                .unwrap();
+            for (id, info) in found {
+                if info.as_deref().map(|s| s.contains(needle)).unwrap_or(false) {
+                    let _ = c.query_drop(format!("KILL {id}"));
+                    return true;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        false
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn a_connection_lost_mid_batch_leaves_nothing_behind() {
+        if dsn_json().is_none() { eprintln!("NOBS_TEST_DSN not set - skipping"); return }
+        exec("CREATE DATABASE IF NOT EXISTS nobs_test");
+        exec("DROP TABLE IF EXISTS nobs_test.tx_drop");
+        exec("CREATE TABLE nobs_test.tx_drop (id INT PRIMARY KEY) ENGINE=InnoDB");
+
+        // Two rows land, then the batch parks on a SLEEP long enough to be killed from outside,
+        // then a third row that must never be reached. Exactly the shape of a grid apply that
+        // loses its connection partway down the list.
+        let sql = "INSERT INTO nobs_test.tx_drop VALUES (1);\n\
+                   INSERT INTO nobs_test.tx_drop VALUES (2);\n\
+                   SELECT SLEEP(30) /*nobs_kill_me*/;\n\
+                   INSERT INTO nobs_test.tx_drop VALUES (3);";
+        let req = json!({"sql": sql, "conn": dsn_json().unwrap(), "db": "nobs_test", "transaction": true});
+
+        let killer = std::thread::spawn(|| kill_running("nobs_kill_me"));
+        let res = script(req).await.unwrap();
+        assert!(killer.join().unwrap(), "never found the batch in the processlist to kill it");
+
+        // The two rows that HAD been inserted must be gone: the transaction never committed, and
+        // the server rolls back an open transaction when its connection dies.
+        let left = count("SELECT COUNT(*) FROM nobs_test.tx_drop");
+        assert_eq!(left, 0, "{left} row(s) survived a connection lost mid-transaction - the apply was partial");
+
+        // And it has to SAY so. Reporting ok:true here would be the worst outcome of the three:
+        // the user closes the dialog believing their edits are saved.
+        assert_eq!(res["ok"], false, "a batch whose connection was killed reported success: {res}");
+
+        exec("DROP TABLE IF EXISTS nobs_test.tx_drop");
+    }
+
+    // The claim the error message makes has to be one we can actually stand behind.
+    #[test]
+    fn a_failed_commit_does_not_promise_a_rollback_it_cannot_verify() {
+        // A statement that fails before COMMIT is genuinely undone - by ROLLBACK if the connection
+        // is alive, by the server on disconnect if it is not - so that message is honest.
+        // A COMMIT that fails is different: if the connection broke while it was in flight, the
+        // server may well have committed and simply never got the answer back to us. Claiming
+        // "No changes were applied" there is a guess presented as a fact.
+        let msg = commit_failure_message("Lost connection to server during query");
+        assert!(!msg.contains("No changes were applied"),
+            "a failed COMMIT must not claim the changes were not applied - it cannot know that");
+        assert!(msg.to_lowercase().contains("may") || msg.to_lowercase().contains("check"),
+            "a failed COMMIT should say the outcome is uncertain and to go and check: {msg}");
     }
 }
