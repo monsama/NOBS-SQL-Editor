@@ -243,20 +243,48 @@ fn build_conn(connj: &Value) -> Result<Conn, String> {
         .ip_or_hostname(Some(host)).tcp_port(port)
         .user(Some(user)).pass(Some(pass))
         .tcp_connect_timeout(Some(std::time::Duration::from_secs(10)));
-    ob = ob.ssl_opts(ssl_opts_for(ssl));
-    Conn::new(Opts::from(ob)).map_err(|e| explain_conn_error(ssl, &e.to_string()))
+    let ca = connj["sslCa"].as_str().filter(|s| !s.is_empty());
+    ob = ob.ssl_opts(ssl_opts_for(ssl, ca));
+    Conn::new(Opts::from(ob)).map_err(|e| explain_conn_error(ssl, ca.is_some(), &e.to_string()))
 }
 
 // The ssl setting -> what the connection actually does. Split out from build_conn so a test can
 // assert the mapping directly: the dangerous regression here is "verify" quietly picking up
 // with_danger_accept_invalid_certs, which would still negotiate TLS and so still look correct
 // from the outside while checking nothing.
-fn ssl_opts_for(ssl: &str) -> Option<SslOpts> {
+//
+// `ca` is an optional path to a PEM certificate to trust as the root. Without one, "verify"
+// validates against the OS trust store, which no self-signed certificate can satisfy - and both
+// MariaDB and MySQL generate exactly that when none is configured, so the common case for a
+// private server is that "verify" is unusable until you point it at the server's own CA.
+fn with_ca(opts: SslOpts, ca: Option<&str>) -> SslOpts {
+    match ca {
+        Some(p) => {
+            let owned: std::borrow::Cow<'static, std::path::Path> =
+                std::borrow::Cow::Owned(std::path::PathBuf::from(p));
+            opts.with_root_cert_path(Some(owned))
+        }
+        None => opts,
+    }
+}
+
+fn ssl_opts_for(ssl: &str, ca: Option<&str>) -> Option<SslOpts> {
     match ssl {
-        // Encrypt the wire, but do not check who is on the other end of it.
+        // Encrypt the wire, but do not check who is on the other end of it. A CA is meaningless
+        // here by definition - nothing is being verified - so it is deliberately not applied,
+        // rather than set and silently ignored.
         "required" => Some(SslOpts::default().with_danger_accept_invalid_certs(true)),
-        // Full chain validation against the OS trust store.
-        "verify"   => Some(SslOpts::default()),
+        // Full validation - the chain AND that the certificate names the host being connected to -
+        // against the given CA if there is one, the OS trust store if not.
+        "verify"    => Some(with_ca(SslOpts::default(), ca)),
+        // The chain, but not the host name. This is what makes a CA usable against the certificate
+        // MariaDB and MySQL generate for themselves: MySQL 8's reads
+        // CN=MySQL_Server_8.0.46_Auto_Generated_Server_Certificate with no subjectAltName, which no
+        // host name will ever match, so "verify" refuses it even with exactly the right CA -
+        // measured: "The certificate's CN name does not match the passed value." Only the host
+        // name check is relaxed. The chain is still validated, so a certificate the CA did not
+        // sign is still refused.
+        "verify-ca" => Some(with_ca(SslOpts::default(), ca).with_danger_skip_domain_validation(true)),
         // No TLS. The crate already defaults to plaintext, but naming "disabled" here keeps it a
         // decision rather than a fall-through that a change of default would silently reverse.
         "disabled" => None,
@@ -291,15 +319,39 @@ connection dropped while the commit was in flight, the server may have completed
 Check the table before applying these changes again.")
 }
 
-fn explain_conn_error(ssl: &str, err: &str) -> String {
+// The three ways a verifying connection actually fails, each with the error text Windows really
+// produced for it against MySQL 8's auto-generated certificate:
+//
+//   no CA          "...terminated in a root certificate which is not trusted by the trust provider"
+//   wrong CA       the same text - the chain still ends somewhere untrusted
+//   right CA,      "The certificate's CN name does not match the passed value."
+//   wrong name
+//
+// The last is the one worth singling out. The CA was right and the chain checked out; what failed
+// is a host name that the auto-generated certificate could never have matched. The fix is a
+// different mode, not a different file, and without saying so the natural next move is to keep
+// swapping CA files that were never the problem.
+fn explain_conn_error(ssl: &str, has_ca: bool, err: &str) -> String {
     let tls_related = err.contains("TlsError") || err.contains("certificate") || err.contains("Certificate");
-    if ssl == "verify" && tls_related {
-        format!("{err}\n\nSSL mode is set to \"verify\", which requires the server's certificate to \
-be signed by a CA your machine already trusts. A server using the self-signed certificate that \
-MariaDB and MySQL generate by default cannot satisfy that. Use \"required\" to encrypt the \
-connection without verifying the certificate, or install the server's CA in the Windows trust store.")
+    if !ssl_mode_verifies(ssl) || !tls_related { return err.to_string(); }
+    let name_mismatch = err.contains("CN name does not match") || err.contains("name mismatch")
+        || err.contains("hostname") || err.contains("host name");
+    if name_mismatch {
+        return format!("{err}\n\nThe certificate chain checked out, but the certificate does not name \
+the host you connected to. The certificates MariaDB and MySQL generate for themselves never do - \
+MySQL's is issued to \"MySQL_Server_<version>_Auto_Generated_Server_Certificate\". Use SSL mode \
+\"verify-ca\", which checks the certificate against your CA but not the host name, or connect using \
+the exact name the certificate was issued to.");
+    }
+    if has_ca {
+        format!("{err}\n\nA CA certificate was supplied, but the server's certificate was not signed \
+by it. Check that the CA file is the one belonging to this server - for a MySQL server with an \
+auto-generated certificate, that is ca.pem in its data directory.")
     } else {
-        err.to_string()
+        format!("{err}\n\nSSL mode \"{ssl}\" needs the server's certificate to be signed by a CA your \
+machine already trusts, and the self-signed certificate MariaDB and MySQL generate by default never \
+is. Set \"CA certificate\" on this connection to the server's CA file, or use \"required\" to \
+encrypt without verifying.")
     }
 }
 
@@ -1364,17 +1416,28 @@ fn client_is_mariadb(tool: &str) -> bool {
     maria
 }
 
+// "verify-ca" on the MariaDB client is deliberately the same as "verify". That client has no
+// chain-only mode: measured against MySQL 8 with its own CA, once a CA is supplied it checks the
+// host name as well (on anything but loopback), and --skip-ssl-verify-server-cert does not relax
+// that - nor, importantly, does it weaken the chain check. So the nearest honest mapping is the
+// STRICTER one. A setting that asks for verification must never quietly get less of it; getting
+// more only means a connection that fails where a looser client would have succeeded.
 fn ssl_cnf_lines(mode: &str, maria: bool) -> Vec<&'static str> {
     match (mode, maria) {
-        ("disabled", true)  => vec!["skip-ssl"],
-        ("required", true)  => vec!["ssl"],
-        ("verify",   true)  => vec!["ssl", "ssl-verify-server-cert"],
-        ("disabled", false) => vec!["ssl-mode=DISABLED"],
-        ("required", false) => vec!["ssl-mode=REQUIRED"],
-        ("verify",   false) => vec!["ssl-mode=VERIFY_IDENTITY"],
+        ("disabled",  true)  => vec!["skip-ssl"],
+        ("required",  true)  => vec!["ssl"],
+        ("verify",    true)  => vec!["ssl", "ssl-verify-server-cert"],
+        ("verify-ca", true)  => vec!["ssl", "ssl-verify-server-cert"],
+        ("disabled",  false) => vec!["ssl-mode=DISABLED"],
+        ("required",  false) => vec!["ssl-mode=REQUIRED"],
+        ("verify",    false) => vec!["ssl-mode=VERIFY_IDENTITY"],
+        ("verify-ca", false) => vec!["ssl-mode=VERIFY_CA"],
         _ => vec![],   // "default", and anything unrecognised: leave it to the client
     }
 }
+
+// Whether a mode verifies the server at all, and so has any use for a CA.
+fn ssl_mode_verifies(mode: &str) -> bool { mode == "verify" || mode == "verify-ca" }
 
 // Where the client should look for authentication plugins.
 //
@@ -1411,6 +1474,15 @@ fn cnf_file(connj: &Value, tool: &str) -> Result<(tempfile::NamedTempFile, Strin
     // quietly something else as soon as it was dumped or loaded.
     let ssl = connj["ssl"].as_str().unwrap_or("default");
     for line in ssl_cnf_lines(ssl, client_is_mariadb(tool)) { s += line; s += "\n"; }
+    // Same CA the native driver uses, so a dump goes out under the same verification the rest of
+    // the app does. MySQL's client REFUSES ssl-mode=VERIFY_* without one - "CA certificate is
+    // required if ssl-mode is VERIFY_CA or VERIFY_IDENTITY" - so for that client this is not a
+    // refinement of "verify", it is what makes it work at all.
+    if ssl_mode_verifies(ssl) {
+        if let Some(ca) = connj["sslCa"].as_str().filter(|s| !s.is_empty()) {
+            s += &format!("ssl-ca={}\n", cnf_safe(ca).replace('\\', "\\\\"));
+        }
+    }
     if let Some(p) = tools_plugin_dir(tool) {
         s += &format!("plugin-dir={}\n", cnf_safe(&p.to_string_lossy()).replace('\\', "\\\\"));
     }
@@ -2123,6 +2195,7 @@ async fn conn_list(_req: Value) -> R {
         let has_password = keyring::Entry::new("NOBSSQL-Desktop", name).ok().and_then(|e| e.get_password().ok()).is_some();
         json!({
             "name": c["name"], "host": c["host"], "port": c["port"], "user": c["user"], "ssl": c["ssl"],
+            "sslCa": c["sslCa"],
             "accent": c["accent"], "env": c["env"], "readonly": c["readonly"].as_bool().unwrap_or(false),
             "primary": c["primary"].as_bool().unwrap_or(false), "hasPassword": has_password
         })
@@ -2136,7 +2209,7 @@ async fn conn_get(req: Value) -> R {
     match c {
         Some(c) => {
             let pass = keyring::Entry::new("NOBSSQL-Desktop", &name).ok().and_then(|e| e.get_password().ok()).unwrap_or_default();
-            Ok(json!({"ok":true,"conn":{"host":c["host"],"port":c["port"],"user":c["user"],"ssl":c["ssl"],"password":pass},
+            Ok(json!({"ok":true,"conn":{"host":c["host"],"port":c["port"],"user":c["user"],"ssl":c["ssl"],"sslCa":c["sslCa"],"password":pass},
                 "accent":c["accent"],"env":c["env"],"readonly":c["readonly"].as_bool().unwrap_or(false)}))
         }
         None => Ok(json!({"ok":false})),
@@ -2164,6 +2237,7 @@ async fn conn_save(req: Value) -> R {
     let mut list: Vec<Value> = before.into_iter().filter(|c| c["name"].as_str() != Some(name.as_str())).collect();
     list.push(json!({
         "name": name, "host": conn["host"], "port": conn["port"], "user": conn["user"], "ssl": conn["ssl"],
+        "sslCa": conn["sslCa"],
         "accent": req.get("accent").cloned().unwrap_or(Value::Null),
         "env": req.get("env").cloned().unwrap_or(Value::Null),
         "readonly": req.get("readonly").and_then(|v| v.as_bool()).unwrap_or(false),
@@ -2220,7 +2294,7 @@ fn resolve_saved_conn(name: &str) -> Result<(Value, bool), String> {
     let c = load_profiles().into_iter().find(|c| c["name"].as_str() == Some(name))
         .ok_or_else(|| "Connection not found.".to_string())?;
     let pass = keyring::Entry::new("NOBSSQL-Desktop", name).ok().and_then(|e| e.get_password().ok()).unwrap_or_default();
-    let connj = json!({"host":c["host"],"port":c["port"],"user":c["user"],"ssl":c["ssl"],"password":pass});
+    let connj = json!({"host":c["host"],"port":c["port"],"user":c["user"],"ssl":c["ssl"],"sslCa":c["sslCa"],"password":pass});
     Ok((connj, c["readonly"].as_bool().unwrap_or(false)))
 }
 
@@ -4562,31 +4636,96 @@ mod ssl_tests {
     // "verify was quietly downgraded to accept anything" - both connect, both over TLS. This can.
     #[test]
     fn verify_validates_and_required_does_not_pretend_to() {
-        let v = ssl_opts_for("verify").expect("verify must use TLS");
+        let v = ssl_opts_for("verify", None).expect("verify must use TLS");
         assert!(!v.accept_invalid_certs(),
             "ssl=verify accepts invalid certificates - it encrypts but verifies nothing");
         assert!(!v.skip_domain_validation(),
             "ssl=verify skips hostname validation - the certificate could be for any host");
 
         // "required" is the deliberately unverified one; that is the whole difference between them.
-        let r = ssl_opts_for("required").expect("required must use TLS");
+        let r = ssl_opts_for("required", None).expect("required must use TLS");
         assert!(r.accept_invalid_certs(),
             "ssl=required would reject the self-signed certificate a default server install uses");
 
         // And the settings that mean "no TLS" must not quietly turn it on.
-        assert!(ssl_opts_for("disabled").is_none());
-        assert!(ssl_opts_for("default").is_none());
+        assert!(ssl_opts_for("disabled", None).is_none());
+        assert!(ssl_opts_for("default", None).is_none());
+    }
+
+    // A CA makes "verify" usable against a private or self-signed server, which is the ordinary
+    // case - both MariaDB and MySQL generate a self-signed certificate when none is configured,
+    // and no OS trust store will ever accept one of those.
+    #[test]
+    fn a_ca_is_used_for_verify_and_only_for_verify() {
+        let v = ssl_opts_for("verify", Some(r"C:\certs\ca.pem")).expect("verify must use TLS");
+        assert_eq!(v.root_cert_path().map(|p| p.to_string_lossy().to_string()),
+            Some(r"C:\certs\ca.pem".to_string()), "the CA did not reach the connection");
+        // Supplying a CA must not weaken anything else about verify.
+        assert!(!v.accept_invalid_certs(), "a CA must not turn verification off");
+        assert!(!v.skip_domain_validation(), "a CA must not turn off hostname checking");
+
+        // "required" verifies nothing by definition, so a CA there would be set and then ignored.
+        // Better to not apply it at all than to imply a check that is not happening.
+        let r = ssl_opts_for("required", Some(r"C:\certs\ca.pem")).unwrap();
+        assert!(r.root_cert_path().is_none(),
+            "ssl=required accepts any certificate, so a CA there would be decoration");
+
+        // And the no-TLS settings stay no-TLS whatever is configured alongside them.
+        assert!(ssl_opts_for("disabled", Some(r"C:\certs\ca.pem")).is_none());
+        assert!(ssl_opts_for("default", Some(r"C:\certs\ca.pem")).is_none());
     }
 
     #[test]
     fn only_verify_gets_the_certificate_note() {
         let tls = "TlsError { a root certificate which is not trusted }";
-        assert!(explain_conn_error("verify", tls).contains("\"required\""),
-            "a verify-mode TLS failure should point at the setting that would work");
+        assert!(explain_conn_error("verify", false, tls).contains("CA certificate"),
+            "a verify failure with no CA should say to set one");
+        assert!(explain_conn_error("verify", false, tls).contains("\"required\""),
+            "...and point at the setting that would work without one");
         // Other modes, and non-TLS failures, must pass through untouched - a wrong password in
         // verify mode should not be answered with advice about certificates.
-        assert_eq!(explain_conn_error("required", tls), tls);
-        assert_eq!(explain_conn_error("verify", "Access denied for user 'x'"), "Access denied for user 'x'");
+        assert_eq!(explain_conn_error("required", false, tls), tls);
+        assert_eq!(explain_conn_error("verify", false, "Access denied for user 'x'"), "Access denied for user 'x'");
+    }
+
+    // Once a CA has been supplied, "set a CA" is no longer useful advice. The real error texts below
+    // are what Windows produced against MySQL 8's auto-generated certificate.
+    #[test]
+    fn a_failure_despite_a_ca_gives_different_advice() {
+        let untrusted = "TlsError { A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider. (os error -2146762487) }";
+        let msg = explain_conn_error("verify", true, untrusted);
+        assert!(!msg.contains("Set \"CA certificate\""),
+            "telling someone to set the CA they already set is not advice: {msg}");
+        assert!(msg.contains("not signed by it"), "with a CA given, an untrusted root means the wrong CA: {msg}");
+    }
+
+    // The right CA, the wrong name. The chain was fine; blaming the CA file would send the user off
+    // swapping files that were never the problem. What fixes it is a mode.
+    #[test]
+    fn a_name_mismatch_points_at_verify_ca_not_at_the_file() {
+        let mismatch = "TlsError { The certificate's CN name does not match the passed value. (os error -2146762481) }";
+        for has_ca in [true, false] {
+            let msg = explain_conn_error("verify", has_ca, mismatch);
+            assert!(msg.contains("\"verify-ca\""), "a name mismatch should point at verify-ca: {msg}");
+            assert!(!msg.contains("not signed by it"), "the chain checked out - the CA is not the problem: {msg}");
+        }
+    }
+
+    #[test]
+    fn verify_ca_checks_the_chain_but_not_the_name() {
+        let v = ssl_opts_for("verify-ca", Some(r"C:\certs\ca.pem")).expect("verify-ca must use TLS");
+        // The one thing it relaxes.
+        assert!(v.skip_domain_validation(), "verify-ca should not check the host name");
+        // And the things it must not.
+        assert!(!v.accept_invalid_certs(),
+            "verify-ca accepts invalid certificates - that is not 'verify the CA', it is 'required'");
+        assert_eq!(v.root_cert_path().map(|p| p.to_string_lossy().to_string()),
+            Some(r"C:\certs\ca.pem".to_string()), "the CA did not reach verify-ca");
+        // Without a CA it still verifies, against the system store.
+        let bare = ssl_opts_for("verify-ca", None).unwrap();
+        assert!(!bare.accept_invalid_certs() && bare.root_cert_path().is_none());
+        // And its failures get the same certificate advice as verify's.
+        assert!(explain_conn_error("verify-ca", false, "TlsError { not trusted }").contains("CA certificate"));
     }
 }
 
@@ -4835,9 +4974,16 @@ mod cnf_tests {
         assert_eq!(ssl_cnf_lines("disabled", false), vec!["ssl-mode=DISABLED"]);
         assert_eq!(ssl_cnf_lines("required", false), vec!["ssl-mode=REQUIRED"]);
         assert_eq!(ssl_cnf_lines("verify",   false), vec!["ssl-mode=VERIFY_IDENTITY"]);
+        // MySQL's client has an exact equivalent of verify-ca.
+        assert_eq!(ssl_cnf_lines("verify-ca", false), vec!["ssl-mode=VERIFY_CA"]);
+        // MariaDB's does not, and gets the STRICTER mapping rather than a weaker one: measured, it
+        // checks the host name whenever a CA is supplied (bar loopback), and skipping its verify
+        // flag neither relaxes that nor - importantly - is safe to rely on as "chain only".
+        assert_eq!(ssl_cnf_lines("verify-ca", true), ssl_cnf_lines("verify", true),
+            "verify-ca on the MariaDB client must map to full verification, never to less");
 
         // The two vocabularies must not overlap anywhere, or a mix-up could go unnoticed.
-        for mode in ["disabled", "required", "verify"] {
+        for mode in ["disabled", "required", "verify", "verify-ca"] {
             let (m, y) = (ssl_cnf_lines(mode, true), ssl_cnf_lines(mode, false));
             assert!(m.iter().all(|l| !y.contains(l)), "dialects overlap for {mode}: {m:?} vs {y:?}");
         }
@@ -4871,6 +5017,36 @@ mod cnf_tests {
         assert!(!b2.contains("ssl"), "ssl=default should write no ssl line at all:\n{b2}");
     }
 
+    // A dump should go out under the same verification as everything else. For MySQL's client this
+    // is not a refinement either: it REFUSES ssl-mode=VERIFY_* outright without a CA, with
+    // "CA certificate is required if ssl-mode is VERIFY_CA or VERIFY_IDENTITY".
+    #[test]
+    fn the_options_file_carries_the_ca_when_verifying() {
+        let with_ca = |ssl: &str| {
+            let c = json!({"host":"h","port":"3306","user":"u","ssl":ssl,"sslCa":r"C:\certs\ca.pem"});
+            let (_f, p) = cnf_file(&c, "definitely-not-a-real-binary").unwrap();
+            std::fs::read_to_string(&p).unwrap()
+        };
+        // Backslashes are doubled, because the option-file parser treats them as escapes.
+        assert!(with_ca("verify").contains(r"ssl-ca=C:\\certs\\ca.pem"),
+            "the CA did not reach the options file:\n{}", with_ca("verify"));
+        assert!(with_ca("verify-ca").contains(r"ssl-ca=C:\\certs\\ca.pem"),
+            "verify-ca is the mode a CA matters most for, and it did not reach the options file:\n{}", with_ca("verify-ca"));
+
+        // Only where it means something. "required" accepts any certificate, so writing a CA
+        // there would imply a check that is not happening.
+        for ssl in ["required", "disabled", "default"] {
+            assert!(!with_ca(ssl).contains("ssl-ca"),
+                "ssl={ssl} does not verify anything, so it should not carry a CA:\n{}", with_ca(ssl));
+        }
+
+        // And no CA configured writes no line, rather than an empty one the client would reject.
+        let none = json!({"host":"h","port":"3306","user":"u","ssl":"verify","sslCa":""});
+        let (_f, p) = cnf_file(&none, "definitely-not-a-real-binary").unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("ssl-ca"),
+            "an empty CA should be left out entirely, not written as ssl-ca=");
+    }
+
     // A client from a real MariaDB or MySQL installation has its own lib/plugin next door and
     // finds the right plugins itself; redirecting it at another product's would break it.
     #[test]
@@ -4889,5 +5065,124 @@ mod cnf_tests {
         assert_eq!(tools_plugin_dir(&ours.to_string_lossy()), Some(plugin.clone()),
             "our own client should be pointed at the plugins we unpacked");
         if !existed { let _ = std::fs::remove_dir(&plugin); }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The CA certificate is actually used, not just carried around
+// ---------------------------------------------------------------------------
+// Handing a CA path to the driver proves nothing by itself. "verify" refuses a self-signed server
+// with no CA, with the wrong CA, and with a CA that is being silently ignored - all three look the
+// same from outside. The only thing that tells them apart is the RIGHT CA succeeding where the
+// wrong one fails, with nothing else changed. So the decisive test needs the server's real CA:
+//
+//   NOBS_TEST_SERVER_CA   path to the CA that signed the test server's certificate
+//
+// For a MySQL server with an auto-generated certificate that is ca.pem in its data directory -
+// often readable only by an administrator. The server also sends it in the TLS handshake, so it
+// can be taken off the wire without any special access:
+//
+//   echo | openssl s_client -starttls mysql -connect 127.0.0.1:3308 -showcerts //     | awk '/BEGIN CERT/{n++} n==2{print} /END CERT/ && n==2{exit}' > server-ca.pem
+//
+// Without it the tests that need it say so and pass, like every other live test here.
+#[cfg(test)]
+mod ssl_ca_tests {
+    use super::*;
+
+    // A genuine self-signed CA (CN=NOBS Test Bogus CA, basicConstraints CA:TRUE, valid 2026-2031).
+    // It signed nothing, so no server certificate anywhere validates against it.
+    const UNRELATED_CA: &str = r"-----BEGIN CERTIFICATE-----
+MIICzzCCAbegAwIBAgIIVjZZKgNf6DswDQYJKoZIhvcNAQELBQAwHTEbMBkGA1UEAxMSTk9CUyBU
+ZXN0IEJvZ3VzIENBMB4XDTI2MDkxNTE3MzEwMloXDTMxMDkxNjE3MzEwMlowHTEbMBkGA1UEAxMS
+Tk9CUyBUZXN0IEJvZ3VzIENBMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA9yv5N93T
+tLdgg7m1eeYfAsTgmdljah78mWt2wzLqoL+YhC/TAYprQmoU3mLWYoJctX0868xPZ5Ig7wJHsd6d
+fYkeisZuz9NWvumcimRH5HR+9S9ByGCFbT5CdADePKkMVIPuqKOL3WP/4Pyu0u3JmozgR8kV5F5Q
+nMxK9UXtqIYe3hMqKH7VVuCfCo16szABnoO7LgZwaD2KaJgM/zSHDfAMeG151/NWLd4gtiwhwfWx
+kfP8+6sufhTHv0bZ6X9/MmSWhnK23wb+o6y5Z/W7c7qKLteEx+ZouGvG8l6jKAqFeZAj4opIYOsS
+7RIIWaS+3797nBjYrV6dlYW/F6kAHQIDAQABoxMwETAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3
+DQEBCwUAA4IBAQBkwMAf+HgW6MR/T2V16xr7Qr8b2KzviFOxmrSubMM7pRwQV6F4DySfXOfdnmlb
+hKUAoG4m8MES+y7Q2bi2h+2xxBejExquVhzXjW20BL910qTQ3gXdB65IP98p+kyKIrKBF7ZxQugV
+AnR5YrkT2imF+/5Exr0MeLZ8L2yLuE0o6jSXBgEeBI7zeEqqEvAk2x6fDJuzCPwLa8vRMfwwFA3X
+EFlWtFN8E4G8dWsBF6ELCTRTDlhvJa4OVPVyjmtolmmeWFn+G2J9vOulYfoYUXLMAg4tK+GE0wSS
+s+GblpHbDz1GCdRkiTPZKgv8QnJrmZQthFmp2EzeKamcSe1q+U4O
+-----END CERTIFICATE-----
+";
+
+    fn conn_with(mode: &str, ca: &str) -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some(json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":mode,"sslCa":ca}))
+    }
+    fn server_ca() -> Option<String> {
+        std::env::var("NOBS_TEST_SERVER_CA").ok().filter(|p| std::path::Path::new(p).exists())
+    }
+    fn unrelated_ca_file() -> tempfile::NamedTempFile {
+        let mut f = tempfile::Builder::new().suffix(".pem").tempfile().unwrap();
+        f.write_all(UNRELATED_CA.as_bytes()).unwrap();
+        f
+    }
+    fn cipher(mut c: Conn) -> String {
+        let row: Option<(String, String)> = c.query_first("SHOW STATUS LIKE 'Ssl_cipher'").unwrap();
+        row.map(|r| r.1).unwrap_or_default()
+    }
+
+    // The pair that proves the CA decides the outcome: same mode, same server, only the CA differs.
+    #[test]
+    fn verify_ca_accepts_the_servers_own_ca_and_refuses_any_other() {
+        let Some(ca) = server_ca() else { eprintln!("NOBS_TEST_SERVER_CA not set - skipping"); return };
+        let Some(right) = conn_with("verify-ca", &ca) else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let c = build_conn(&right).unwrap_or_else(|e| panic!("ssl=verify-ca refused the server's own CA: {e}"));
+        assert!(!cipher(c).is_empty(), "ssl=verify-ca connected, but not over TLS");
+
+        let wrong_file = unrelated_ca_file();
+        let wrong = conn_with("verify-ca", &wrong_file.path().to_string_lossy()).unwrap();
+        // verify-ca skips the host name check - and must skip ONLY that. If it had switched chain
+        // validation off along with it, this would connect.
+        assert!(build_conn(&wrong).is_err(),
+            "ssl=verify-ca accepted a CA that never signed the server's certificate - the chain is not being checked");
+    }
+
+    // "verify" keeps checking the host name. Against a server whose certificate names something
+    // else, the right CA is not enough - and the message has to point at the mode, not the file.
+    #[test]
+    fn verify_with_the_right_ca_explains_a_name_mismatch() {
+        let Some(ca) = server_ca() else { eprintln!("NOBS_TEST_SERVER_CA not set - skipping"); return };
+        let Some(conn) = conn_with("verify", &ca) else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        match build_conn(&conn) {
+            // A server whose certificate really does name this host: nothing to explain.
+            Ok(c) => assert!(!cipher(c).is_empty(), "ssl=verify connected, but not over TLS"),
+            Err(e) => {
+                if e.contains("CN name does not match") {
+                    assert!(e.contains("verify-ca"),
+                        "a host name mismatch with the right CA should point at verify-ca: {e}");
+                    assert!(!e.contains("was not signed by it"),
+                        "the CA was right - blaming it sends the user after the wrong problem: {e}");
+                } else {
+                    panic!("ssl=verify refused the server's own CA for a reason other than the host name: {e}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn required_ignores_the_ca_and_still_connects() {
+        let wrong_file = unrelated_ca_file();
+        let Some(conn) = conn_with("required", &wrong_file.path().to_string_lossy()) else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let c = build_conn(&conn).expect("ssl=required must connect whatever CA is configured - it verifies nothing");
+        assert!(!cipher(c).is_empty(), "ssl=required connected but not over TLS");
+    }
+
+    // A CA file that is not there must fail as a missing FILE. That is also what shows the path is
+    // actually being read: a CA that was being ignored would fail with the same untrusted-root error
+    // as no CA at all, and never mention a file.
+    #[test]
+    fn a_missing_ca_file_is_reported_as_a_missing_file() {
+        for mode in ["verify", "verify-ca"] {
+            let Some(conn) = conn_with(mode, r"C:\definitely\not\here\ca.pem") else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+            let e = build_conn(&conn).err().unwrap_or_else(|| panic!("ssl={mode} with a missing CA file connected anyway"));
+            assert!(e.contains("IoError") || e.contains("cannot find"),
+                "ssl={mode}: a missing CA file should fail as a missing file, which proves the path is read: {e}");
+        }
     }
 }

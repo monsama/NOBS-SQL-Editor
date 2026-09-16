@@ -28,6 +28,24 @@ count and the timing (`finished in 0.00s` means nothing happened), or run with
 |---|---|---|
 | `NOBS_TEST_DSN` | all 21 live tests | skipped silently |
 | `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 4 import/export/compare tests *within* those 21 | they run, then **fail** with `program not found` |
+| `NOBS_TEST_SERVER_CA` | the 2 CA tests that need the server's **own** CA | skipped, with a message |
+
+`NOBS_TEST_SERVER_CA` exists because a CA test without it proves very little. `verify` refuses a
+self-signed server with no CA, with the wrong CA, and with a CA that is being silently ignored —
+all three look identical. Only the right CA succeeding where the wrong one fails, with nothing
+else changed, shows the CA is doing anything. The server hands its chain out during the
+handshake, so it can be taken from there without access to the server's files:
+
+```sh
+echo | openssl s_client -starttls mysql -connect 127.0.0.1:3308 -showcerts \
+  | awk '/BEGIN CERT/{n++} {c[n]=c[n] $0 "\n"} END{printf "%s", c[n]}' \
+  | sed -n '/BEGIN CERT/,/END CERT/p' > server-ca.pem
+```
+
+That keeps the last certificate printed: MySQL's own CA, or MariaDB's single self-signed
+certificate. Point the variable at a path with forward slashes or a quoted one — an unexpanded
+`$` in a hand-built Windows path makes the tests quietly skip, which is how an earlier run here
+looked green without having run them.
 
 `NOBS_TEST_DSN` is `host:port:user:password`. The two `*_BIN` variables are full
 paths to the client tools; they fall back to bare `mysql` / `mysqldump`, which
