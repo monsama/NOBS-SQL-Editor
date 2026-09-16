@@ -26,8 +26,8 @@ count and the timing (`finished in 0.00s` means nothing happened), or run with
 
 | Variable | Gates | Without it |
 |---|---|---|
-| `NOBS_TEST_DSN` | all 15 live tests | skipped silently |
-| `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 3 import/export tests *within* those 15 | they run, then **fail** with `program not found` |
+| `NOBS_TEST_DSN` | all 21 live tests | skipped silently |
+| `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 4 import/export/compare tests *within* those 21 | they run, then **fail** with `program not found` |
 
 `NOBS_TEST_DSN` is `host:port:user:password`. The two `*_BIN` variables are full
 paths to the client tools; they fall back to bare `mysql` / `mysqldump`, which
@@ -51,7 +51,35 @@ cd src-tauri; cargo test -- --ignored --test-threads=1
 ```
 
 `--test-threads=1` matters: the live tests share `nobs_test` and will interfere
-with each other in parallel.
+with each other in parallel. (The `compare_tests` pair additionally serialises
+itself, because it replaces and restores the one global `connections.json` — run
+in parallel, whichever finished first put the real file back under the other and
+it failed with `Connection not found.` on a perfectly healthy setup.)
+
+### Run it against MySQL too, not just MariaDB
+
+The two differ in ways that only surface against the real thing. Everything in
+this list was found by pointing the suite at a MySQL 8 server, not by reading:
+
+- MySQL authenticates with `caching_sha2_password` by default. That is a
+  *client-side* plugin, and Export/Import could not reach a stock MySQL 8 server
+  at all until the downloaded tools started shipping it.
+- MySQL and MariaDB name their SSL client options mutually exclusively, so the
+  wrong dialect is not a weaker connection but an unknown option and none at all.
+- MySQL cannot reference the same `TEMPORARY` table twice in one statement, which
+  is why `tests/fixtures/seed.sql` builds `bulk_rows` from a plain table.
+- `SLEEP()` interrupted by `KILL QUERY` **returns 1** on MySQL and the statement
+  succeeds; MariaDB raises `ER_QUERY_INTERRUPTED`. Anything testing cancellation
+  needs a real query, not a sleep — a cancel test built on `SLEEP` reports a
+  failure on MySQL when nothing is wrong.
+
+```powershell
+$env:NOBS_TEST_DSN = '127.0.0.1:3308:root:yourpassword'   # a MySQL 8 instance
+cd src-tauri; cargo test -- --include-ignored --test-threads=1
+```
+
+The suite is expected to pass unchanged against MariaDB 12.x and MySQL 8.x alike;
+it has been run green against MariaDB 12.2, MariaDB 12.3 and MySQL 8.0.46.
 
 ### What the compare tests do to your machine
 
