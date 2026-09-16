@@ -3456,7 +3456,23 @@ mod tests {
 // Integration tests that need a live server. They are ignored by default so an
 // ordinary `cargo test` stays offline; run them with a database available as:
 //
-//   NOBS_TEST_DSN='127.0.0.1:3399:nobs:nobs' cargo test -- --ignored --nocapture
+//   NOBS_TEST_DSN='127.0.0.1:3306:root:secret' cargo test -- --ignored --nocapture
+//
+// A test whose environment is missing prints a line and then PASSES, so a green
+// `cargo test` does not on its own mean it ran - check the timing, or watch for
+// "... not set - skipping" under --nocapture.
+//
+//   NOBS_TEST_DSN   - host:port:user:password. Gates all 15 live tests.
+//   MYSQL_BIN /     - full paths to the client tools. The 3 import/export tests
+//   MYSQLDUMP_BIN     shell out to them and fall back to a bare "mysql" /
+//                     "mysqldump", so without these they do not skip - they RUN
+//                     and fail with "program not found" on any machine where the
+//                     tools are not on PATH, which is the normal case. Note the
+//                     app's config.json records where it EXPECTS them
+//                     (%APPDATA%\NOBSSQL-Desktop\bin), which stays empty until
+//                     the in-app download has run - so that path may not exist.
+//
+// Use --test-threads=1: the live tests share nobs_test and interfere in parallel.
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod live_tests {
@@ -3869,25 +3885,68 @@ mod compare_tests {
     use super::*;
 
     // Compare DB writes to a target database, so it carries the same risks as the grid's apply
-    // path. These drive it end to end against a live server: a saved connection file is written
-    // where the app keeps one, using a passwordless user so the keyring is not involved.
-    fn setup_conns() -> bool {
-        if std::env::var("NOBS_TEST_LIVE").is_err() { return false; }
+    // path. These drive it end to end against a live server.
+    //
+    // compare_* resolves its servers through resolve_saved_conn(), i.e. by saved connection NAME,
+    // so the only way to drive it is to put profiles in conn_path() - the same file the real app
+    // keeps its connections in. That file is the user's, so ConnFileGuard below snapshots it and
+    // puts it back on Drop (which runs on unwind too, so a failing assert still restores it).
+    //
+    // resolve_saved_conn() reads the password from the OS keyring rather than the profile JSON.
+    // These tests therefore write their own keyring entries under the test-only profile names and
+    // delete them in cleanup, which is what lets them use a normal password-protected account -
+    // the earlier version dodged the keyring by hardcoding a passwordless `nobsnp` on port 3399,
+    // an address that existed only on the machine they were written on, so they could not run
+    // anywhere else. Everything now comes from NOBS_TEST_DSN like every other live test.
+    const P_RW: &str = "nobs_cmp_test_rw";
+    const P_RO: &str = "nobs_cmp_test_ro";
+
+    // Restores the real connections.json when the test ends, however it ends.
+    struct ConnFileGuard(Option<Vec<u8>>);
+    impl Drop for ConnFileGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(b) => { let _ = std::fs::write(conn_path(), b); }
+                None    => { let _ = std::fs::remove_file(conn_path()); }
+            }
+            for n in [P_RW, P_RO] {
+                if let Ok(e) = keyring::Entry::new("NOBSSQL-Desktop", n) { let _ = e.delete_credential(); }
+            }
+        }
+    }
+
+    fn dsn() -> Option<(String, String, String, String)> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some((p[0].into(), p[1].into(), p[2].into(), p[3].into()))
+    }
+
+    // Writes the two test profiles (one writable, one read-only) pointing at NOBS_TEST_DSN, and
+    // returns a guard that undoes it. None means the DSN is absent and the caller should skip.
+    fn setup_conns() -> Option<ConnFileGuard> {
+        let (host, port, user, pass) = dsn()?;
+        let guard = ConnFileGuard(std::fs::read(conn_path()).ok());
         let profiles = json!([
-            {"name":"cmp",   "host":"127.0.0.1","port":"3399","user":"nobsnp","ssl":"default","readonly":false},
-            {"name":"cmpro", "host":"127.0.0.1","port":"3399","user":"nobsnp","ssl":"default","readonly":true}
+            {"name":P_RW, "host":host,"port":port,"user":user,"ssl":"default","readonly":false},
+            {"name":P_RO, "host":host,"port":port,"user":user,"ssl":"default","readonly":true}
         ]);
         std::fs::write(conn_path(), serde_json::to_string_pretty(&profiles).unwrap()).unwrap();
-        true
+        for n in [P_RW, P_RO] {
+            keyring::Entry::new("NOBSSQL-Desktop", n).unwrap().set_password(&pass).unwrap();
+        }
+        Some(guard)
+    }
+    fn conn_j() -> Value {
+        let (host, port, user, pass) = dsn().unwrap();
+        json!({"host":host,"port":port,"user":user,"password":pass,"ssl":"default"})
     }
     fn raw(sql: &str) {
-        let c = json!({"host":"127.0.0.1","port":"3399","user":"nobsnp","password":"","ssl":"default"});
-        let mut conn = build_conn(&c).unwrap();
+        let mut conn = build_conn(&conn_j()).unwrap();
         conn.query_drop(sql).unwrap();
     }
     fn scalar(sql: &str) -> String {
-        let c = json!({"host":"127.0.0.1","port":"3399","user":"nobsnp","password":"","ssl":"default"});
-        let mut conn = build_conn(&c).unwrap();
+        let mut conn = build_conn(&conn_j()).unwrap();
         let (_c, r) = run_select(&mut conn, sql).unwrap();
         r.get(0).and_then(|x| x.get(0)).cloned().flatten().unwrap_or_default()
     }
@@ -3895,7 +3954,7 @@ mod compare_tests {
     #[tokio::test]
     #[ignore]
     async fn compare_finds_schema_and_row_differences_and_can_apply_them() {
-        if !setup_conns() { eprintln!("NOBS_TEST_LIVE not set - skipping"); return }
+        let Some(_guard) = setup_conns() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
 
         raw("DROP DATABASE IF EXISTS cmp_src"); raw("CREATE DATABASE cmp_src");
         raw("DROP DATABASE IF EXISTS cmp_tgt"); raw("CREATE DATABASE cmp_tgt");
@@ -3906,8 +3965,8 @@ mod compare_tests {
         raw("INSERT INTO cmp_tgt.t VALUES (1,'same'),(2,'OTHER'),(3,''),(5,'extra row')");
 
         // --- structure
-        let r = compare_schemas(json!({"sourceConnName":"cmp","sourceDb":"cmp_src",
-                                       "targetConnName":"cmp","targetDb":"cmp_tgt"})).await.unwrap();
+        let r = compare_schemas(json!({"sourceConnName":P_RW,"sourceDb":"cmp_src",
+                                       "targetConnName":P_RW,"targetDb":"cmp_tgt"})).await.unwrap();
         assert_eq!(r["ok"], true, "compare_schemas failed: {r}");
         // the response groups statements per table, each with its own checked/kind flags
         let mut stmts: Vec<String> = Vec::new();
@@ -3922,14 +3981,14 @@ mod compare_tests {
         assert!(stmts.iter().any(|s| s.to_uppercase().contains("EXTRA")), "missing column not detected");
 
         // --- a read-only target must refuse to apply
-        let ro = compare_apply(json!({"targetConnName":"cmpro","targetDb":"cmp_tgt",
+        let ro = compare_apply(json!({"targetConnName":P_RO,"targetDb":"cmp_tgt",
                                       "statements":["CREATE TABLE cmp_tgt.should_not_exist (id INT)"]})).await.unwrap();
         println!("  read-only target -> ok={} error={:?}", ro["ok"], ro["error"].as_str().unwrap_or(""));
         assert_eq!(ro["ok"], false, "a read-only target must refuse to apply");
         assert_eq!(scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='cmp_tgt' AND table_name='should_not_exist'"), "0");
 
         // --- applying the structure diff for real
-        let ap = compare_apply(json!({"targetConnName":"cmp","targetDb":"cmp_tgt","statements":stmts})).await.unwrap();
+        let ap = compare_apply(json!({"targetConnName":P_RW,"targetDb":"cmp_tgt","statements":stmts})).await.unwrap();
         assert_eq!(ap["ok"], true, "apply failed: {ap}");
         assert_eq!(scalar("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema='cmp_tgt' AND table_name='t' AND column_name='extra'"), "1",
                    "the missing column was not created");
@@ -3938,8 +3997,8 @@ mod compare_tests {
         println!("  structure applied: column and table now present in the target");
 
         // --- rows missing from the target, found by primary key
-        let mr = compare_rows(json!({"sourceConnName":"cmp","sourceDb":"cmp_src",
-                                     "targetConnName":"cmp","targetDb":"cmp_tgt","table":"t"})).await.unwrap();
+        let mr = compare_rows(json!({"sourceConnName":P_RW,"sourceDb":"cmp_src",
+                                     "targetConnName":P_RW,"targetDb":"cmp_tgt","table":"t"})).await.unwrap();
         assert_eq!(mr["ok"], true, "compare_rows failed: {mr}");
         let missing: Vec<String> = mr["rows"].as_array().cloned().unwrap_or_default().iter()
             .map(|r| r[0].as_str().unwrap_or("?").to_string()).collect();
@@ -3947,8 +4006,8 @@ mod compare_tests {
         assert_eq!(missing, vec!["4"], "row 4 exists only in the source and should be reported");
 
         // --- rows present in both but differing, including NULL vs empty string
-        let dr = compare_rows_diff(json!({"sourceConnName":"cmp","sourceDb":"cmp_src",
-                                          "targetConnName":"cmp","targetDb":"cmp_tgt","table":"t"})).await.unwrap();
+        let dr = compare_rows_diff(json!({"sourceConnName":P_RW,"sourceDb":"cmp_src",
+                                          "targetConnName":P_RW,"targetDb":"cmp_tgt","table":"t"})).await.unwrap();
         assert_eq!(dr["ok"], true, "compare_rows_diff failed: {dr}");
         let mut found: Vec<(String,String,String,String)> = Vec::new();
         for d in dr["diffs"].as_array().cloned().unwrap_or_default() {
@@ -3977,14 +4036,7 @@ mod compare_tests {
     #[tokio::test]
     #[ignore]
     async fn compare_rows_apply_diff_rolls_back_a_failed_batch() {
-        if std::env::var("NOBS_TEST_LIVE").is_err() { eprintln!("NOBS_TEST_LIVE not set - skipping"); return }
-        let profiles = json!([{"name":"cmp_diff_rt","host":"127.0.0.1","port":"3306","user":"nobsnp2","ssl":"default","readonly":false}]);
-        std::fs::write(conn_path(), serde_json::to_string_pretty(&profiles).unwrap()).unwrap();
-        let raw = |sql: &str| {
-            let c = json!({"host":"127.0.0.1","port":"3306","user":"nobsnp2","password":"","ssl":"default"});
-            let mut conn = build_conn(&c).unwrap();
-            conn.query_drop(sql).unwrap();
-        };
+        let Some(_guard) = setup_conns() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
 
         raw("DROP DATABASE IF EXISTS cmp_diff_rt"); raw("CREATE DATABASE cmp_diff_rt");
         raw("CREATE TABLE cmp_diff_rt.t (id INT PRIMARY KEY, qty INT CHECK (qty >= 0))");
@@ -3995,13 +4047,12 @@ mod compare_tests {
             {"pk":[1], "colDiffs":[{"col":"qty","src":99}]},
             {"pk":[2], "colDiffs":[{"col":"qty","src":-1}]},
         ]);
-        let r = compare_rows_apply_diff(json!({"targetConnName":"cmp_diff_rt","targetDb":"cmp_diff_rt",
+        let r = compare_rows_apply_diff(json!({"targetConnName":P_RW,"targetDb":"cmp_diff_rt",
                                                 "table":"t","pkCols":["id"],"updates":updates})).await.unwrap();
         assert_eq!(r["ok"], false, "the batch should fail on the CHECK constraint: {r}");
         println!("  log: {:?}", r["log"]);
 
-        let c = json!({"host":"127.0.0.1","port":"3306","user":"nobsnp2","password":"","ssl":"default"});
-        let mut conn = build_conn(&c).unwrap();
+        let mut conn = build_conn(&conn_j()).unwrap();
         let (_c, rows) = run_select(&mut conn, "SELECT id, qty FROM cmp_diff_rt.t ORDER BY id").unwrap();
         let qty1 = rows[0][1].clone().unwrap_or_default();
         assert_eq!(qty1, "10", "row 1's update must have been rolled back along with row 2's failure, got qty={qty1}");

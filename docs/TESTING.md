@@ -4,6 +4,66 @@ What automated tests cannot reach: a real server, a real installer, and a real
 Windows machine. `cargo test` covers the pure helpers; everything below needs
 you.
 
+## Running the automated tests first
+
+`cargo test` from `src-tauri/` runs the offline helpers — statement splitting,
+read-only enforcement, literal escaping, CSV edge cases — and needs nothing set
+up.
+
+`npm test` runs the frontend tests in `tests/ui/`, which cover the grid logic
+that lives in `ui/index.html` and so is out of `cargo test`'s reach — currently
+the sort/filter ordering in `viewIndices`. They pull the functions straight out
+of the HTML file rather than keeping a copy, so a change to the real code is
+what they measure. No dependencies, no `npm ci` needed.
+
+Everything below is what neither of those can reach.
+
+The live tests are `#[ignore]`d so a plain `cargo test` stays offline. A test
+whose environment is missing prints one line to stderr and then **passes**, so
+`cargo test` reporting `ok` does *not* by itself mean the test ran — check the
+count and the timing (`finished in 0.00s` means nothing happened), or run with
+`--nocapture` and watch for `... not set - skipping`.
+
+| Variable | Gates | Without it |
+|---|---|---|
+| `NOBS_TEST_DSN` | all 15 live tests | skipped silently |
+| `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 3 import/export tests *within* those 15 | they run, then **fail** with `program not found` |
+
+`NOBS_TEST_DSN` is `host:port:user:password`. The two `*_BIN` variables are full
+paths to the client tools; they fall back to bare `mysql` / `mysqldump`, which
+only works if those are on `PATH` — normally they are not.
+
+Point them at a real copy of the tools. Do not assume the path in the app's own
+`config.json` is valid: it records where the app *expects* them
+(`%APPDATA%\NOBSSQL-Desktop\bin`), which is an empty directory until the in-app
+download has actually run. The app itself copes — it falls back to searching the
+system (`tools-status` reports `"found on system"` and picks up e.g. a
+`C:\Program Files\MariaDB *\bin` install), so Export and Import still work. The
+**tests** do not: they read these two variables and otherwise fall back to a
+bare command name. So check the path before you trust it here:
+
+```powershell
+$env:NOBS_TEST_DSN  = '127.0.0.1:3306:root:yourpassword'
+$env:MYSQL_BIN      = "$env:APPDATA\NOBSSQL-Desktop\bin\mysql.exe"
+$env:MYSQLDUMP_BIN  = "$env:APPDATA\NOBSSQL-Desktop\bin\mysqldump.exe"
+Test-Path $env:MYSQL_BIN, $env:MYSQLDUMP_BIN     # both must be True
+cd src-tauri; cargo test -- --ignored --test-threads=1
+```
+
+`--test-threads=1` matters: the live tests share `nobs_test` and will interfere
+with each other in parallel.
+
+### What the compare tests do to your machine
+
+The two `compare_tests` drive `compare_*`, which resolves its servers by saved
+connection *name*, not by inline credentials. So they must write profiles into
+`%APPDATA%\NOBSSQL-Desktop\connections.json` — the real file the app uses — and
+matching entries into the **OS keyring**. Both are snapshotted and restored when
+the test ends, including on a failed assert, so a run leaves no trace. If you
+ever see `nobs_cmp_test_rw` or `nobs_cmp_test_ro` survive in your connection
+list, a test was killed mid-run; delete them by hand.
+
+
 Load the fixture first. It is self-contained, creates only `nobs_test`, and
 touches no other schema:
 
