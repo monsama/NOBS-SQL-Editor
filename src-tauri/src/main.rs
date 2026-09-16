@@ -243,12 +243,47 @@ fn build_conn(connj: &Value) -> Result<Conn, String> {
         .ip_or_hostname(Some(host)).tcp_port(port)
         .user(Some(user)).pass(Some(pass))
         .tcp_connect_timeout(Some(std::time::Duration::from_secs(10)));
+    ob = ob.ssl_opts(ssl_opts_for(ssl));
+    Conn::new(Opts::from(ob)).map_err(|e| explain_conn_error(ssl, &e.to_string()))
+}
+
+// The ssl setting -> what the connection actually does. Split out from build_conn so a test can
+// assert the mapping directly: the dangerous regression here is "verify" quietly picking up
+// with_danger_accept_invalid_certs, which would still negotiate TLS and so still look correct
+// from the outside while checking nothing.
+fn ssl_opts_for(ssl: &str) -> Option<SslOpts> {
     match ssl {
-        "required" => { ob = ob.ssl_opts(Some(SslOpts::default().with_danger_accept_invalid_certs(true))); }
-        "verify"   => { ob = ob.ssl_opts(Some(SslOpts::default())); }
-        _ => {}
+        // Encrypt the wire, but do not check who is on the other end of it.
+        "required" => Some(SslOpts::default().with_danger_accept_invalid_certs(true)),
+        // Full chain validation against the OS trust store.
+        "verify"   => Some(SslOpts::default()),
+        // No TLS. The crate already defaults to plaintext, but naming "disabled" here keeps it a
+        // decision rather than a fall-through that a change of default would silently reverse.
+        "disabled" => None,
+        _ => None,
     }
-    Conn::new(Opts::from(ob)).map_err(|e| e.to_string())
+}
+
+// A failed TLS handshake under "verify" arrives as a raw debug-formatted Rust error - one real
+// example, verbatim:
+//
+//   TlsError { A certificate chain processed, but terminated in a root certificate which is not
+//   trusted by the trust provider. (os error -2146762487) }
+//
+// That is accurate and useless: it does not say which setting caused it, and the usual cause is
+// not a broken server but a perfectly normal one. MariaDB and MySQL both auto-generate a
+// self-signed certificate when none is configured, so "verify" rejects the default install of
+// either. The note says which knob to turn instead of leaving the user guessing at the server.
+fn explain_conn_error(ssl: &str, err: &str) -> String {
+    let tls_related = err.contains("TlsError") || err.contains("certificate") || err.contains("Certificate");
+    if ssl == "verify" && tls_related {
+        format!("{err}\n\nSSL mode is set to \"verify\", which requires the server's certificate to \
+be signed by a CA your machine already trusts. A server using the self-signed certificate that \
+MariaDB and MySQL generate by default cannot satisfy that. Use \"required\" to encrypt the \
+connection without verifying the certificate, or install the server's CA in the Windows trust store.")
+    } else {
+        err.to_string()
+    }
 }
 
 // ---------- value conversion (typed -> Option<String>) ----------
@@ -4314,5 +4349,104 @@ mod compare_tests {
         assert_eq!(qty1, "10", "row 1's update must have been rolled back along with row 2's failure, got qty={qty1}");
 
         raw("DROP DATABASE IF EXISTS cmp_diff_rt");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSL modes
+// ---------------------------------------------------------------------------
+// The four ssl settings are a security promise, and until now nothing checked that any of them
+// did what its name says. These pin the two halves of that promise that can be asserted without
+// knowing anything about the test server's certificate:
+//
+//   - "required" really encrypts. A silent fallback to plaintext is the dangerous failure here,
+//     because nothing in the UI would look any different.
+//   - "disabled" really does not, so the two settings are distinguishable rather than both
+//     landing on the crate's default.
+//   - "verify" is never WEAKER than "required". It may legitimately refuse (the MariaDB and MySQL
+//     servers both auto-generate a self-signed certificate, which no trust store accepts), but it
+//     must not connect in the clear, and if it refuses it has to say which setting did it.
+//
+// Ssl_cipher is read back from the server, so this is the wire state, not what the client believes
+// it negotiated.
+#[cfg(test)]
+mod ssl_tests {
+    use super::*;
+
+    fn conn_json(mode: &str) -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some(json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":mode}))
+    }
+
+    // Connects in `mode` and returns the cipher the SERVER reports, or the connection error.
+    fn cipher_for(mode: &str) -> Result<String, String> {
+        let conn = conn_json(mode).ok_or("no dsn")?;
+        let mut c = build_conn(&conn)?;
+        let row: Option<(String, String)> = c.query_first("SHOW STATUS LIKE 'Ssl_cipher'")
+            .map_err(|e| e.to_string())?;
+        Ok(row.map(|t| t.1).unwrap_or_default())
+    }
+
+    #[test]
+    fn required_actually_encrypts() {
+        if conn_json("required").is_none() { eprintln!("NOBS_TEST_DSN not set - skipping"); return; }
+        let c = cipher_for("required").expect("\"required\" must be able to connect");
+        assert!(!c.is_empty(), "ssl=required connected in PLAINTEXT - the server reported no cipher");
+    }
+
+    #[test]
+    fn disabled_actually_does_not_encrypt() {
+        if conn_json("disabled").is_none() { eprintln!("NOBS_TEST_DSN not set - skipping"); return; }
+        let c = cipher_for("disabled").expect("\"disabled\" must be able to connect");
+        assert!(c.is_empty(), "ssl=disabled negotiated TLS anyway (cipher {c}) - the setting did nothing");
+    }
+
+    #[test]
+    fn verify_is_never_weaker_than_required() {
+        if conn_json("verify").is_none() { eprintln!("NOBS_TEST_DSN not set - skipping"); return; }
+        match cipher_for("verify") {
+            // Refusing is the expected outcome against a self-signed certificate. What must not
+            // happen is refusing uninformatively - the raw TlsError names neither the setting
+            // that caused it nor the thing to do about it.
+            Err(e) => assert!(e.contains("\"verify\""),
+                "ssl=verify refused without explaining which setting refused: {e}"),
+            // If the server does have a trusted certificate, verify has to be at least as strong
+            // as required - i.e. encrypted. Connecting in the clear would mean it fell back.
+            Ok(c) => assert!(!c.is_empty(),
+                "ssl=verify connected in PLAINTEXT - it fell back instead of verifying"),
+        }
+    }
+
+    // The live test above cannot tell "verify genuinely validated a trusted certificate" from
+    // "verify was quietly downgraded to accept anything" - both connect, both over TLS. This can.
+    #[test]
+    fn verify_validates_and_required_does_not_pretend_to() {
+        let v = ssl_opts_for("verify").expect("verify must use TLS");
+        assert!(!v.accept_invalid_certs(),
+            "ssl=verify accepts invalid certificates - it encrypts but verifies nothing");
+        assert!(!v.skip_domain_validation(),
+            "ssl=verify skips hostname validation - the certificate could be for any host");
+
+        // "required" is the deliberately unverified one; that is the whole difference between them.
+        let r = ssl_opts_for("required").expect("required must use TLS");
+        assert!(r.accept_invalid_certs(),
+            "ssl=required would reject the self-signed certificate a default server install uses");
+
+        // And the settings that mean "no TLS" must not quietly turn it on.
+        assert!(ssl_opts_for("disabled").is_none());
+        assert!(ssl_opts_for("default").is_none());
+    }
+
+    #[test]
+    fn only_verify_gets_the_certificate_note() {
+        let tls = "TlsError { a root certificate which is not trusted }";
+        assert!(explain_conn_error("verify", tls).contains("\"required\""),
+            "a verify-mode TLS failure should point at the setting that would work");
+        // Other modes, and non-TLS failures, must pass through untouched - a wrong password in
+        // verify mode should not be answered with advice about certificates.
+        assert_eq!(explain_conn_error("required", tls), tls);
+        assert_eq!(explain_conn_error("verify", "Access denied for user 'x'"), "Access denied for user 'x'");
     }
 }
