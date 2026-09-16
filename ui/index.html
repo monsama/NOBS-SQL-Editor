@@ -2657,11 +2657,7 @@ if(opts.onSave)add('Save','go',async()=>{
    toast('That is not a usable hex value. Expected hex digits, optionally 0x-prefixed, an even number of them - spaces and line breaks are fine.',true);return;
   }
   if(_vHexState.mode==='text'&&looksLikePastedHex(ta.value)){
-   if(!(await ask('This looks like a hex value pasted into the Text tab.
-
-Saved as Text it stores the characters "0x24..." themselves, not the bytes they stand for. Switch to the Hex tab to store the bytes.
-
-Save it as literal text anyway?')))return;
+   if(!(await ask('This looks like a hex value pasted into the Text tab.\n\nSaved as Text it stores the characters "0x24..." themselves, not the bytes they stand for. Switch to the Hex tab to store the bytes.\n\nSave it as literal text anyway?')))return;
   }
  }
  opts.onSave(getVal());hide('mView');
