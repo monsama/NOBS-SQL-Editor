@@ -243,3 +243,76 @@ test('an empty binary value is stored as nothing, not as the characters 0x', () 
   assert.equal(F.hexCellValueForSave('hex', '0x00'), '0x00');
   assert.equal(F.hexCellValueForSave('text', 'hi'), '0x6869');
 });
+
+// --- copy/paste safety: no route may corrupt ---------------------------------------------------
+// Two blobs in a real database were lost to the same move - copy a cell, paste it into another
+// cell - twice, because each fix only covered one shape of it. So this walks every combination of
+// what "Copy value" produces and where it can be pasted, and asserts each one is either exactly
+// right or refused. Nothing in between.
+//
+// The rule being enforced: a cell's bytes must survive copy -> paste unchanged, or the save must
+// not happen.
+test('every copy-then-paste route either round-trips exactly or is refused', () => {
+  const src = ['strLit', 'lit', 'bytesToHex', 'textToHex', 'hexToBytes', 'hexToStrictText',
+               'normalizeHexInput', 'looksLikePastedHex', 'hexCellValueForSave', 'cellCopyValue']
+    .map(n => extractFunction(html, n)).join('\n');
+  const F = new Function('MAX_HEXTEXT_BYTES', src +
+    '\nreturn {cellCopyValue,looksLikePastedHex,normalizeHexInput,hexCellValueForSave,textToHex};')(1 << 20);
+
+  // What the grid holds for a cell: binary is always the 0x.. display form.
+  const textLike = '0x' + [...new TextEncoder().encode('$7$C6..../....RYngpNxf')]
+    .map(b => b.toString(16).padStart(2, '0')).join('');
+  const realBinary = '0x00ff10fe';           // not valid UTF-8 - hex is its only representation
+  const plainText = 'ordinary text value';   // a non-binary column
+
+  // Simulates a save: returns the bytes that would land, or null when the app refuses.
+  const save = (mode, box) => {
+    if (F.looksLikePastedHex(box)) {
+      if (mode === 'text') {
+        // Whole box is hex -> offered as bytes (the user confirms, and it becomes a hex save).
+        const whole = F.normalizeHexInput(box);
+        if (whole === null) return null;      // mixed: refused outright
+        mode = 'hex'; box = whole;
+      }
+    }
+    if (mode === 'hex' && F.normalizeHexInput(box) === null) return null;
+    return F.hexCellValueForSave(mode, box);
+  };
+  const bytesOf = (stored) => stored === '' ? '' : (/^0x/.test(stored) ? stored.toLowerCase() : F.textToHex(stored).toLowerCase());
+
+  for (const [label, cell] of [['text-like binary', textLike], ['non-UTF-8 binary', realBinary]]) {
+    const copied = F.cellCopyValue(cell);
+    for (const mode of ['text', 'hex']) {
+      const stored = save(mode, copied);
+      if (stored === null) continue;                       // refused: safe by definition
+      assert.equal(bytesOf(stored), cell.toLowerCase(),
+        `${label}: copy -> paste into the ${mode} tab changed the bytes`);
+    }
+    // "Copy value as hex" always yields the raw display form, and it must round-trip too.
+    const stored = save('hex', cell);
+    assert.equal(bytesOf(stored), cell.toLowerCase(), `${label}: copy-as-hex -> Hex tab changed the bytes`);
+  }
+
+  // A hex value pasted ALONGSIDE an existing value - the move that actually caused the loss -
+  // must be refused from the Text tab rather than stored as characters.
+  assert.equal(save('text', textLike + '$7$C6..../....RYngpNxf'), null,
+    'hex pasted in front of the old value must be refused');
+  assert.equal(save('text', '$7$C6..../....RYngpNxf' + textLike), null,
+    'hex pasted after the old value must be refused');
+
+  // And an ordinary text value still saves untouched.
+  assert.equal(save('text', plainText), F.textToHex(plainText));
+});
+
+test('copying a cell yields something that pastes back as the same bytes', () => {
+  const src = ['bytesToHex', 'hexToBytes', 'hexToStrictText', 'cellCopyValue']
+    .map(n => extractFunction(html, n)).join('\n');
+  const F = new Function('MAX_HEXTEXT_BYTES', src + '\nreturn {cellCopyValue};')(1 << 20);
+  // Text-like bytes copy as their text, so a paste into the Text tab reproduces them.
+  assert.equal(F.cellCopyValue('0x6869'), 'hi');
+  // Bytes that are not text keep the hex, which only the Hex tab will accept.
+  assert.equal(F.cellCopyValue('0x00ff10fe'), '0x00ff10fe');
+  // Non-binary cells are untouched, and NULL copies as empty rather than the word null.
+  assert.equal(F.cellCopyValue('plain'), 'plain');
+  assert.equal(F.cellCopyValue(null), '');
+});

@@ -2457,6 +2457,26 @@ const MAX_HEXTEXT_BYTES=2000000; // ~2MB - beyond this, skip the round-trip chec
 function hexToBytes(hexStr){const hex=(hexStr||'').slice(2);const bytes=new Uint8Array(Math.floor(hex.length/2));for(let i=0;i<bytes.length;i++)bytes[i]=parseInt(hex.substr(i*2,2),16);return bytes;}
 function bytesToHex(bytes){let s='0x';for(let i=0;i<bytes.length;i++)s+=bytes[i].toString(16).padStart(2,'0');return s;}
 function bytesToBase64(bytes){let bin='';for(let i=0;i<bytes.length;i++)bin+=String.fromCharCode(bytes[i]);return btoa(bin);}
+// What "Copy value" puts on the clipboard for one cell.
+//
+// A binary cell is DISPLAYED as 0x.. - that is this app's encoding for bytes, not the value
+// itself. Copying that string and pasting it into another cell's Text tab stored the characters
+// 0,x,2,4..., which is how two blobs in a real database came to hold a hex dump in place of a
+// crypt hash. So when the bytes are ordinary text, copy the text: paste it anywhere and the same
+// bytes come back. Bytes that are not valid UTF-8 have no representation but the hex, and the
+// Text tab now refuses hex outright, so that path is safe too.
+//
+// "Copy value as hex" beside it still yields the 0x.. form, for pasting into a WHERE clause or
+// another tool - nothing that was possible before has been taken away.
+function cellCopyValue(v){
+ if(v==null)return '';
+ const s=String(v);
+ if(/^0x[0-9A-Fa-f]*$/.test(s)){
+  const decoded=hexToStrictText(s);
+  if(decoded!=null)return decoded;
+ }
+ return s;
+}
 function hexToStrictText(hexStr){
  const hex=hexStr||'0x';if(hex.length>MAX_HEXTEXT_BYTES*2)return null;
  try{
@@ -2552,6 +2572,16 @@ function switchHexTab(mode){
  }
  _vHexState.mode=mode;updateHexTabButtons();
 }
+const NL = String.fromCharCode(10);
+// The two things said when hex turns up in the Text tab. Kept as named constants so the strings
+// are built once, out of the way of the save handler - an earlier version inlined one of these
+// and a mangled escape inside it took the whole page down.
+const HEXPASTE_WHOLE = 'That is a hex value, and this is the Text tab.'
+ + NL + NL + 'Saved as Text it would store the characters 0, x, 2, 4... rather than the bytes they stand for.'
+ + NL + NL + 'Store it as the bytes instead? (This is what pasting a copied cell is meant to do.)';
+const HEXPASTE_MIXED = 'There is a hex value mixed into this text, so nothing was saved.'
+ + ' That usually means a paste landed alongside the old value instead of replacing it -'
+ + ' select everything in the box before pasting, or use the Hex tab.';
 function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;const ta=$('vText');const sel=$('vSelect');const multi=$('vMulti');const dt=$('vDate');const hexTabs=$('vHexTabs');const img=$('vImg');
  // A date/time value only needs room for the native picker widget, not the full 1000px meant for
  // long text - a narrower modal reads much better for a single date/time/datetime cell. Setting
@@ -2657,18 +2687,32 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
  // modal's own action-row convention in this app (Save/Apply/Import/Run.../then Close), not a
  // one-off choice for just this dialog.
  if(opts.onNull)add('Set NULL','',()=>{opts.onNull();hide('mView');});
- // Binary cells get two checks before anything is written. Hex mode: the box must actually hold
-// hex, because an unusable value used to be stored as literal text or quietly padded with zero
-// bytes. Text mode: content that looks like a pasted hex value is almost certainly meant for the
-// Hex tab, and saving it here stores the characters rather than the bytes - confirmed rather
-// than blocked, since a token really can begin with 0x.
+ // Binary cells are checked before anything is written, and nothing here can save a value that
+// would store the characters of a hex dump in place of the bytes they denote. Two blobs in a real
+// database were lost that way, twice over, so there is deliberately no "save it anyway": the two
+// outcomes are the correct value or nothing at all.
+//
+//   Hex mode  - the box must actually hold hex. normalizeHexInput accepts spaces, line breaks and
+//               a missing 0x, so a value copied from Workbench's hex view works, but anything it
+//               cannot read is refused rather than quietly padded with zero bytes.
+//   Text mode - Text runs textToHex() over the whole box, so a hex value here becomes its own
+//               characters. If the box is ENTIRELY hex the intent is not in doubt and it is
+//               offered as bytes, which is what pasting a copied cell is meant to do. If hex is
+//               merely mixed INTO the text, a paste has landed alongside the old value and there
+//               is no way to know which part was wanted - so nothing is saved.
 if(opts.onSave)add('Save','go',async()=>{
  if(opts.hexText&&_vHexState){
   if(_vHexState.mode==='hex'&&normalizeHexInput(ta.value)===null){
    toast('That is not a usable hex value. Expected hex digits, optionally 0x-prefixed, an even number of them - spaces and line breaks are fine.',true);return;
   }
   if(_vHexState.mode==='text'&&looksLikePastedHex(ta.value)){
-   if(!(await ask('This looks like a hex value (0x...) sitting in a text field.'+'\n\nSaved as Text it stores the characters "0x24..." themselves, not the bytes they stand for. If you pasted a copied cell here, use the Hex tab instead - and check you replaced the old value rather than pasting alongside it.'+'\n\nSave it as literal text anyway?')))return;
+   const whole=normalizeHexInput(ta.value);
+   if(whole!==null){
+    if(!(await ask(HEXPASTE_WHOLE)))return;
+    _vHexState.mode='hex';ta.value=whole;updateHexTabButtons();
+   } else {
+    toast(HEXPASTE_MIXED,true);return;
+   }
   }
  }
  opts.onSave(getVal());hide('mView');
@@ -2834,7 +2878,7 @@ function inlineEditIns(td,id,ii,col){const t=T(id);const cur=t.pending.ins[ii][c
  nb.addEventListener('mousedown',e=>{e.preventDefault();set(null);});
  inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&(!isMulti||e.ctrlKey||e.metaKey)){e.preventDefault();if(dirty)set(inp.value);else{done=true;insCellRevert(td,id,ii,col);}}else if(e.key==='Escape'){done=true;insCellRevert(td,id,ii,col);}});
  inp.addEventListener('blur',()=>setTimeout(()=>{if(!done){if(dirty)set(inp.value);else insCellRevert(td,id,ii,col);}},120));}
-function cellMenu(e,id,ri,ci){e.preventDefault();const t=T(id);const key=ri+':'+ci;const cur=(t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];const items=[['Copy value',()=>{navigator.clipboard.writeText(cur===null?'':String(cur));log('Copied cell value.');}],['Copy row',()=>copyRow(id,ri)],['Copy rows (selected)',()=>copySelRows(id)],['Paste row here (overwrite)',()=>pasteRowInto(id,ri)],['Paste rows as new',()=>pasteRowsAsNew(id)],['Copy column: '+t.cols[ci],()=>copyColumn(id,ci)],['Edit full row (form)...',()=>rowForm(id,ri)],'-'];if(t.table){const col=t.cols[ci];items.push(['Quick filter',qfSub(id,col,cur)]);if(t.filterClauses&&t.filterClauses.length)items.push(['Clear filter ('+t.filterClauses.length+')',()=>clearFilters(id)]);
+function cellMenu(e,id,ri,ci){e.preventDefault();const t=T(id);const key=ri+':'+ci;const cur=(t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];const items=[['Copy value',()=>{navigator.clipboard.writeText(cellCopyValue(cur));log('Copied cell value.');}],['Copy value as hex',()=>{navigator.clipboard.writeText(cur===null?'':String(cur));log('Copied cell value as hex.');}],['Copy row',()=>copyRow(id,ri)],['Copy rows (selected)',()=>copySelRows(id)],['Paste row here (overwrite)',()=>pasteRowInto(id,ri)],['Paste rows as new',()=>pasteRowsAsNew(id)],['Copy column: '+t.cols[ci],()=>copyColumn(id,ci)],['Edit full row (form)...',()=>rowForm(id,ri)],'-'];if(t.table){const col=t.cols[ci];items.push(['Quick filter',qfSub(id,col,cur)]);if(t.filterClauses&&t.filterClauses.length)items.push(['Clear filter ('+t.filterClauses.length+')',()=>clearFilters(id)]);
   const fkd=(t.fkDetails||[]).find(f=>f[0]===col);
   if(fkd&&cur!=null){items.push(['Go to referenced row ('+fkd[1]+'.'+fkd[2]+')',()=>goToFkRow(t.db,fkd[1],fkd[2],cur)]);}
   items.push('-');}items.push(['Export to CSV (all rows)...',()=>csvGrid(id)],['Export to CSV (selected rows)...',()=>csvSel(id)],['Export to INSERTs (all rows)...',()=>insGrid(id)],['Export to INSERTs (selected rows)...',()=>insSel(id)],'-',['Set NULL',()=>setUpd(id,ri,ci,null)],['Set empty',()=>setUpd(id,ri,ci,'')]);menu(e.clientX,e.clientY,items);}
@@ -2897,7 +2941,7 @@ async function editIns(td,id,ii,col){clearTimeout(clickTimer);const t=T(id);cons
  const ew=await editWidgetFor(id,col,cur);
  viewText('New row - '+col,(cur==null?'':cur),{onSave:v=>{t.pending.ins[ii][col]=v;renderGrid(id);},onNull:()=>{t.pending.ins[ii][col]=null;renderGrid(id);},...ew});}
 function insCellMenu(e,id,ii,col){e.preventDefault();const t=T(id);const cur=t.pending.ins[ii][col];
- const items=[['Copy value',()=>{navigator.clipboard.writeText(cur==null?'':String(cur));log('Copied value.');}],
+ const items=[['Copy value',()=>{navigator.clipboard.writeText(cellCopyValue(cur));log('Copied value.');}],
   ['Paste row into this new row',()=>pasteRowIntoIns(id,ii)],
   ['Edit value...',()=>editIns(null,id,ii,col)],'-',
   ['Set NULL',()=>{t.pending.ins[ii][col]=null;renderGrid(id);}],
