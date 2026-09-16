@@ -556,6 +556,41 @@ fn strip_parens(s: &str) -> String {
     }
     out
 }
+// Returns whatever follows the first top-level occurrence of `kw`, or None if it never appears
+// outside a quoted string. Used to unwrap MariaDB's "SET STATEMENT <assignments> FOR <statement>",
+// where the part after FOR is a whole statement that really executes. A FOR inside a string
+// literal - SET STATEMENT x='FOR' FOR SELECT 1 - is not the separator and must not be taken for one.
+fn split_off_keyword(s: &str, kw: &str) -> Option<String> {
+    let raw: Vec<char> = s.chars().collect();
+    let up: Vec<char> = s.to_uppercase().chars().collect();
+    let k: Vec<char> = kw.to_uppercase().chars().collect();
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut i = 0usize;
+    while i < raw.len() {
+        let c = raw[i];
+        if let Some(q) = quote {
+            if escaped { escaped = false; }
+            else if c == '\\' { escaped = true; }
+            else if c == q { quote = None; }
+            i += 1;
+            continue;
+        }
+        if c == '\'' || c == '"' || c == '`' { quote = Some(c); i += 1; continue; }
+        // Match on word boundaries, so FORMAT - or a column named for_id - is not read as FOR.
+        let before_ok = i == 0 || !is_word(raw[i - 1]);
+        if before_ok && i + k.len() <= up.len() && up[i..i + k.len()] == k[..] {
+            let after = i + k.len();
+            if after >= up.len() || !is_word(raw[after]) {
+                return Some(raw[after..].iter().collect::<String>().trim().to_string());
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 fn sql_is_readonly(sql: &str) -> bool {
     if sql.trim().is_empty() { return true; }
     // /*! ... */ and /*!50000 ... */ are NOT comments: MySQL executes their contents. Stripping
@@ -590,6 +625,27 @@ fn sql_is_readonly(sql: &str) -> bool {
             let second = up.split_whitespace().nth(1).unwrap_or("");
             if second.starts_with("GLOBAL") || second.starts_with("PERSIST")
                 || up.contains("@@GLOBAL") || up.contains("@@PERSIST") { return false; }
+            // SET is allow-listed for session variables, but several SET forms are not variable
+            // assignments at all. These three write, and were reaching the server on a connection
+            // the user had marked read-only:
+            //   SET PASSWORD FOR 'u'@'%' = ...   changes any account's credentials, root included
+            //   SET DEFAULT ROLE admin FOR ...   grants a role to an account
+            //   SET STATEMENT x=1 FOR <stmt>     MariaDB: EXECUTES the statement it wraps, so
+            //                                    "... FOR DELETE FROM t" really does delete
+            // The last is the same shape as the ANALYZE wrapper handled above - a read-only
+            // looking prefix carrying an arbitrary statement - so it gets the same treatment:
+            // unwrap it and judge the statement that is actually going to run.
+            if second == "PASSWORD" { return false; }
+            if second == "DEFAULT" && up.split_whitespace().nth(2).unwrap_or("") == "ROLE" { return false; }
+            if second == "STATEMENT" {
+                match split_off_keyword(t, "FOR") {
+                    // Recurse: the wrapped statement is judged exactly as if it had been typed on
+                    // its own, so "FOR SELECT 1" stays allowed and "FOR DROP TABLE t" does not.
+                    Some(inner) => { if !sql_is_readonly(&inner) { return false; } }
+                    // No FOR at all is not a form we recognise; refuse rather than guess.
+                    None => return false,
+                }
+            }
         }
         // A CTE only stays read-only if it's actually prefixing a SELECT/TABLE/VALUES - MySQL
         // 8.0.19+/MariaDB also allow "WITH x AS (...) DELETE/UPDATE FROM t ...", which the leading
@@ -3358,6 +3414,49 @@ mod tests {
         assert!(!sql_is_readonly("ANALYZE UPDATE t SET a=1"));
         assert!(!sql_is_readonly("ANALYZE FORMAT=JSON DELETE FROM t"));
     }
+
+// SET is allow-listed because a session variable is harmless, and that allow-listing was
+    // letting three SET forms that are not variable assignments at all straight through on a
+    // connection the user had marked read-only.
+    #[test]
+    fn read_only_blocks_set_forms_that_are_not_session_variables() {
+        // Changes an account's credentials - any account, root included.
+        assert!(!sql_is_readonly("SET PASSWORD FOR 'u'@'%' = PASSWORD('x')"));
+        assert!(!sql_is_readonly("SET PASSWORD = PASSWORD('x')"));
+        assert!(!sql_is_readonly("set password for 'u'@'%' = 'x'"));
+        // Grants a role to an account.
+        assert!(!sql_is_readonly("SET DEFAULT ROLE admin FOR 'u'@'%'"));
+        // MariaDB's SET STATEMENT ... FOR <statement> EXECUTES the statement it wraps, the same
+        // way ANALYZE <statement> does. Verified against a live server: "... FOR DELETE FROM t"
+        // emptied the table while read-only mode reported the statement as allowed.
+        assert!(!sql_is_readonly("SET STATEMENT max_statement_time=1 FOR DELETE FROM t"));
+        assert!(!sql_is_readonly("SET STATEMENT max_statement_time=1 FOR DROP TABLE t"));
+        assert!(!sql_is_readonly("SET STATEMENT a=1, b=2 FOR UPDATE t SET x=1"));
+        // ...but the wrapped statement is judged on its own merits, so a read it wraps is fine.
+        assert!(sql_is_readonly("SET STATEMENT max_statement_time=1 FOR SELECT 1"));
+        assert!(sql_is_readonly("SET STATEMENT max_statement_time=1 FOR SHOW TABLES"));
+        // An unrecognised SET STATEMENT form is refused rather than guessed at.
+        assert!(!sql_is_readonly("SET STATEMENT max_statement_time=1"));
+        // Ordinary session assignments must keep working - this guard is worthless if it makes
+        // read-only mode unusable for actual work.
+        assert!(sql_is_readonly("SET autocommit=0"));
+        assert!(sql_is_readonly("SET SESSION sql_mode='STRICT_TRANS_TABLES'"));
+        assert!(sql_is_readonly("SET NAMES utf8mb4"));
+        assert!(sql_is_readonly("SET @x = 1"));
+    }
+
+    // A FOR inside a string literal is not the separator, so it must not be where the statement
+    // gets split - otherwise the "wrapped statement" checked is a fragment, not what will run.
+    #[test]
+    fn split_off_keyword_ignores_quoted_and_partial_matches() {
+        assert_eq!(split_off_keyword("SET STATEMENT x=1 FOR SELECT 1", "FOR"), Some("SELECT 1".to_string()));
+        assert_eq!(split_off_keyword("SET STATEMENT x='FOR' FOR DELETE FROM t", "FOR"), Some("DELETE FROM t".to_string()));
+        // FORMAT starts with FOR but is not it.
+        assert_eq!(split_off_keyword("ANALYZE FORMAT=JSON SELECT 1", "FOR"), None);
+        assert_eq!(split_off_keyword("SELECT for_id FROM t", "FOR"), None);
+        assert_eq!(split_off_keyword("SELECT 1", "FOR"), None);
+    }
+
 
     #[test]
     fn read_only_blocks_server_state_changes() {
