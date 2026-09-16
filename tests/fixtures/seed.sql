@@ -118,7 +118,12 @@ CREATE TABLE bulk_rows (
   KEY idx_bulk_category (category)
 ) ENGINE=InnoDB;
 
-CREATE TEMPORARY TABLE _d (d INT);
+-- Deliberately NOT a TEMPORARY table. MySQL cannot reference the same temporary table more than
+-- once in a single statement ("ERROR 1137: Can't reopen table: 'a'"), and the cross-join below
+-- uses this one five times; MariaDB allows it, which is why this went unnoticed. A plain table
+-- works on both and is dropped just the same.
+DROP TABLE IF EXISTS _d;
+CREATE TABLE _d (d INT);
 INSERT INTO _d VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
 INSERT INTO bulk_rows (id, name, category, amount, note, created)
 SELECT n, CONCAT('row-', LPAD(n, 6, '0')),
@@ -129,7 +134,7 @@ SELECT n, CONCAT('row-', LPAD(n, 6, '0')),
        DATE_ADD('2020-01-01 00:00:00', INTERVAL n MINUTE)
 FROM (SELECT a.d + b.d*10 + c.d*100 + e.d*1000 + f.d*10000 AS n
       FROM _d a, _d b, _d c, _d e, _d f) seq;
-DROP TEMPORARY TABLE _d;
+DROP TABLE _d;
 
 -- --- 3. export / import cancel ---------------------------------------------
 -- bulk_rows above is what makes an export slow enough to cancel. A second
