@@ -2287,7 +2287,7 @@ async fn compare_rows(req: Value) -> R {
         // per table: it skips the (often equally expensive) target-side query and the display-row
         // fetch entirely once Stop has been clicked, rather than doing that work for nothing.
         let cancelled_now = |rid: &Option<String>| rid.as_deref().map(is_compare_cancelled).unwrap_or(false);
-        if cancelled_now(&rid) { return Ok(json!({"ok":true,"pkCols":Vec::<String>::new(),"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":false,"allMissingPks":Vec::<Value>::new(),"cancelled":true})); }
+        if cancelled_now(&rid) { return Ok(json!({"ok":true,"pkCols":Vec::<String>::new(),"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":false,"allMissingPks":Vec::<Value>::new(),"extraTotal":0,"extraPks":Vec::<Value>::new(),"cancelled":true})); }
         let (src_connj, _) = resolve_saved_conn(&src_name)?;
         let (tgt_connj, tgt_ro) = resolve_saved_conn(&tgt_name)?;
         let mut src_conn = build_conn(&src_connj)?;
@@ -2309,14 +2309,14 @@ async fn compare_rows(req: Value) -> R {
             Err(e) => {
                 if cancelled_now(&rid) {
                     if let Some(r) = &rid { clear_compare_cancel(r); }
-                    return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"cancelled":true}));
+                    return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"extraTotal":0,"extraPks":Vec::<Value>::new(),"cancelled":true}));
                 }
                 return Ok(json!({"ok":false,"error":e}));
             }
         };
         if cancelled_now(&rid) {
             if let Some(r) = &rid { clear_compare_cancel(r); }
-            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"cancelled":true}));
+            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"extraTotal":0,"extraPks":Vec::<Value>::new(),"cancelled":true}));
         }
         let tgt_pk_rows: Vec<Vec<Option<String>>> = match run_select(&mut tgt_conn, &format!("SELECT {} FROM {}.{}", pk_list, sql_id(&tgt_db), sql_id(&table))) {
             Ok((_c, rows)) => rows,
@@ -2324,24 +2324,34 @@ async fn compare_rows(req: Value) -> R {
             // so every source row correctly comes back as "missing".
             Err(e) => { if e.contains("1146") || e.to_lowercase().contains("doesn't exist") { Vec::new() } else { return Ok(json!({"ok":false,"error":e})); } }
         };
+        const CAP: usize = 2000;
         let tgt_set: std::collections::HashSet<String> = tgt_pk_rows.iter().map(|r| row_key(r)).collect();
+        // Rows present only in the TARGET. Nothing here acts on them - this comparison inserts
+        // into the target and never deletes from it - but not REPORTING them let a target holding
+        // extra rows read as "no row differences", which is the wrong conclusion to hand someone
+        // comparing a production database against a copy. Both primary-key sets are already in
+        // memory at this point, so the answer costs one more pass and no extra query; only the key
+        // values are returned, not full rows, to keep the per-table cost of a bulk scan unchanged.
+        let src_set: std::collections::HashSet<String> = src_pk_rows.iter().map(|r| row_key(r)).collect();
+        let extra: Vec<Vec<Option<String>>> = tgt_pk_rows.iter().filter(|r| !src_set.contains(&row_key(r))).cloned().collect();
+        let extra_total = extra.len();
+        let extra_pks: Vec<Vec<Option<String>>> = extra.into_iter().take(CAP).collect();
         let missing: Vec<Vec<Option<String>>> = src_pk_rows.into_iter().filter(|r| !tgt_set.contains(&row_key(r))).collect();
         let missing_total = missing.len();
-        const CAP: usize = 2000;
         let truncated = missing_total > CAP;
         let use_rows: Vec<Vec<Option<String>>> = missing.iter().take(CAP).cloned().collect();
         if cancelled_now(&rid) {
-            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing,"cancelled":true}));
+            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing,"extraTotal":extra_total,"extraPks":extra_pks,"cancelled":true}));
         }
         if let Some(r) = &rid { clear_compare_cancel(r); }
         if use_rows.is_empty() {
-            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"cancelled":false}));
+            return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":0,"truncated":false,"targetReadonly":tgt_ro,"allMissingPks":Vec::<Value>::new(),"extraTotal":extra_total,"extraPks":extra_pks,"cancelled":false}));
         }
         let (full_cols, full_rows) = match get_rows_by_pk(&mut src_conn, &src_db, &table, &pk, &use_rows) {
             Ok(v) => v,
             Err(e) => {
                 if cancelled_now(&rid) {
-                    return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing,"cancelled":true}));
+                    return Ok(json!({"ok":true,"pkCols":pk,"columns":Vec::<String>::new(),"rows":Vec::<Value>::new(),"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing,"extraTotal":extra_total,"extraPks":extra_pks,"cancelled":true}));
                 }
                 return Ok(json!({"ok":false,"error":e}));
             }
@@ -2351,7 +2361,7 @@ async fn compare_rows(req: Value) -> R {
         // compared to what a full table re-scan would cost. The client uses it to load later
         // pages, or to remove just-inserted rows and pull the next batch, WITHOUT ever
         // re-scanning the table again.
-        Ok(json!({"ok":true,"pkCols":pk,"columns":full_cols,"rows":full_rows,"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing,"cancelled":false}))
+        Ok(json!({"ok":true,"pkCols":pk,"columns":full_cols,"rows":full_rows,"missingTotal":missing_total,"truncated":truncated,"targetReadonly":tgt_ro,"allMissingPks":missing,"extraTotal":extra_total,"extraPks":extra_pks,"cancelled":false}))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -4110,8 +4120,31 @@ mod compare_tests {
         println!("  NULL vs empty string is detected as a difference");
 
         // --- a row that exists only in the TARGET
-        println!("  note: id=5 exists only in the target -> reported: {}",
-                 found.iter().any(|f| f.0=="5") || missing.contains(&"5".to_string()));
+        // --- a row that exists only in the TARGET
+        // id=5 is in cmp_tgt.t and not in cmp_src.t. It is deliberately NOT in `missing` (that
+        // list drives inserts INTO the target) and not in the per-column diffs (there is no source
+        // row to diff it against), so for a long time nothing mentioned it at all and a target
+        // holding extra rows looked identical to one holding none. It now comes back under
+        // extraTotal/extraPks: reported, never acted on. Asserted rather than printed, because a
+        // printed note is exactly what let this sit unnoticed.
+        assert!(!missing.contains(&"5".to_string()), "a target-only row must not be offered for insert INTO the target");
+        assert!(!found.iter().any(|f| f.0=="5"), "a target-only row has no source row to diff against");
+        let extra_total = mr["extraTotal"].as_u64().expect("extraTotal missing from compare_rows");
+        let extra_pks: Vec<String> = mr["extraPks"].as_array().cloned().unwrap_or_default().iter()
+            .map(|r| r[0].as_str().unwrap_or("?").to_string()).collect();
+        println!("  rows only in target: total={} pks={:?}", extra_total, extra_pks);
+        assert_eq!(extra_total, 1, "the target's extra row (id=5) was not reported");
+        assert_eq!(extra_pks, vec!["5"], "extraPks should name exactly the target-only row");
+
+        // And the case that actually misleads: no missing rows at all, but the target still has
+        // extras. Before this, that combination reported nothing whatsoever.
+        raw("INSERT INTO cmp_tgt.t (id, v, extra) SELECT id, v, extra FROM cmp_src.t WHERE id NOT IN (SELECT id FROM cmp_tgt.t)");
+        let mr2 = compare_rows(json!({"sourceConnName":P_RW,"sourceDb":"cmp_src",
+                                      "targetConnName":P_RW,"targetDb":"cmp_tgt","table":"t"})).await.unwrap();
+        assert_eq!(mr2["ok"], true, "{mr2}");
+        assert_eq!(mr2["missingTotal"].as_u64().unwrap_or(9), 0, "every source row should now be present on the target");
+        assert_eq!(mr2["extraTotal"].as_u64().unwrap_or(0), 1,
+                   "with nothing missing, the target's extra row must still be reported - otherwise this reads as 'no differences'");
     }
 
     // compare_rows_apply_diff updates existing target rows one at a time, unlike the insert-only
