@@ -1225,7 +1225,23 @@ async fn fetch_cursor_batch(req: Value) -> R {
                 if was_cancelled { Ok(json!({"ok":false,"error":"Query cancelled.","cancelled":true})) }
                 else { Ok(json!({"ok":false,"error":e})) }
             }
-            Err(_) => { cursors().lock().unwrap().remove(&cursor_id); Ok(json!({"ok":false,"error":"Cursor not found or already closed."})) }
+            // The fetch did not answer in 30s. The cursor was found and is very much alive - it is
+            // still working - so the "not found" message this used to give was misleading in the
+            // one case where the user most needs to know what actually happened.
+            //
+            // Dropping the registry entry alone also stranded the thread: its reply goes out
+            // through `let _ = reply.send(..)`, so a receiver that has gone away is ignored and
+            // the loop goes back to waiting for a command that can no longer reach it, holding
+            // its connection and its open result set until the 600s idle timeout collects it.
+            // Send Close so the connection is released now.
+            Err(_) => {
+                if let Some(tx) = cursors().lock().unwrap().remove(&cursor_id) {
+                    let _ = tx.send(CursorCmd::Close);
+                }
+                Ok(json!({"ok":false,"error":"Timed out waiting for the next page of results (30s). \
+The query is still running on the server; this cursor has been closed. Try a smaller page size, \
+or narrow the query."}))
+            }
         }
     }).await.map_err(|e| e.to_string())?
 }
@@ -4563,5 +4579,131 @@ mod conn_loss_tests {
             "a failed COMMIT must not claim the changes were not applied - it cannot know that");
         assert!(msg.to_lowercase().contains("may") || msg.to_lowercase().contains("check"),
             "a failed COMMIT should say the outcome is uncertain and to go and check: {msg}");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Several things happening at once
+// ---------------------------------------------------------------------------
+// Every command opens its own connection and every cursor owns its own thread, so there is no
+// shared connection to race on by construction. What IS shared is the cursor registry - one
+// global HashMap keyed by a generated id - and the failure that would produce is the quiet kind:
+// not a crash, but one grid being handed another grid's rows.
+//
+// These run real concurrent cursors over disjoint id ranges, so any cross-talk shows up as rows
+// that simply do not belong to the range that asked for them.
+#[cfg(test)]
+mod concurrency_tests {
+    use super::*;
+
+    fn conn_json() -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some(json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"}))
+    }
+
+    // Pages one cursor to exhaustion, returning every id it produced in order.
+    async fn page_range(conn: &Value, lo: i64, hi: i64, page: usize) -> Vec<i64> {
+        let sql = format!("SELECT id FROM bulk_rows WHERE id >= {lo} AND id < {hi} ORDER BY id");
+        let first = query(json!({"sql": sql, "conn": conn, "db": "nobs_test", "pageSize": page})).await.unwrap();
+        assert_eq!(first["ok"], true, "opening cursor for [{lo},{hi}) failed: {first}");
+        let take = |v: &Value| -> Vec<i64> {
+            v["rows"].as_array().cloned().unwrap_or_default().iter()
+                .map(|r| r[0].as_str().unwrap_or("0").parse().unwrap_or(-1)).collect()
+        };
+        let mut got = take(&first);
+        if !first["hasMore"].as_bool().unwrap_or(false) { return got; }
+        let cid = first["cursorId"].as_str().unwrap_or("").to_string();
+        assert!(!cid.is_empty(), "more pages but no cursorId for [{lo},{hi})");
+        loop {
+            let n = fetch_cursor_batch(json!({"cursorId": cid, "pageSize": page})).await.unwrap();
+            assert_eq!(n["ok"], true, "fetch for [{lo},{hi}) failed: {n}");
+            got.extend(take(&n));
+            if !n["hasMore"].as_bool().unwrap_or(false) { break; }
+        }
+        got
+    }
+
+    // Eight cursors over disjoint ranges, all paging at the same time. Each must come back with
+    // exactly its own range - a registry mix-up would hand one of them another's rows.
+    #[tokio::test]
+    #[ignore]
+    async fn concurrent_cursors_do_not_hand_each_other_rows() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let ranges: Vec<(i64, i64)> = (0..8).map(|i| (i * 1000, i * 1000 + 1000)).collect();
+        let tasks: Vec<_> = ranges.iter().map(|&(lo, hi)| {
+            let c = conn.clone();
+            tokio::spawn(async move { (lo, hi, page_range(&c, lo, hi, 137).await) })
+        }).collect();
+        for t in tasks {
+            let (lo, hi, got) = t.await.unwrap();
+            let want: Vec<i64> = (lo..hi).collect();
+            assert_eq!(got.len(), want.len(), "range [{lo},{hi}) returned {} rows, expected {}", got.len(), want.len());
+            assert_eq!(got, want, "range [{lo},{hi}) came back with rows that are not its own");
+        }
+    }
+
+    // Cursor ids are minted from a counter plus a timestamp. Two cursors opening in the same
+    // nanosecond must still differ, or one would evict the other from the registry and its owner
+    // would silently start reading the other's result set.
+    #[test]
+    fn cursor_ids_are_unique_under_contention() {
+        let threads: Vec<_> = (0..8).map(|_| {
+            std::thread::spawn(|| (0..500).map(|_| next_cursor_id()).collect::<Vec<_>>())
+        }).collect();
+        let all: Vec<String> = threads.into_iter().flat_map(|t| t.join().unwrap()).collect();
+        let uniq: std::collections::HashSet<&String> = all.iter().collect();
+        assert_eq!(uniq.len(), all.len(), "{} of {} cursor ids collided", all.len() - uniq.len(), all.len());
+    }
+
+    // Closing a cursor while another is mid-page must not disturb the one still reading, and
+    // closing one twice must stay harmless - the frontend fires close defensively.
+    #[tokio::test]
+    #[ignore]
+    async fn closing_one_cursor_leaves_the_others_alone() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let sql = "SELECT id FROM bulk_rows WHERE id < 5000 ORDER BY id";
+        let a = query(json!({"sql": sql, "conn": conn, "db": "nobs_test", "pageSize": 100})).await.unwrap();
+        let b = query(json!({"sql": sql, "conn": conn, "db": "nobs_test", "pageSize": 100})).await.unwrap();
+        let (ca, cb) = (a["cursorId"].as_str().unwrap().to_string(), b["cursorId"].as_str().unwrap().to_string());
+        assert_ne!(ca, cb, "two concurrently opened cursors were given the same id");
+
+        close_cursor(json!({"cursorId": ca})).await.unwrap();
+        // Twice - the UI closes defensively without checking whether anything is left to close.
+        let again = close_cursor(json!({"cursorId": ca})).await.unwrap();
+        assert_eq!(again["ok"], true, "closing an already-closed cursor should be harmless: {again}");
+
+        // The survivor keeps working and keeps its own rows.
+        let n = fetch_cursor_batch(json!({"cursorId": cb, "pageSize": 100})).await.unwrap();
+        assert_eq!(n["ok"], true, "closing one cursor broke another: {n}");
+        let ids: Vec<i64> = n["rows"].as_array().unwrap().iter()
+            .map(|r| r[0].as_str().unwrap_or("0").parse().unwrap_or(-1)).collect();
+        assert_eq!(ids, (100..200).collect::<Vec<i64>>(), "the surviving cursor lost its place");
+
+        // And the closed one is genuinely gone rather than still answering.
+        let dead = fetch_cursor_batch(json!({"cursorId": ca, "pageSize": 10})).await.unwrap();
+        assert_eq!(dead["ok"], false, "a closed cursor still served rows: {dead}");
+        close_cursor(json!({"cursorId": cb})).await.unwrap();
+    }
+
+    // Plain concurrent queries, no cursors: each opens its own connection, so the only way these
+    // can go wrong is if something is shared that should not be.
+    #[tokio::test]
+    #[ignore]
+    async fn concurrent_queries_each_get_their_own_answer() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let tasks: Vec<_> = (0..12i64).map(|i| {
+            let c = conn.clone();
+            tokio::spawn(async move {
+                let sql = format!("SELECT COUNT(*) FROM bulk_rows WHERE id < {}", i * 100);
+                let r = query(json!({"sql": sql, "conn": c, "db": "nobs_test", "pageSize": 10})).await.unwrap();
+                (i, r["rows"][0][0].as_str().unwrap_or("?").to_string())
+            })
+        }).collect();
+        for t in tasks {
+            let (i, got) = t.await.unwrap();
+            assert_eq!(got, (i * 100).to_string(), "query {i} got another query's answer");
+        }
     }
 }
