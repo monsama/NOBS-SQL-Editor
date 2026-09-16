@@ -30,8 +30,8 @@ count and the timing (`finished in 0.00s` means nothing happened), or run with
 
 | Variable | Gates | Without it |
 |---|---|---|
-| `NOBS_TEST_DSN` | all 22 live tests (and the live SSL/CA tests, which are not `#[ignore]`d) | skipped silently |
-| `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 5 import/export/CSV/compare tests *within* those 22 | they run, then **fail** with `program not found` |
+| `NOBS_TEST_DSN` | all 23 live tests (and the live SSL/CA tests, which are not `#[ignore]`d) | skipped silently |
+| `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 5 import/export/CSV/compare tests *within* those 23 | they run, then **fail** with `program not found` |
 | `NOBS_TEST_SERVER_CA` | the 2 CA tests that need the server's **own** CA | skipped, with a message |
 
 `NOBS_TEST_SERVER_CA` exists because a CA test without it proves very little. `verify` refuses a

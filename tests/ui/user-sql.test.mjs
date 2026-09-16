@@ -414,6 +414,30 @@ test('the date picker is offered only when it round-trips the stored value', () 
   assert.equal(usesPicker('', 'date'), true);
 });
 
+// Row values are written for their column's type once it is known. lit() goes by the value's shape,
+// so a text cell holding 0x41 became the byte A, and an empty binary value - shown as the bare 0x -
+// became the two characters 0x. And a CR is escaped: mysql.exe reading a script turns CR LF into
+// LF, which silently dropped the CR from any value that had one before a line feed.
+test('row values are written for their column type, and CR survives a script', () => {
+  const L = new Function(['strLit', 'lit', 'litAs'].map(n => extractFunction(html, n)).join('\n') +
+    '\nreturn {strLit, lit, litAs};')();
+  assert.equal(L.strLit('a\r\nb'), "'a\\r\nb'", 'a CR is written as \\r');
+  assert.equal(L.strLit('a\0b'), "'a\\0b'", 'a NUL is written as \\0');
+  assert.equal(L.litAs('0x41', false), "'0x41'", 'text that looks like hex stays text');
+  assert.equal(L.litAs('0x41', true), '0x41', 'hex in a binary column is a hex literal');
+  assert.equal(L.litAs('0x', true), "X''", 'an empty binary value is empty');
+  assert.equal(L.litAs('0x', false), "'0x'", 'in a text column 0x is the two characters');
+  assert.equal(L.litAs(null, true), 'NULL');
+  assert.equal(L.litAs('NULL', false), "'NULL'");
+  assert.equal(L.litAs('0x41', null), '0x41', 'with the type unknown it is lit(), as before');
+  const apply = extractFunction(html, 'applyChanges');
+  assert.match(apply, /litAs\(t\.rows\[ri\]/, 'applyChanges writes row keys by column type');
+  assert.match(apply, /return litAs\(v,bc\?bc\[ci\]:null\)/, 'changed cells go through litAs');
+  for (const f of ['insGrid', 'insSel', 'exportFull']) {
+    assert.ok(extractFunction(html, f).includes('litAs('), f + ' writes rows by column type');
+  }
+});
+
 test('editWidgetFor actually applies that round-trip test', () => {
   // The rule above can be right and never run. This pins the wiring.
   const body = extractFunction(html, 'editWidgetFor');

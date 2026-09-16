@@ -736,12 +736,45 @@ function hide(id){
 const RESERVED=new Set(['accessible','add','all','alter','analyze','and','as','asc','before','between','bigint','binary','blob','both','by','call','cascade','case','change','char','character','check','collate','column','condition','constraint','continue','convert','create','cross','current_date','current_time','current_timestamp','cursor','database','databases','default','delete','desc','describe','distinct','div','double','drop','dual','each','else','exists','explain','false','fetch','float','for','force','foreign','from','fulltext','function','group','having','if','ignore','in','index','inner','insert','int','integer','interval','into','is','join','key','keys','left','like','limit','lock','long','longblob','longtext','match','mediumblob','mediumint','mediumtext','natural','not','null','numeric','offset','on','optimize','option','or','order','outer','primary','procedure','references','rename','repeat','replace','restrict','return','revoke','right','rlike','schema','schemas','select','set','show','smallint','spatial','sql','table','then','tinyblob','tinyint','tinytext','to','trigger','true','union','unique','unlock','unsigned','update','usage','use','using','values','varbinary','varchar','varying','when','where','while','with','write','zerofill']);
 function qid(n){n=String(n);if(n===''||!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(n)||RESERVED.has(n.toLowerCase()))return '`'+n.replace(/`/g,'``')+'`';return n;}
 function lit(v){if(v===null)return 'NULL';const s=String(v);if(/^0x[0-9A-Fa-f]+$/.test(s))return s;return strLit(s);}
+// Which of a grid's columns hold binary values - the ones shown as 0x... The Tauri build reads that
+// from the result set itself; the PowerShell one asks information_schema, which needs a table.
+// null when neither can tell, and the caller then falls back to lit(), which goes by the value.
+const BIN_COL_TYPE=/^(binary|varbinary|tinyblob|blob|mediumblob|longblob|bit|geometry|point|linestring|polygon|multipoint|multilinestring|multipolygon|geometrycollection|geomcollection)\b/i;
+async function tableBinCols(db,table,cols){
+ try{
+  const r=await api('/api/query',{sql:"SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="+strLit(db)+" AND TABLE_NAME="+strLit(table)});
+  if(!r.ok||!r.rows||!r.rows.length)return null;
+  const m={};r.rows.forEach(x=>{m[String(x[0]).toLowerCase()]=BIN_COL_TYPE.test(String(x[1]));});
+  const out=[];for(const c of cols){const k=String(c).toLowerCase();if(!(k in m))return null;out.push(m[k]);}
+  return out;
+ }catch(e){return null;}
+}
+async function gridBinCols(id){
+ const t=T(id);if(!t||!t.cols)return null;
+ if(t.binCols&&t.binCols.length===t.cols.length)return t.binCols.map(Boolean);
+ if(!t.table)return null;
+ return tableBinCols(dbOf(t),t.table,t.cols);
+}
+// lit() decides from the value's shape, which is wrong both ways for row data: a text cell holding
+// 0x41 was written as the byte A, and an empty binary value - shown as the bare 0x - as the two
+// characters 0x. With the column's type known (bin true/false) the type decides instead; with it
+// unknown (null) this is lit().
+function litAs(v,bin){
+ if(bin==null)return lit(v);
+ if(v===null||v===undefined)return 'NULL';
+ const s=String(v);
+ if(bin){if(s==='0x')return "X''";if(/^0x[0-9A-Fa-f]+$/.test(s))return s;}
+ return strLit(s);
+}
 // Always a quoted string literal - unlike lit(), never reinterprets a hex-looking value as a raw
 // unquoted hex literal. lit()'s passthrough is meant for grid cell values (matching how the
 // backend already displays/edits binary columns); a password or other plain-text field that
 // happens to look like hex should stay exactly the text the user typed, not silently become a
 // different value with a different meaning to MySQL.
-function strLit(v){return "'"+String(v).replace(/\\/g,'\\\\').replace(/'/g,"''")+"'";}
+// CR and NUL are written as escapes. mysql.exe reading a script (stdin, or source) turns every CR LF
+// into LF, so a raw CR before a line feed was silently dropped; a raw NUL makes it refuse the
+// statement unless --binary-mode is on.
+function strLit(v){return "'"+String(v).replace(/\\/g,'\\\\').replace(/'/g,"''").replace(/\r/g,'\\r').replace(/\0/g,'\\0')+"'";}
 
 async function searchAllSchemas(){
   const term=($('objFilter').value||'').trim();
@@ -3017,6 +3050,7 @@ function pasteRowIntoIns(id,ii){const t=T(id);const vals=singleRowClipboard();if
  renderGrid(id);log('Pasted copied row into new row. Review and click Apply to commit.');}
 function revertChanges(id){const t=T(id);t.pending={upd:{},del:new Set(),ins:[]};renderGrid(id);}
 async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];const tbl=qid(t.db)+'.'+qid(t.table);
+ const bc=await gridBinCols(id);
  const isHex=v=>/^0x[0-9A-Fa-f]*$/.test(String(v));
  const isPlainInt=v=>/^-?\d+$/.test(String(v));
  // bitCols narrows binaryCols (both BIT and true binary/BLOB columns display as 0x.. hex) down
@@ -3042,7 +3076,7 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
   if(v===null)return lit(v);
   if(isDateTimeKeyword(v))return String(v).trim();
   if(bitAt(ci)&&!isHex(v)&&isPlainInt(v))return String(v);
-  return lit(v);
+  return litAs(v,bc?bc[ci]:null);
  };
  const badBin=[];
  Object.keys(t.pending.upd).forEach(k=>{const [ri,ci]=k.split(':').map(Number);
@@ -3073,8 +3107,8 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
  // updates grouped by row
  const byRow={};Object.keys(t.pending.upd).forEach(k=>{const[ri,ci]=k.split(':').map(Number);(byRow[ri]=byRow[ri]||{})[ci]=t.pending.upd[k];});
  Object.keys(byRow).forEach(ri=>{ri=+ri;const sets=Object.keys(byRow[ri]).map(ci=>qid(t.cols[ci])+'='+litForCol(+ci,byRow[ri][ci]));
-   const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('UPDATE '+tbl+' SET '+sets.join(',')+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
- t.pending.del.forEach(ri=>{const wh=t.pk.map(p=>qid(p)+'='+lit(t.rows[ri][t.cols.indexOf(p)]));S.push('DELETE FROM '+tbl+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
+   const wh=t.pk.map(p=>qid(p)+'='+litAs(t.rows[ri][t.cols.indexOf(p)],bc?bc[t.cols.indexOf(p)]:null));S.push('UPDATE '+tbl+' SET '+sets.join(',')+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
+ t.pending.del.forEach(ri=>{const wh=t.pk.map(p=>qid(p)+'='+litAs(t.rows[ri][t.cols.indexOf(p)],bc?bc[t.cols.indexOf(p)]:null));S.push('DELETE FROM '+tbl+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
  t.pending.ins.forEach(row=>{const cols=Object.keys(row);if(!cols.length)return;S.push('INSERT INTO '+tbl+' ('+cols.map(qid).join(',')+') VALUES ('+cols.map(c=>litForCol(t.cols.indexOf(c),row[c])).join(',')+');');});
  // Reachable even though Apply is only enabled when something's pending: a +Row with every
  // column left blank produces no INSERT (a deliberate no-op, not a bug - see the ins.forEach
@@ -3189,9 +3223,9 @@ function selAll(id,ch){const t=T(id);if(!t.selected)t.selected=new Set();const v
 function copySel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bTSV(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (TSV).'));}
 function copySelCsv(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bCSV(t.cols,rows)).then(()=>{csvNullHint(rows);}).then(()=>log('Copied '+rows.length+' selected row(s) (CSV).'));}
 function csvGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'csv');return;}dl(bCSV(t.cols,t.rows),'result.csv');}
-function insGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'inserts');return;}const s=t.rows.map(r=>'INSERT IGNORE INTO `table` ('+t.cols.map(qid).join(',')+') VALUES ('+r.map(lit).join(',')+');').join('\n');dl(s,'result_inserts.sql');log('Exported '+t.rows.length+' row(s) as INSERTs.');}
+async function insGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'inserts');return;}const bc=await gridBinCols(id);const s=t.rows.map(r=>'INSERT IGNORE INTO `table` ('+t.cols.map(qid).join(',')+') VALUES ('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+');').join('\n');dl(s,'result_inserts.sql');log('Exported '+t.rows.length+' row(s) as INSERTs.');}
 function csvSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}dl(bCSV(t.cols,rows),(t.table||'result')+'_selected.csv');log('Exported '+rows.length+' selected row(s) to CSV.');}
-function insSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const tbl=t.table?(qid(t.db)+'.'+qid(t.table)):'`table`';const s=rows.map(r=>'INSERT IGNORE INTO '+tbl+' ('+t.cols.map(qid).join(',')+') VALUES ('+r.map(lit).join(',')+');').join('\n');dl(s,(t.table||'result')+'_selected_inserts.sql');log('Exported '+rows.length+' selected row(s) as INSERTs.');}
+async function insSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const tbl=t.table?(qid(t.db)+'.'+qid(t.table)):'`table`';const bc=await gridBinCols(id);const s=rows.map(r=>'INSERT IGNORE INTO '+tbl+' ('+t.cols.map(qid).join(',')+') VALUES ('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+');').join('\n');dl(s,(t.table||'result')+'_selected_inserts.sql');log('Exported '+rows.length+' selected row(s) as INSERTs.');}
 async function dl(text,name){
  const ext=(name.split('.').pop()||'').toLowerCase();const filters=ext?[{name:ext.toUpperCase()+' file',extensions:[ext]}]:undefined;
  // Tauri: native Save As + backend write
@@ -4674,7 +4708,7 @@ async function exportFull(db,name,fmt){fmt=fmt||'csv';const ext=(fmt==='inserts'
    }
  }catch(e){}
  const q=await api('/api/query',{sql:'SELECT * FROM '+qid(db)+'.'+qid(name),db:db});if(!q.ok){toast(q.error,true);return;}
- if(fmt==='inserts'){const tbl=qid(db)+'.'+qid(name);const s=q.rows.map(r=>'INSERT IGNORE INTO '+tbl+' ('+q.columns.map(qid).join(',')+') VALUES ('+r.map(lit).join(',')+');').join('\n');dl(s,defName);}
+ if(fmt==='inserts'){const tbl=qid(db)+'.'+qid(name);const bc=await tableBinCols(db,name,q.columns);const s=q.rows.map(r=>'INSERT IGNORE INTO '+tbl+' ('+q.columns.map(qid).join(',')+') VALUES ('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+');').join('\n');dl(s,defName);}
  else{dl(bCSV(q.columns,q.rows),defName);}}
 function importCsv(db,table){csvTarget={db,table};$('csvTitle').textContent='Import CSV into '+db+'.'+table;$('csvFile').value='';$('csvLog').textContent='';show('mCsv');}
 async function runCsvImport(){const f=$('csvFile').value.trim();if(!f){toast('Choose a CSV file.',true);return;}

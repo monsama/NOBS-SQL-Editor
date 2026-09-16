@@ -805,23 +805,18 @@ fn sql_is_readonly(sql: &str) -> bool {
 // string literal is needed (schema/table names from information_schema, usernames, ...) - unlike
 // sql_lit() below, this has no hex-literal special case, so it's the right one for a NAME, which
 // should never be reinterpreted as a raw hex value just because it happens to look like one.
-fn sql_str_lit(s: &str) -> String { format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''")) }
+// CR and NUL are written as escapes: mysql.exe reading a script turns every CR LF into LF, so a raw
+// CR before a line feed was dropped whenever this SQL went through the client (an import, or a
+// saved script), and a raw NUL makes it refuse the statement without --binary-mode.
+fn sql_str_lit(s: &str) -> String {
+    format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''").replace('\r', "\\r").replace('\0', "\\0"))
+}
 fn sql_lit(s: &str) -> String {
     if !s.is_empty() && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit()) && s.len() > 2 {
         return s.to_string(); // hex literal (bit/binary)
     }
     sql_str_lit(s)
 }
-// Mirrors the PowerShell version's SqlValLit: a "0x.." hex-encoded string produced by
-// val_to_opt() for binary/bit values is our OWN display encoding, not a real string value.
-// Quoting it normally would insert the literal text "0x00" (4+ chars) instead of the 1-byte
-// value it represents, which fails for bit(1)/binary columns ("Data too long for column").
-// Emitting it as a raw (unquoted) hex literal lets MySQL correctly interpret the real value.
-fn sql_val_lit(s: &str) -> String {
-    if regex::Regex::new(r"^0x[0-9A-Fa-f]+$").unwrap().is_match(s) { s.to_string() } else { sql_lit(s) }
-}
-
-
 // ---------- mysql / mysqldump CLI resolution ----------
 fn config_file() -> std::path::PathBuf {
     let mut p = dirs::config_dir().unwrap_or(std::env::temp_dir());
@@ -1360,9 +1355,7 @@ async fn exec(req: Value) -> R {
 #[tauri::command]
 // NOTE: not currently called by the frontend (row edits are built and sent as plain SQL via
 // applyChanges()/`lit()` -> the query/script command instead), but the command is still
-// registered, so litv uses the same hex-aware sql_val_lit as everywhere else that touches real
-// row data - a value that LOOKS like a plain sql_lit-quoted string here could otherwise silently
-// corrupt a bit/binary column exactly like the bug already fixed in Compare's row apply.
+// registered, so each value is written for its column's type, as Compare does (see sql_val_for).
 async fn rowop(req: Value) -> R {
     tokio::task::spawn_blocking(move || {
         if req["ro"].as_bool().unwrap_or(false) {
@@ -1374,16 +1367,18 @@ async fn rowop(req: Value) -> R {
         let pairs = |o: &Value| -> Vec<(String, Value)> {
             o.as_object().map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default()
         };
-        let litv = |v: &Value| -> String { if v.is_null() { "NULL".into() } else { sql_val_lit(v.as_str().unwrap_or(&v.to_string())) } };
+        let mut c = build_conn(&req["conn"])?;
+        let bin = binary_column_set(&mut c, db, table)?;
+        let litc = |k: &str, v: &Value| -> String { json_val_for(v, bin.contains(&k.to_lowercase())) };
         let sql = match op {
             "update" => {
-                let sets: Vec<String> = pairs(&req["set"]).iter().map(|(k, v)| format!("{}={}", sql_id(k), litv(v))).collect();
-                let wh: Vec<String> = pairs(&req["where"]).iter().map(|(k, v)| format!("{}={}", sql_id(k), litv(v))).collect();
+                let sets: Vec<String> = pairs(&req["set"]).iter().map(|(k, v)| format!("{}={}", sql_id(k), litc(k, v))).collect();
+                let wh: Vec<String> = pairs(&req["where"]).iter().map(|(k, v)| format!("{}={}", sql_id(k), litc(k, v))).collect();
                 if wh.is_empty() { return Ok(json!({"ok":false,"error":"no key columns"})); }
                 format!("UPDATE {} SET {} WHERE {} LIMIT 1", obj, sets.join(","), wh.join(" AND "))
             }
             "delete" => {
-                let wh: Vec<String> = pairs(&req["where"]).iter().map(|(k, v)| format!("{}={}", sql_id(k), litv(v))).collect();
+                let wh: Vec<String> = pairs(&req["where"]).iter().map(|(k, v)| format!("{}={}", sql_id(k), litc(k, v))).collect();
                 if wh.is_empty() { return Ok(json!({"ok":false,"error":"no key columns"})); }
                 format!("DELETE FROM {} WHERE {} LIMIT 1", obj, wh.join(" AND "))
             }
@@ -1391,12 +1386,11 @@ async fn rowop(req: Value) -> R {
                 let vals = pairs(&req["values"]);
                 if vals.is_empty() { return Ok(json!({"ok":false,"error":"no values"})); }
                 let cols: Vec<String> = vals.iter().map(|(k, _)| sql_id(k)).collect();
-                let vs: Vec<String> = vals.iter().map(|(_, v)| litv(v)).collect();
+                let vs: Vec<String> = vals.iter().map(|(k, v)| litc(k, v)).collect();
                 format!("INSERT INTO {} ({}) VALUES ({})", obj, cols.join(","), vs.join(","))
             }
             _ => return Ok(json!({"ok":false,"error":"bad op"})),
         };
-        let mut c = build_conn(&req["conn"])?;
         match c.query_drop(&sql) { Ok(_) => Ok(json!({"ok":true})), Err(e) => Ok(json!({"ok":false,"error":e.to_string()})) }
     }).await.map_err(|e| e.to_string())?
 }
@@ -1480,6 +1474,11 @@ fn cnf_file(connj: &Value, tool: &str) -> Result<(tempfile::NamedTempFile, Strin
     // silently consume it as (the start of) an escape sequence instead of a literal character -
     // corrupting the password and breaking auth for anyone whose password happens to contain one.
     if let Some(p) = connj["password"].as_str() { if !p.is_empty() { s += &format!("password={}\n", cnf_safe(p).replace('\\', "\\\\")); } }
+    // A .sql file without its own SET NAMES is read in the client's default character set, and
+    // MySQL's mysql.exe takes the console code page for that (cp850 here), so an import through it
+    // converted UTF-8 text as if it were cp850. MariaDB's client happens to default to utf8mb4.
+    // Export's --default-character-set on the command line still takes precedence.
+    s += "default-character-set=utf8mb4\n";
     // The ssl setting used to stop at the native driver: export and import went out over whatever
     // the CLI happened to negotiate, so a connection saved as "required" - or as "disabled" - was
     // quietly something else as soon as it was dumped or loaded.
@@ -1978,7 +1977,7 @@ fn mysql_generated_tables(connj: &Value, dbs: &[String], excl: &std::collections
     let mut c = build_conn(connj).ok()?;
     let ver: String = c.query_first("SELECT VERSION()").ok().flatten().unwrap_or_default();
     if ver.to_lowercase().contains("mariadb") || dbs.is_empty() { return Some(Vec::new()); }
-    let list = dbs.iter().map(|d| sql_val_lit(d)).collect::<Vec<_>>().join(",");
+    let list = dbs.iter().map(|d| sql_str_lit(d)).collect::<Vec<_>>().join(",");
     let (_c, rows) = run_select(&mut c, &format!(
         "SELECT DISTINCT TABLE_SCHEMA, TABLE_NAME FROM information_schema.COLUMNS          WHERE TABLE_SCHEMA IN ({}) AND GENERATION_EXPRESSION IS NOT NULL AND GENERATION_EXPRESSION <> ''          ORDER BY TABLE_SCHEMA, TABLE_NAME", list)).ok()?;
     Some(rows.iter().filter_map(|r| {
@@ -2605,6 +2604,53 @@ fn get_table_fk_cols(conn: &mut Conn, db: &str, table: &str) -> Result<Vec<Strin
     let (_cols, rows) = run_select(conn, &sql)?;
     Ok(rows.into_iter().filter_map(|r| r.into_iter().next().flatten()).collect())
 }
+// The columns of a table whose values this app shows as 0x.. hex (see is_binaryish): binary
+// strings, BIT and the spatial types. Lowercased, since MySQL column names ignore case.
+fn binary_column_set(conn: &mut Conn, db: &str, table: &str) -> Result<std::collections::HashSet<String>, String> {
+    const TYPES: &[&str] = &["binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob", "bit",
+        "geometry", "point", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon",
+        "geometrycollection", "geomcollection"];
+    let (_c, rows) = run_select(conn, &format!(
+        "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} AND TABLE_NAME={}",
+        sql_str_lit(db), sql_str_lit(table)))?;
+    if rows.is_empty() { return Err(format!("Could not read the column types of {}.{}.", db, table)); }
+    Ok(rows.iter().filter(|r| {
+        let ty = r.get(1).cloned().flatten().unwrap_or_default().to_lowercase();
+        TYPES.contains(&ty.as_str())
+    }).filter_map(|r| r.first().cloned().flatten().map(|n| n.to_lowercase())).collect())
+}
+// sql_val_lit guesses from the value's shape, which is wrong both ways for data being copied: a
+// text column holding '0x41' was written as the byte A, and an empty binary value - shown as the
+// bare 0x - was written as the two characters 0x. Where the table is known, ask it instead.
+fn sql_val_for(v: Option<&str>, binary: bool) -> String {
+    match v {
+        None => "NULL".to_string(),
+        Some("0x") if binary => "X''".to_string(),
+        Some(s) if binary && s.len() > 2 && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit()) => s.to_string(),
+        Some(s) => sql_str_lit(s),
+    }
+}
+fn json_val_for(v: &Value, binary: bool) -> String {
+    match v {
+        Value::Null => "NULL".to_string(),
+        Value::String(s) => sql_val_for(Some(s), binary),
+        other => sql_str_lit(other.to_string().trim_matches('"')),
+    }
+}
+// A WHERE clause matching a chunk of primary-key tuples, each value written for its column's type.
+fn pk_where(pk_cols: &[String], chunk: &[&Vec<Option<String>>], bin: &std::collections::HashSet<String>) -> String {
+    let is_bin: Vec<bool> = pk_cols.iter().map(|c| bin.contains(&c.to_lowercase())).collect();
+    let tuple = |r: &Vec<Option<String>>| r.iter().enumerate()
+        .map(|(i, v)| sql_val_for(v.as_deref(), is_bin.get(i).copied().unwrap_or(false))).collect::<Vec<_>>();
+    if pk_cols.len() == 1 {
+        let vals = chunk.iter().map(|r| tuple(r).into_iter().next().unwrap_or_else(|| "NULL".into())).collect::<Vec<_>>().join(",");
+        format!("{} IN ({})", sql_id(&pk_cols[0]), vals)
+    } else {
+        let pk_list = pk_cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
+        let tuples = chunk.iter().map(|r| format!("({})", tuple(r).join(","))).collect::<Vec<_>>().join(",");
+        format!("({}) IN ({})", pk_list, tuples)
+    }
+}
 // Joins a row's cell values with a control character (0x01) that can't appear in normal data,
 // to build a single comparable key for both single-column and composite primary keys.
 fn row_key(row: &[Option<String>]) -> String {
@@ -2617,21 +2663,13 @@ fn row_key(row: &[Option<String>]) -> String {
 // client already knows about, without re-scanning the whole table again).
 fn get_rows_by_pk(conn: &mut Conn, db: &str, table: &str, pk_cols: &[String], pk_values: &[Vec<Option<String>>]) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
     if pk_values.is_empty() { return Ok((Vec::new(), Vec::new())); }
-    let pk_list = pk_cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
+    let bin = binary_column_set(conn, db, table)?;
     let fetch_chunk = 200;
     let mut full_cols: Vec<String> = Vec::new();
     let mut full_rows: Vec<Vec<Option<String>>> = Vec::new();
     for chunk in pk_values.chunks(fetch_chunk) {
-        let where_clause = if pk_cols.len() == 1 {
-            let vals = chunk.iter().map(|r| sql_val_lit(&r[0].clone().unwrap_or_default())).collect::<Vec<_>>().join(",");
-            format!("{} IN ({})", sql_id(&pk_cols[0]), vals)
-        } else {
-            let tuples = chunk.iter().map(|r| {
-                let vs = r.iter().map(|v| sql_val_lit(&v.clone().unwrap_or_default())).collect::<Vec<_>>().join(",");
-                format!("({})", vs)
-            }).collect::<Vec<_>>().join(",");
-            format!("({}) IN ({})", pk_list, tuples)
-        };
+        let refs: Vec<&Vec<Option<String>>> = chunk.iter().collect();
+        let where_clause = pk_where(pk_cols, &refs, &bin);
         let (cols, rows) = run_select(conn, &format!("SELECT * FROM {}.{} WHERE {}", sql_id(db), sql_id(table), where_clause))?;
         if full_cols.is_empty() { full_cols = cols; }
         full_rows.extend(rows);
@@ -2703,7 +2741,7 @@ async fn gen_user_transfer(req: Value) -> R {
         for sys in SYSTEM_ACCOUNTS {
             if !excl.iter().any(|e| e == sys) { excl.push(sys.to_string()); }
         }
-        let in_list = excl.iter().map(|s| sql_val_lit(s)).collect::<Vec<_>>().join(",");
+        let in_list = excl.iter().map(|s| sql_str_lit(s)).collect::<Vec<_>>().join(",");
         let mut conn = build_conn(&conn_json)?;
         // A MySQL 8 caching_sha2_password hash carries a salt of arbitrary 7-bit bytes, control
         // characters included, and SHOW CREATE USER prints it raw inside the quoted literal. That
@@ -2912,22 +2950,14 @@ async fn compare_rows_diff(req: Value) -> R {
             return Ok(json!({"ok":true,"pkCols":pk,"fkCols":fk,"diffs":Vec::<Value>::new(),"commonTotal":common_total,"comparedCount":0,"truncated":false,"targetReadonly":tgt_ro}));
         }
         let fetch_chunk = 200;
+        let bin = binary_column_set(&mut src_conn, &src_db, &table)?;
         let mut full_cols: Option<Vec<String>> = None;
         let mut src_full: std::collections::HashMap<String, Vec<Option<String>>> = std::collections::HashMap::new();
         let mut tgt_full: std::collections::HashMap<String, Vec<Option<String>>> = std::collections::HashMap::new();
         let mut cancelled = false;
         for chunk in use_common.chunks(fetch_chunk) {
             if let Some(r) = &rid { if is_compare_cancelled(r) { cancelled = true; break; } }
-            let where_clause = if pk.len() == 1 {
-                let vals = chunk.iter().map(|r| sql_lit(&r[0].clone().unwrap_or_default())).collect::<Vec<_>>().join(",");
-                format!("{} IN ({})", sql_id(&pk[0]), vals)
-            } else {
-                let tuples = chunk.iter().map(|r| {
-                    let vs = r.iter().map(|v| sql_lit(&v.clone().unwrap_or_default())).collect::<Vec<_>>().join(",");
-                    format!("({})", vs)
-                }).collect::<Vec<_>>().join(",");
-                format!("({}) IN ({})", pk_list, tuples)
-            };
+            let where_clause = pk_where(&pk, chunk, &bin);
             let (sc, sr) = run_select(&mut src_conn, &format!("SELECT * FROM {}.{} WHERE {}", sql_id(&src_db), sql_id(&table), where_clause))?;
             if full_cols.is_none() { full_cols = Some(sc); }
             let cols_ref = full_cols.as_ref().unwrap();
@@ -2974,6 +3004,7 @@ async fn compare_rows_apply_diff(req: Value) -> R {
         if pk_cols.is_empty() || updates.is_empty() { return Ok(json!({"ok":false,"error":"No rows to update."})); }
         let mut c = build_conn(&connj)?;
         let obj = format!("{}.{}", sql_id(&tgt_db), sql_id(&table));
+        let bin = binary_column_set(&mut c, &tgt_db, &table)?;
         // Unlike compare_rows_apply/compare_rows_insert_all (INSERT-only, each batch already
         // atomic as a single multi-row statement, and a chunk failing partway through a large
         // bulk insert shouldn't block the rest), this updates EXISTING target rows one at a time -
@@ -2992,20 +3023,10 @@ async fn compare_rows_apply_diff(req: Value) -> R {
             }
             let sets = col_diffs.iter().map(|cd| {
                 let col = cd["col"].as_str().unwrap_or("");
-                let val = match &cd["src"] {
-                    Value::Null => "NULL".to_string(),
-                    Value::String(s) => sql_val_lit(s),
-                    other => sql_lit(other.to_string().trim_matches('"')),
-                };
-                format!("{}={}", sql_id(col), val)
+                format!("{}={}", sql_id(col), json_val_for(&cd["src"], bin.contains(&col.to_lowercase())))
             }).collect::<Vec<_>>().join(",");
             let wheres = pk_cols.iter().zip(pk_vals.iter()).map(|(col, v)| {
-                let val = match v {
-                    Value::Null => "NULL".to_string(),
-                    Value::String(s) => sql_val_lit(s),
-                    other => sql_lit(other.to_string().trim_matches('"')),
-                };
-                format!("{}={}", sql_id(col), val)
+                format!("{}={}", sql_id(col), json_val_for(v, bin.contains(&col.to_lowercase())))
             }).collect::<Vec<_>>().join(" AND ");
             let pk_desc = pk_vals.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
             let sql = format!("UPDATE {} SET {} WHERE {} LIMIT 1", obj, sets, wheres);
@@ -3070,21 +3091,15 @@ async fn compare_rows_insert_all(req: Value) -> R {
             return Ok(json!({"ok":true,"missingTotal":0,"inserted":0,"cancelled":false,"log":Vec::<String>::new()}));
         }
         let chunk_size = 200;
+        let src_bin = binary_column_set(&mut src_conn, &src_db, &table)?;
+        let tgt_bin = binary_column_set(&mut tgt_conn, &tgt_db, &table)?;
         let mut log: Vec<String> = Vec::new();
         let mut inserted: usize = 0;
         let mut cancelled = false;
         for (ci, chunk) in missing.chunks(chunk_size).enumerate() {
             if let Some(r) = &rid { if is_compare_cancelled(r) { cancelled = true; break; } }
-            let where_clause = if pk.len() == 1 {
-                let vals = chunk.iter().map(|r| sql_val_lit(&r[0].clone().unwrap_or_default())).collect::<Vec<_>>().join(",");
-                format!("{} IN ({})", sql_id(&pk[0]), vals)
-            } else {
-                let tuples = chunk.iter().map(|r| {
-                    let vs = r.iter().map(|v| sql_val_lit(&v.clone().unwrap_or_default())).collect::<Vec<_>>().join(",");
-                    format!("({})", vs)
-                }).collect::<Vec<_>>().join(",");
-                format!("({}) IN ({})", pk_list, tuples)
-            };
+            let refs: Vec<&Vec<Option<String>>> = chunk.iter().collect();
+            let where_clause = pk_where(&pk, &refs, &src_bin);
             let (full_cols, full_rows) = match run_select(&mut src_conn, &format!("SELECT * FROM {}.{} WHERE {}", sql_id(&src_db), sql_id(&table), where_clause)) {
                 Ok(v) => v,
                 Err(e) => { log.push(format!("FAILED (fetch) chunk {} : {}", ci + 1, e)); continue; }
@@ -3092,8 +3107,9 @@ async fn compare_rows_insert_all(req: Value) -> R {
             if full_rows.is_empty() { continue; }
             let col_list = full_cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
             let obj = format!("{}.{}", sql_id(&tgt_db), sql_id(&table));
+            let col_bin: Vec<bool> = full_cols.iter().map(|c| tgt_bin.contains(&c.to_lowercase())).collect();
             let values_sql = full_rows.iter().map(|row| {
-                let vs = row.iter().map(|v| match v { None => "NULL".to_string(), Some(s) => sql_val_lit(s) }).collect::<Vec<_>>().join(",");
+                let vs = row.iter().enumerate().map(|(i, v)| sql_val_for(v.as_deref(), col_bin[i])).collect::<Vec<_>>().join(",");
                 format!("({})", vs)
             }).collect::<Vec<_>>().join(",");
             let sql = format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, values_sql);
@@ -3124,15 +3140,14 @@ async fn compare_rows_apply(req: Value) -> R {
         let mut c = build_conn(&connj)?;
         let col_list = columns.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
         let obj = format!("{}.{}", sql_id(&tgt_db), sql_id(&table));
+        let bin = binary_column_set(&mut c, &tgt_db, &table)?;
+        let col_bin: Vec<bool> = columns.iter().map(|c| bin.contains(&c.to_lowercase())).collect();
         let mut log = Vec::new();
         const BATCH: usize = 500;
         for (bi, chunk) in rows.chunks(BATCH).enumerate() {
             let values_sql = chunk.iter().map(|row| {
-                let vs = row.iter().map(|v| match v {
-                    Value::Null => "NULL".to_string(),
-                    Value::String(s) => sql_val_lit(s),
-                    other => sql_lit(other.to_string().trim_matches('"')),
-                }).collect::<Vec<_>>().join(",");
+                let vs = row.iter().enumerate()
+                    .map(|(i, v)| json_val_for(v, col_bin.get(i).copied().unwrap_or(false))).collect::<Vec<_>>().join(",");
                 format!("({})", vs)
             }).collect::<Vec<_>>().join(",");
             let sql = format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, values_sql);
@@ -3455,7 +3470,8 @@ async fn export_table_run(app: Option<tauri::AppHandle>, req: Value) -> R {
             let row = rr.map_err(|e| e.to_string())?;
             let cells: Vec<Option<String>> = (0..cols.len()).map(|i| val_to_opt(row.as_ref(i).unwrap_or(&MyValue::NULL), bin[i])).collect();
             if fmt == "inserts" {
-                let vals = cells.iter().map(|o| match o { None => "NULL".to_string(), Some(s) => sql_lit(s) }).collect::<Vec<_>>().join(",");
+                // The column type decides, not the value's shape - see sql_val_for.
+                let vals = cells.iter().enumerate().map(|(i, o)| sql_val_for(o.as_deref(), bin[i])).collect::<Vec<_>>().join(",");
                 batch.push(format!("({})", vals));
                 if batch.len() >= 1000 {
                     w.write_all(format!("INSERT IGNORE INTO {} ({}) VALUES {};\n", tbl, collist, batch.join(",")).as_bytes()).map_err(|e| e.to_string())?;
@@ -3795,12 +3811,32 @@ mod tests {
         assert_eq!(cnf_safe("evil\r\nmore"), "evilmore");
     }
 
+    // Row data is written for its column's type. Going by the value's shape, a text value '0x41'
+    // was stored as the byte A, and an empty binary value - shown as the bare 0x - as the two
+    // characters 0x.
     #[test]
-    fn sql_val_lit_passes_hex_through_unquoted() {
-        assert_eq!(sql_val_lit("0xDEADBEEF"), "0xDEADBEEF");
-        assert_eq!(sql_val_lit("0x00"), "0x00");
-        assert_eq!(sql_val_lit("0xZZ"), "'0xZZ'");
-        assert_eq!(sql_val_lit("hello"), "'hello'");
+    fn values_are_written_for_their_column_type() {
+        assert_eq!(sql_val_for(Some("0xDEADBEEF"), true), "0xDEADBEEF");
+        assert_eq!(sql_val_for(Some("0x00"), true), "0x00");
+        assert_eq!(sql_val_for(Some("0x"), true), "X''");
+        assert_eq!(sql_val_for(Some("0xZZ"), true), "'0xZZ'");
+        assert_eq!(sql_val_for(None, true), "NULL");
+        assert_eq!(sql_val_for(Some("0x41"), false), "'0x41'");
+        assert_eq!(sql_val_for(Some("0x"), false), "'0x'");
+        assert_eq!(sql_val_for(Some("NULL"), false), "'NULL'");
+        assert_eq!(sql_val_for(None, false), "NULL");
+        assert_eq!(json_val_for(&json!(null), false), "NULL");
+        assert_eq!(json_val_for(&json!("0x"), true), "X''");
+        assert_eq!(json_val_for(&json!(5), false), "'5'");
+    }
+
+    // mysql.exe reading a script turns every CR LF into LF, so a raw CR before a line feed was
+    // dropped from any value that went through it. Measured with both clients.
+    #[test]
+    fn a_carriage_return_is_escaped_in_literals() {
+        assert_eq!(sql_str_lit("a\r\nb"), "'a\\r\nb'");
+        assert_eq!(sql_str_lit("a\0b"), "'a\\0b'");
+        assert_eq!(sql_val_for(Some("x\r"), false), "'x\\r'");
     }
 
     #[test]
@@ -4795,6 +4831,57 @@ mod compare_tests {
         raw("DROP DATABASE IF EXISTS cmp_tgt");
     }
 
+    // All three write paths - insert-all (server to server), apply (rows that went through the UI
+    // as JSON) and apply-diff - must copy every value exactly. Writing by the value's shape stored a
+    // text '0x41' as the byte A and an empty binary value as the two characters 0x, and a binary
+    // key written that way did not match its own row.
+    #[tokio::test]
+    #[ignore]
+    async fn compare_copies_every_value_exactly() {
+        let Some(_guard) = setup_conns() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let def = "(id VARBINARY(4) PRIMARY KEY, txt TEXT NULL, bin VARBINARY(8) NULL, big MEDIUMTEXT NULL, bits BIT(8) NULL, geo GEOMETRY NULL)";
+        raw("DROP DATABASE IF EXISTS cmp_val_src"); raw("CREATE DATABASE cmp_val_src CHARACTER SET utf8mb4");
+        // latin1 on the target on purpose: text is converted, never poured in as bytes.
+        raw("DROP DATABASE IF EXISTS cmp_val_tgt"); raw("CREATE DATABASE cmp_val_tgt CHARACTER SET latin1");
+        raw(&format!("CREATE TABLE cmp_val_src.t {def}"));
+        raw(&format!("CREATE TABLE cmp_val_tgt.t {def}"));
+        raw("INSERT INTO cmp_val_src.t VALUES \
+             (0x0001, 'NULL', X'', REPEAT('xy', 40000), b'101', ST_GeomFromText('POINT(1 2)')), \
+             (0x00FF, NULL, NULL, CONCAT('a', CHAR(13), 'b', CHAR(10), 'c', CHAR(13), CHAR(10), CHAR(9), 'd'), NULL, NULL), \
+             (0x41, '0x41', 0x0041, 'null', b'0', NULL), \
+             (0x0A0D, CONVERT(x'C3A9' USING utf8mb4), 0x00, '', b'11111111', NULL), \
+             (X'', '<&>\"''\\\\', 0x0A0D, '0x', NULL, NULL), \
+             (0x0B, CONVERT(x'610062' USING utf8mb4), NULL, CONVERT(CONCAT('x', CHAR(0), 'y') USING utf8mb4), NULL, NULL)");
+        let same = "SELECT COUNT(*) FROM cmp_val_src.t s JOIN cmp_val_tgt.t d ON s.id = d.id WHERE \
+            CAST(CONVERT(s.txt USING utf8mb4) AS BINARY) <=> CAST(CONVERT(d.txt USING utf8mb4) AS BINARY) AND \
+            s.bin <=> d.bin AND CAST(s.big AS BINARY) <=> CAST(d.big AS BINARY) AND s.bits <=> d.bits AND \
+            ST_AsBinary(s.geo) <=> ST_AsBinary(d.geo)";
+        let names = json!({"sourceConnName":P_RW,"sourceDb":"cmp_val_src","targetConnName":P_RW,"targetDb":"cmp_val_tgt","table":"t"});
+
+        let ia = compare_rows_insert_all(names.clone()).await.unwrap();
+        assert_eq!(ia["inserted"], 6, "insert-all: {ia}");
+        assert_eq!(scalar(same), "6", "insert-all did not copy every value exactly");
+
+        raw("DELETE FROM cmp_val_tgt.t");
+        let mr = compare_rows(names.clone()).await.unwrap();
+        assert_eq!(mr["missingTotal"], 6, "all 6 rows, binary keys included, are missing: {mr}");
+        let ap = compare_rows_apply(json!({"targetConnName":P_RW,"targetDb":"cmp_val_tgt","table":"t",
+                                           "columns":mr["columns"],"rows":mr["rows"]})).await.unwrap();
+        assert!(!ap["log"].to_string().contains("FAILED"), "apply: {ap}");
+        assert_eq!(scalar(same), "6", "apply did not copy every value exactly");
+
+        raw("UPDATE cmp_val_tgt.t SET txt = 'changed', bin = 0x99, big = 'x', bits = b'1', geo = NULL");
+        let dr = compare_rows_diff(names.clone()).await.unwrap();
+        assert_eq!(dr["diffs"].as_array().map(|a| a.len()), Some(6), "diff: {dr}");
+        let ad = compare_rows_apply_diff(json!({"targetConnName":P_RW,"targetDb":"cmp_val_tgt","table":"t",
+                                                "pkCols":dr["pkCols"],"updates":dr["diffs"]})).await.unwrap();
+        assert_eq!(ad["ok"], true, "apply-diff: {ad}");
+        assert_eq!(scalar(same), "6", "apply-diff did not restore every value exactly");
+
+        raw("DROP DATABASE IF EXISTS cmp_val_src");
+        raw("DROP DATABASE IF EXISTS cmp_val_tgt");
+    }
+
     // compare_rows_apply_diff updates existing target rows one at a time, unlike the insert-only
     // apply paths - a batch failing partway through used to leave some rows corrected and others
     // not, with no way back. It's now wrapped in a transaction: a mid-batch failure must leave
@@ -5271,6 +5358,7 @@ mod cnf_tests {
         assert!(body.contains("\nssl\n") || body.ends_with("ssl\n"),
             "ssl=required did not reach the options file:\n{body}");
         assert!(body.contains("password=p"), "the rest of the file is still written:\n{body}");
+        assert!(body.contains("\ndefault-character-set=utf8mb4\n"), "the client character set is pinned:\n{body}");
 
         // ...and "default" stays silent, so nothing is forced on a connection that did not ask.
         let plain = json!({"host":"h","port":"3306","user":"u","ssl":"default"});
