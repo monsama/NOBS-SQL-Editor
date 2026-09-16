@@ -32,3 +32,17 @@ jobs:
       - name: Run tests
         working-directory: src-tauri
         run: cargo test
+
+      # node --test expands the tests/ui/*.test.mjs glob itself rather than relying on the shell
+      # (the CI shell here is PowerShell, which would not), and that needs Node 21+ - so pin it
+      # instead of taking whatever the runner image happens to ship.
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The grid's sort/filter ordering lives in ui/index.html, which cargo test cannot reach.
+      # tests/ui/ extracts those functions from the file itself and exercises them under Node's
+      # built-in runner - no dependencies to install, so this needs no npm ci.
+      - name: Run UI tests
+        run: npm test

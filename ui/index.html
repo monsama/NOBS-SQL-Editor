@@ -2359,10 +2359,23 @@ function sortBy(id,ci){const t=T(id);if(t.sortCol===ci){if(t.sortDir>0){t.sortDi
 function viewIndices(id){const t=T(id);let view=t.rows.map((r,ri)=>ri);
  const fk=Object.keys(t.filters).filter(k=>t.filters[k]!=='' && t.filters[k]!=null);
  if(fk.length)view=view.filter(ri=>fk.every(ci=>{const v=t.rows[ri][ci];return v!=null&&String(v).toLowerCase().includes(String(t.filters[ci]).toLowerCase());}));
- if(t.sortCol>=0){const sc=t.sortCol;view=view.slice().sort((a,b)=>{let va=t.rows[a][sc],vb=t.rows[b][sc];
+ if(t.sortCol>=0){const sc=t.sortCol;
+   // Decide numeric-vs-text ONCE for the whole column, not per compared pair. The old test
+   // asked, for each pair, whether parseFloat(v) round-tripped back to the same string - which
+   // any trailing zero fails ("1000.10" -> 1000.1, "0.00" -> 0, "20.00" -> 20). So on an
+   // ordinary DECIMAL column some pairs compared as numbers and others as text: an inconsistent
+   // comparator, which leaves Array.sort free to return an order that is sorted by neither rule.
+   // It did - on bulk_rows.amount, "1000.10" came back between "1.37" and "2.74".
+   // A full-string match (rather than parseFloat, which happily reads "1abc" as 1) is what keeps
+   // genuinely non-numeric text out of the numeric path.
+   const NUMERIC=/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
+   const numericCol=view.every(ri=>{const v=t.rows[ri][sc];return v==null||NUMERIC.test(String(v).trim());});
+   view=view.slice().sort((a,b)=>{let va=t.rows[a][sc],vb=t.rows[b][sc];
    if(va==null&&vb==null)return 0;if(va==null)return 1;if(vb==null)return -1;
-   const na=parseFloat(va),nb=parseFloat(vb);
-   if(!isNaN(na)&&!isNaN(nb)&&String(na)===String(va).trim()&&String(nb)===String(vb).trim())return na-nb;
+   if(numericCol){const d=Number(va)-Number(vb);if(d)return d<0?-1:1;
+    // Equal as floats - including two values that differ only past float precision. Fall back to
+    // text so the comparator still defines a total order instead of calling them interchangeable.
+    return String(va).localeCompare(String(vb));}
    return String(va).localeCompare(String(vb));});if(t.sortDir<0)view.reverse();}
  return view;}
 // One continuous virtualized list over EVERY loaded (filtered/sorted) row - no fixed-size "page"
