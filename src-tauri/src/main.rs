@@ -1346,7 +1346,57 @@ async fn rowop(req: Value) -> R {
 // it does nothing for an actual embedded newline BYTE, which this strips outright since none of
 // these fields have any legitimate use for one.
 fn cnf_safe(s: &str) -> String { s.replace(['\r', '\n'], "") }
-fn cnf_file(connj: &Value) -> Result<(tempfile::NamedTempFile, String), String> {
+
+// Which SSL option dialect a client binary speaks. The MariaDB and MySQL clients name these
+// MUTUALLY EXCLUSIVELY, so the wrong set is not a weaker connection, it is no connection:
+// MariaDB's client rejects "ssl-mode=REQUIRED" as an unknown variable, MySQL's rejects "--ssl" as
+// an unknown option. It is a property of the binary, not of the server - the client parses the
+// options file before it opens a socket. Cached per path; a Settings change points at a new one.
+fn client_is_mariadb(tool: &str) -> bool {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    if let Ok(m) = cache.lock() { if let Some(v) = m.get(tool) { return *v; } }
+    // The tools this app downloads are MariaDB's, so that is the safe assumption if asking fails.
+    let maria = Command::new(tool).arg("--version").output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("MariaDB"))
+        .unwrap_or(true);
+    if let Ok(mut m) = cache.lock() { m.insert(tool.to_string(), maria); }
+    maria
+}
+
+fn ssl_cnf_lines(mode: &str, maria: bool) -> Vec<&'static str> {
+    match (mode, maria) {
+        ("disabled", true)  => vec!["skip-ssl"],
+        ("required", true)  => vec!["ssl"],
+        ("verify",   true)  => vec!["ssl", "ssl-verify-server-cert"],
+        ("disabled", false) => vec!["ssl-mode=DISABLED"],
+        ("required", false) => vec!["ssl-mode=REQUIRED"],
+        ("verify",   false) => vec!["ssl-mode=VERIFY_IDENTITY"],
+        _ => vec![],   // "default", and anything unrecognised: leave it to the client
+    }
+}
+
+// Where the client should look for authentication plugins.
+//
+// MySQL 8 authenticates every account with caching_sha2_password by default, root included. That
+// is a CLIENT-side plugin - a separate DLL loaded at connect time, resolved relative to the
+// client's own location unless it is told otherwise. download_tools unpacks the .exe files into a
+// flat directory with no lib/plugin beside them, so export and import against a stock MySQL 8
+// server died before they could authenticate:
+//
+//   ERROR 1045 (28000): Plugin caching_sha2_password could not be loaded:
+//   The specified module could not be found. Library path is 'caching_sha2_password.dll'
+//
+// Only for OUR copy: a client from a real installation has its own lib/plugin next door and finds
+// the right ones itself, and pointing it at another product's plugins would break what works.
+fn tools_plugin_dir(tool: &str) -> Option<std::path::PathBuf> {
+    let parent = std::path::Path::new(tool).parent()?;
+    if parent != tools_dir().as_path() { return None; }
+    let p = tools_dir().join("plugin");
+    if p.exists() { Some(p) } else { None }
+}
+
+fn cnf_file(connj: &Value, tool: &str) -> Result<(tempfile::NamedTempFile, String), String> {
     let mut f = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
     let mut s = String::from("[client]\n");
     s += &format!("host={}\nport={}\nuser={}\n", cnf_safe(connj["host"].as_str().unwrap_or("127.0.0.1")),
@@ -1356,6 +1406,14 @@ fn cnf_file(connj: &Value) -> Result<(tempfile::NamedTempFile, String), String> 
     // silently consume it as (the start of) an escape sequence instead of a literal character -
     // corrupting the password and breaking auth for anyone whose password happens to contain one.
     if let Some(p) = connj["password"].as_str() { if !p.is_empty() { s += &format!("password={}\n", cnf_safe(p).replace('\\', "\\\\")); } }
+    // The ssl setting used to stop at the native driver: export and import went out over whatever
+    // the CLI happened to negotiate, so a connection saved as "required" - or as "disabled" - was
+    // quietly something else as soon as it was dumped or loaded.
+    let ssl = connj["ssl"].as_str().unwrap_or("default");
+    for line in ssl_cnf_lines(ssl, client_is_mariadb(tool)) { s += line; s += "\n"; }
+    if let Some(p) = tools_plugin_dir(tool) {
+        s += &format!("plugin-dir={}\n", cnf_safe(&p.to_string_lossy()).replace('\\', "\\\\"));
+    }
     f.write_all(s.as_bytes()).map_err(|e| e.to_string())?;
     let path = f.path().to_string_lossy().to_string();
     Ok((f, path))
@@ -1615,7 +1673,7 @@ async fn import_run(req: Value, mbin: String) -> R {
         let jid = req["jobId"].as_str().unwrap_or("").to_string();
         let job = job_start(&jid);
         let _guard = JobGuard(jid);
-        let (_f, cnf) = cnf_file(&req["conn"])?;
+        let (_f, cnf) = cnf_file(&req["conn"], &mbin)?;
         let files: Vec<String> = req["files"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         let target = req["targetDb"].as_str().unwrap_or("").to_string();
         let mut log = Vec::new();
@@ -1736,7 +1794,7 @@ async fn export_run(req: Value, dbin: String) -> R {
         let jid = req["jobId"].as_str().unwrap_or("").to_string();
         let job = job_start(&jid);
         let _guard = JobGuard(jid);
-        let (_f, cnf) = cnf_file(&req["conn"])?;
+        let (_f, cnf) = cnf_file(&req["conn"], &dbin)?;
         let dbs: Vec<String> = req["dbs"].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
         if dbs.is_empty() { return Ok(json!({"ok":false,"error":"No databases selected."})); }
         let folder = req["folder"].as_str().unwrap_or(".").to_string();
@@ -3269,7 +3327,18 @@ async fn download_tools(_app: tauri::AppHandle) -> R {
         let dest = tools_dir();
         std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
         let want = ["mysqldump.exe", "mysql.exe", "mysqlimport.exe", "mysqlcheck.exe", "mariadb.exe", "mariadb-dump.exe"];
+        // The client AUTHENTICATION plugins, which were not being unpacked at all - without
+        // caching_sha2_password the client cannot log in to a stock MySQL 8 server, so export and
+        // import failed against one however the connection itself was configured. The archive also
+        // carries storage engines and audit plugins; those belong to a server, not here.
+        let want_plugins = ["caching_sha2_password.dll", "sha256_password.dll",
+                            "client_ed25519.dll", "parsec.dll",
+                            "dialog.dll", "mysql_clear_password.dll",
+                            "auth_gssapi_client.dll", "authentication_windows_client.dll",
+                            "auth_named_pipe.dll"];
+        let plugin_dest = dest.join("plugin");
         let mut got: Vec<String> = Vec::new();
+        let mut got_plugins = 0usize;
         for i in 0..zipf.len() {
             let mut f = zipf.by_index(i).map_err(|e| e.to_string())?;
             let full = f.name().to_string();
@@ -3279,8 +3348,17 @@ async fn download_tools(_app: tauri::AppHandle) -> R {
                 let mut o = std::fs::File::create(&out).map_err(|e| e.to_string())?;
                 std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
                 got.push(base);
+            } else if want_plugins.contains(&base.as_str())
+                   && full.replace('\\', "/").contains("/lib/plugin/") {
+                // Matched on the archive path too, so these come from lib/plugin and not from
+                // something else that happens to share a file name.
+                std::fs::create_dir_all(&plugin_dest).map_err(|e| e.to_string())?;
+                let mut o = std::fs::File::create(plugin_dest.join(&base)).map_err(|e| e.to_string())?;
+                std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
+                got_plugins += 1;
             }
         }
+        log_line(&format!("download_tools: {} binaries, {} auth plugins", got.len(), got_plugins));
         if got.is_empty() { return Ok(json!({"ok":false,"error":"Downloaded the archive but found no client binaries inside."})); }
         // 6) record paths in config
         let pick = |a: &str, b: &str| -> Option<String> {
@@ -3739,12 +3817,24 @@ mod live_tests {
     }
 
     // ...while a query that really is cancelled still says so.
+    //
+    // Deliberately a slow JOIN and not SELECT SLEEP(10), which is what this used to be. MySQL
+    // documents SLEEP() as RETURNING 1 when KILL QUERY interrupts it - the statement then
+    // succeeds, with a row - so on MySQL 8 that made the test look like the cancel had been
+    // ignored when nothing was wrong with it. MariaDB raises ER_QUERY_INTERRUPTED instead, which
+    // is why it only ever passed there. A real query behaves the same on both, and this is one:
+    // measured on MySQL 8.0.46 and MariaDB 12.2, cancelling it reports "Query cancelled." on each.
+    //
+    // Bounded by id so that a cancel which does NOT work fails as a slow test rather than hanging
+    // - unrestricted, this join runs for over three minutes.
     #[tokio::test]
     #[ignore]
     async fn a_cancelled_query_still_reports_as_cancelled() {
         let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
         let rid = "test-real-cancel".to_string();
-        let q = tokio::spawn(query(json!({"sql":"SELECT SLEEP(10)", "conn": conn.clone(), "requestId": rid})));
+        let sql = "SELECT COUNT(*) FROM bulk_rows a JOIN bulk_rows b ON a.category = b.category \
+                   WHERE a.id < 10000";
+        let q = tokio::spawn(query(json!({"sql": sql, "conn": conn.clone(), "db": "nobs_test", "requestId": rid})));
         // let it register its CONNECTION_ID() before killing it
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         let c = cancel_query(json!({"requestId":"test-real-cancel", "conn": conn})).await.expect("cancel failed");
@@ -4202,8 +4292,21 @@ mod compare_tests {
     const P_RW: &str = "nobs_cmp_test_rw";
     const P_RO: &str = "nobs_cmp_test_ro";
 
+    // connections.json is a single global file, and every test here replaces it and then puts it
+    // back. Run two of them at once - which is cargo's default - and the first to finish restores
+    // the user's real file while the second is still using the test profiles, so that one fails
+    // with "Connection not found." on a completely healthy setup. It looked like a compare bug and
+    // was a test one. This serialises them; the lock is held for as long as the guard lives.
+    //
+    // Poisoning is deliberately ignored: a panicking test still restores the file through the Drop
+    // below, so the next one may safely take the lock rather than being failed by its predecessor.
+    fn conn_file_lock() -> &'static Mutex<()> {
+        static L: OnceLock<Mutex<()>> = OnceLock::new();
+        L.get_or_init(|| Mutex::new(()))
+    }
+
     // Restores the real connections.json when the test ends, however it ends.
-    struct ConnFileGuard(Option<Vec<u8>>);
+    struct ConnFileGuard(Option<Vec<u8>>, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
     impl Drop for ConnFileGuard {
         fn drop(&mut self) {
             match &self.0 {
@@ -4227,7 +4330,10 @@ mod compare_tests {
     // returns a guard that undoes it. None means the DSN is absent and the caller should skip.
     fn setup_conns() -> Option<ConnFileGuard> {
         let (host, port, user, pass) = dsn()?;
-        let guard = ConnFileGuard(std::fs::read(conn_path()).ok());
+        // Taken BEFORE the file is read, so the snapshot is of the user's file and never of
+        // another test's profiles.
+        let lock = conn_file_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let guard = ConnFileGuard(std::fs::read(conn_path()).ok(), lock);
         let profiles = json!([
             {"name":P_RW, "host":host,"port":port,"user":user,"ssl":"default","readonly":false},
             {"name":P_RO, "host":host,"port":port,"user":user,"ssl":"default","readonly":true}
@@ -4705,5 +4811,83 @@ mod concurrency_tests {
             let (i, got) = t.await.unwrap();
             assert_eq!(got, (i * 100).to_string(), "query {i} got another query's answer");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What the CLI tools are actually told
+// ---------------------------------------------------------------------------
+// Export and import do not go through the native driver - they shell out to mysqldump/mysql with
+// a generated [client] options file. Two things were missing from it, and both only showed up
+// against a real MySQL 8 server.
+#[cfg(test)]
+mod cnf_tests {
+    use super::*;
+
+    // Mutually exclusive dialects: the wrong one is not a weaker connection, it is an unknown
+    // option and no connection at all. Both directions verified against the real binaries -
+    // MariaDB client 15.2 and MySQL client 8.0.46.
+    #[test]
+    fn each_client_is_given_the_option_names_it_understands() {
+        assert_eq!(ssl_cnf_lines("disabled", true),  vec!["skip-ssl"]);
+        assert_eq!(ssl_cnf_lines("required", true),  vec!["ssl"]);
+        assert_eq!(ssl_cnf_lines("verify",   true),  vec!["ssl", "ssl-verify-server-cert"]);
+        assert_eq!(ssl_cnf_lines("disabled", false), vec!["ssl-mode=DISABLED"]);
+        assert_eq!(ssl_cnf_lines("required", false), vec!["ssl-mode=REQUIRED"]);
+        assert_eq!(ssl_cnf_lines("verify",   false), vec!["ssl-mode=VERIFY_IDENTITY"]);
+
+        // The two vocabularies must not overlap anywhere, or a mix-up could go unnoticed.
+        for mode in ["disabled", "required", "verify"] {
+            let (m, y) = (ssl_cnf_lines(mode, true), ssl_cnf_lines(mode, false));
+            assert!(m.iter().all(|l| !y.contains(l)), "dialects overlap for {mode}: {m:?} vs {y:?}");
+        }
+    }
+
+    // "default" means leave it to the client, so it must write nothing rather than guess.
+    #[test]
+    fn default_and_unknown_modes_write_nothing() {
+        for maria in [true, false] {
+            assert!(ssl_cnf_lines("default", maria).is_empty());
+            assert!(ssl_cnf_lines("", maria).is_empty());
+            assert!(ssl_cnf_lines("bogus", maria).is_empty());
+        }
+    }
+
+    // The ssl setting used to stop at the native driver: a connection saved as "required" was
+    // dumped over whatever the CLI happened to negotiate, and one saved as "disabled" likewise.
+    #[test]
+    fn the_options_file_carries_the_ssl_setting() {
+        let conn = json!({"host":"h","port":"3306","user":"u","password":"p","ssl":"required"});
+        let (_f, path) = cnf_file(&conn, "definitely-not-a-real-binary").unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("\nssl\n") || body.ends_with("ssl\n"),
+            "ssl=required did not reach the options file:\n{body}");
+        assert!(body.contains("password=p"), "the rest of the file is still written:\n{body}");
+
+        // ...and "default" stays silent, so nothing is forced on a connection that did not ask.
+        let plain = json!({"host":"h","port":"3306","user":"u","ssl":"default"});
+        let (_f2, p2) = cnf_file(&plain, "definitely-not-a-real-binary").unwrap();
+        let b2 = std::fs::read_to_string(&p2).unwrap();
+        assert!(!b2.contains("ssl"), "ssl=default should write no ssl line at all:\n{b2}");
+    }
+
+    // A client from a real MariaDB or MySQL installation has its own lib/plugin next door and
+    // finds the right plugins itself; redirecting it at another product's would break it.
+    #[test]
+    fn only_our_own_tools_are_pointed_at_our_plugin_directory() {
+        assert!(tools_plugin_dir(r"C:\Program Files\MariaDB 12.3\bin\mysql.exe").is_none(),
+            "a client from a full installation must not be redirected");
+        assert!(tools_plugin_dir("mysql.exe").is_none(), "a bare name has no directory to judge");
+
+        // Our own tools dir, but only once the plugins are actually there.
+        let ours = tools_dir().join("mysql.exe");
+        let plugin = tools_dir().join("plugin");
+        let existed = plugin.exists();
+        if !existed { assert!(tools_plugin_dir(&ours.to_string_lossy()).is_none(),
+            "nothing should be claimed before the plugins are unpacked"); }
+        std::fs::create_dir_all(&plugin).unwrap();
+        assert_eq!(tools_plugin_dir(&ours.to_string_lossy()), Some(plugin.clone()),
+            "our own client should be pointed at the plugins we unpacked");
+        if !existed { let _ = std::fs::remove_dir(&plugin); }
     }
 }
