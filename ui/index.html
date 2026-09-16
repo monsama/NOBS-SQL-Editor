@@ -2618,7 +2618,14 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
   // string goes unquoted via litForCol's existing BIT-integer path, a "0x.." string goes unquoted
   // via lit()'s existing hex-literal passthrough. Neither needs re-encoding here.
   if(opts.bitNumeric)return ta.value;
-  if(opts.hexText)return _vHexState.mode==='text'?textToHex(ta.value):normalizeHexInput(ta.value);
+  if(opts.hexText){
+   const h=_vHexState.mode==='text'?textToHex(ta.value):normalizeHexInput(ta.value);
+   // An empty box is an empty value, and textToHex('') / normalizeHexInput('') both give "0x"
+   // - zero digits. That is not valid SQL, and lit()'s hex passthrough requires at least one
+   // digit, so it fell through to being quoted and stored the two CHARACTERS 0 and x instead of
+   // nothing at all. Hand back an empty string and let it be quoted as one.
+   return (h===null||h==='0x')?'':h;
+  }
   return opts.options?sel.value:ta.value;
  };
  if(!opts.options&&!opts.multiOptions&&!opts.dateType){

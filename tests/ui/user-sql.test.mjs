@@ -200,3 +200,26 @@ test('a hex value pasted into the Text tab is recognised', () => {
   // Too short to be worth second-guessing.
   assert.equal(looksLikePastedHex('0x24'), false);
 });
+
+// An empty binary cell must store nothing, not the two characters "0x".
+// textToHex('') and normalizeHexInput('') both yield "0x" - zero digits. That is not valid SQL,
+// and lit()'s hex passthrough requires at least one digit, so it used to fall through to being
+// quoted: clearing a BLOB stored the literal characters 0 and x. Found by round-tripping every
+// kind of input through a live server and comparing HEX(col) to the bytes that went in.
+test('an empty binary value is stored as nothing, not as the characters 0x', () => {
+  const { normalizeHexInput } = hexFns();
+  const lit = new Function(extractFunction(html, 'strLit') + '\n' + extractFunction(html, 'lit') + '\nreturn lit;')();
+  const textToHex = new Function(extractFunction(html, 'bytesToHex') + '\n' + extractFunction(html, 'textToHex') + '\nreturn textToHex;')();
+
+  // Both tabs produce "0x" for an empty box...
+  assert.equal(textToHex(''), '0x');
+  assert.equal(normalizeHexInput(''), '0x');
+  // ...and "0x" must never reach lit(), because lit() would quote it.
+  assert.equal(lit('0x'), "'0x'", 'lit() quotes a digit-less 0x - which is why getVal maps it to empty first');
+  // The mapping getVal applies:
+  const forEmpty = (h) => (h === null || h === '0x') ? '' : h;
+  assert.equal(lit(forEmpty(textToHex(''))), "''", 'an empty Text box stores an empty value');
+  assert.equal(lit(forEmpty(normalizeHexInput(''))), "''", 'an empty Hex box stores an empty value');
+  // A real one-byte value is untouched by that mapping.
+  assert.equal(lit(forEmpty(normalizeHexInput('0x00'))), '0x00');
+});
