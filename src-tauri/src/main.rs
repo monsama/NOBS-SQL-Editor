@@ -426,28 +426,40 @@ fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String, request_id: O
         let bit: Vec<bool> = result.columns().as_ref().iter().map(is_bit_col).collect();
         if open_tx.send(Ok((cols.clone(), bin.clone(), bit.clone()))).is_err() { cleanup(&request_id); return; } // caller went away
 
+        // The look-ahead row from the previous Fetch. `result` is a forward-only iterator, so a
+        // row read to answer "is there more?" cannot be un-read - it has to be held here and
+        // emitted as the first row of the next page. Dropping it instead silently lost exactly
+        // one row at every page boundary (100k rows at the default pageSize surfaced as 99,901,
+        // with has_more=false, so nothing indicated the loss).
+        let mut carry: Option<Vec<Option<String>>> = None;
         loop {
             // Idle safety net: an abandoned cursor (tab closed without the UI's cleanup call
             // reaching the backend, app crashed, etc.) can't hold its DB connection open forever.
             match cmd_rx.recv_timeout(std::time::Duration::from_secs(600)) {
                 Ok(CursorCmd::Fetch { n, reply }) => {
-                    // Pull n+1 so "is there more?" is answered from this same fetch, with no
-                    // separate round trip - the extra row is dropped before replying.
-                    let mut rows = Vec::new();
-                    let mut has_more = false;
+                    // Fill the page (starting with whatever the last look-ahead held back), then
+                    // read exactly one row beyond it so "is there more?" is still answered from
+                    // this same fetch with no extra round trip - but keep that row for next time.
+                    let mut rows: Vec<Vec<Option<String>>> = Vec::new();
                     let mut err: Option<String> = None;
-                    let mut count = 0usize;
-                    while count < n + 1 {
+                    if let Some(r) = carry.take() { rows.push(r); }
+                    while rows.len() < n {
                         match result.next() {
-                            Some(Ok(row)) => {
-                                count += 1;
-                                if count <= n { rows.push(decode_row(&row, &bin)); }
-                                else { has_more = true; }
-                            }
+                            Some(Ok(row)) => rows.push(decode_row(&row, &bin)),
                             Some(Err(e)) => { err = Some(db_err(e)); break; }
                             None => break,
                         }
                     }
+                    // Only look ahead when the page actually filled: a short page already means
+                    // the result set is exhausted, and asking for another row would be pointless.
+                    if err.is_none() && rows.len() == n {
+                        match result.next() {
+                            Some(Ok(row)) => carry = Some(decode_row(&row, &bin)),
+                            Some(Err(e)) => { err = Some(db_err(e)); }
+                            None => {}
+                        }
+                    }
+                    let has_more = carry.is_some();
                     let done = err.is_some() || !has_more;
                     let resp = match err { Some(e) => Err(e), None => Ok(CursorBatch { rows, has_more }) };
                     let _ = reply.send(resp);
@@ -3714,6 +3726,79 @@ mod binary_col_tests {
         // unlike bit_col/bit8, where MySQL accepts a bare integer as the correct bit pattern.
         assert_eq!(bit, vec![false, false, false, false, true, true],
                    "only bit_col and bit8 are BIT columns; bin_col/blob_col are binary but not BIT");
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    fn conn_json() -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        Some(json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"}))
+    }
+
+    // Opens a cursor over the first `total` rows of bulk_rows and pages it to exhaustion at
+    // `page` rows a time, returning every id it was handed, in order.
+    async fn page_all(conn: &Value, total: usize, page: usize) -> Vec<String> {
+        let sql = format!("SELECT id FROM bulk_rows ORDER BY id LIMIT {total}");
+        let first = query(json!({"sql": sql, "conn": conn, "db": "nobs_test", "pageSize": page})).await.unwrap();
+        assert_eq!(first["ok"], true, "opening the cursor failed: {first}");
+        let take = |v: &Value| -> Vec<String> {
+            v["rows"].as_array().cloned().unwrap_or_default().iter()
+                .map(|r| r[0].as_str().unwrap_or("?").to_string()).collect()
+        };
+        let mut got = take(&first);
+        let mut has_more = first["hasMore"].as_bool().unwrap_or(false);
+        if !has_more { return got; }
+        let cursor_id = first["cursorId"].as_str().unwrap_or("").to_string();
+        assert!(!cursor_id.is_empty(), "a result with more pages must return a cursorId: {first}");
+        // Bounded so a has_more that never clears fails as a test rather than hanging.
+        for _ in 0..(total / page + 4) {
+            if !has_more { break; }
+            let b = fetch_cursor_batch(json!({"cursorId": cursor_id, "pageSize": page})).await.unwrap();
+            assert_eq!(b["ok"], true, "fetching the next page failed: {b}");
+            got.extend(take(&b));
+            has_more = b["hasMore"].as_bool().unwrap_or(false);
+        }
+        assert!(!has_more, "cursor still reported more rows after paging past the end");
+        got
+    }
+
+    // The bug this guards: the fetch read one row beyond the page to answer "is there more?" and
+    // then threw that row away. `result` is forward-only, so it could not be re-read - exactly one
+    // row disappeared at every page boundary, and because has_more went false at the end nothing
+    // reported it. bulk_rows' 100k rows came back as 99,901.
+    //
+    // 25 rows at 10/page covers a partial final page; 20 at 10 covers the case where the last page
+    // is exactly full, where the look-ahead finds nothing and must not invent a further page.
+    #[tokio::test]
+    #[ignore]
+    async fn paging_a_cursor_delivers_every_row_exactly_once() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        for (total, page) in [(25usize, 10usize), (20, 10), (10, 10), (7, 3), (1, 1)] {
+            let got = page_all(&conn, total, page).await;
+            let want: Vec<String> = (0..total).map(|i| i.to_string()).collect();
+            assert_eq!(got.len(), total,
+                       "{total} rows at {page}/page: got {} - a row was dropped at a page boundary: {got:?}",
+                       got.len());
+            assert_eq!(got, want, "{total} rows at {page}/page came back in the wrong order or with gaps");
+        }
+    }
+
+    // The same failure, at the size it was actually noticed: the default page size over a table
+    // big enough for ~100 pages. Guards against a fix that only works for small page counts.
+    #[tokio::test]
+    #[ignore]
+    async fn paging_the_full_bulk_table_loses_nothing() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let got = page_all(&conn, 100_000, 1000).await;
+        assert_eq!(got.len(), 100_000, "expected all 100000 rows across 100 pages, got {}", got.len());
+        let mut uniq = got.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 100_000, "the same row was delivered on more than one page");
     }
 }
 
