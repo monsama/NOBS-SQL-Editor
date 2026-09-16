@@ -207,19 +207,23 @@ test('a hex value pasted into the Text tab is recognised', () => {
 // quoted: clearing a BLOB stored the literal characters 0 and x. Found by round-tripping every
 // kind of input through a live server and comparing HEX(col) to the bytes that went in.
 test('an empty binary value is stored as nothing, not as the characters 0x', () => {
-  const { normalizeHexInput } = hexFns();
-  const lit = new Function(extractFunction(html, 'strLit') + '\n' + extractFunction(html, 'lit') + '\nreturn lit;')();
-  const textToHex = new Function(extractFunction(html, 'bytesToHex') + '\n' + extractFunction(html, 'textToHex') + '\nreturn textToHex;')();
+  // Drives the real hexCellValueForSave - the function getVal() actually calls - so removing the
+  // empty-value rule from the app breaks this. An earlier version restated the rule here instead,
+  // and would have gone on passing without it.
+  const src = ['strLit','lit','bytesToHex','textToHex','hexToBytes','normalizeHexInput','hexCellValueForSave']
+    .map(n => extractFunction(html, n)).join('\n');
+  const F = new Function(src + '\nreturn {lit,textToHex,normalizeHexInput,hexCellValueForSave};')();
 
-  // Both tabs produce "0x" for an empty box...
-  assert.equal(textToHex(''), '0x');
-  assert.equal(normalizeHexInput(''), '0x');
-  // ...and "0x" must never reach lit(), because lit() would quote it.
-  assert.equal(lit('0x'), "'0x'", 'lit() quotes a digit-less 0x - which is why getVal maps it to empty first');
-  // The mapping getVal applies:
-  const forEmpty = (h) => (h === null || h === '0x') ? '' : h;
-  assert.equal(lit(forEmpty(textToHex(''))), "''", 'an empty Text box stores an empty value');
-  assert.equal(lit(forEmpty(normalizeHexInput(''))), "''", 'an empty Hex box stores an empty value');
-  // A real one-byte value is untouched by that mapping.
-  assert.equal(lit(forEmpty(normalizeHexInput('0x00'))), '0x00');
+  // Both tabs produce a digit-less "0x" for an empty box...
+  assert.equal(F.textToHex(''), '0x');
+  assert.equal(F.normalizeHexInput(''), '0x');
+  // ...which lit() would quote, storing the characters 0 and x.
+  assert.equal(F.lit('0x'), "'0x'");
+  // So the save path must never hand it over:
+  assert.equal(F.hexCellValueForSave('text', ''), '', 'an empty Text box saves an empty value');
+  assert.equal(F.hexCellValueForSave('hex', ''), '', 'an empty Hex box saves an empty value');
+  assert.equal(F.lit(F.hexCellValueForSave('text', '')), "''");
+  // A real value passes through untouched.
+  assert.equal(F.hexCellValueForSave('hex', '0x00'), '0x00');
+  assert.equal(F.hexCellValueForSave('text', 'hi'), '0x6869');
 });
