@@ -187,6 +187,22 @@ test('input that is not usable hex is rejected rather than silently mangled', ()
   assert.equal(normalizeHexInput('0x'), '0x');
 });
 
+// The shape that actually corrupted two blobs in a real database: a copied cell pasted WITHOUT
+// first selecting what was in the box, so the hex ends up alongside the old value rather than
+// replacing it. The first version of this guard was anchored ^...$ and stayed silent for exactly
+// this - it only noticed a box containing nothing but hex.
+test('hex pasted alongside existing text is recognised, not just a clean paste', () => {
+  const { looksLikePastedHex } = hexFns();
+  const hex = '0x24372443362e2e2e2e2f2e2e2e2e65306b307751397a566d78426c66416c67353867';
+  const text = '$7$C6..../....RYngpNxfC6t.r9JyBynUxwywkD8T/MbQx7QQl.Acjv.';
+  assert.equal(looksLikePastedHex(hex + text), true, 'hex pasted in front of the old value');
+  assert.equal(looksLikePastedHex(text + hex), true, 'hex pasted after the old value');
+  // ...while ordinary text mentioning a short hex number is left alone.
+  assert.equal(looksLikePastedHex('the 0xAB flag is set'), false);
+  assert.equal(looksLikePastedHex('value: 0x1234 and 0x5678'), false);
+  assert.equal(looksLikePastedHex(text), false, 'the decoded value itself must never warn');
+});
+
 test('a hex value pasted into the Text tab is recognised', () => {
   const { looksLikePastedHex } = hexFns();
   assert.equal(looksLikePastedHex('0x24372443362e2e2e'), true);

@@ -2482,11 +2482,6 @@ function normalizeHexInput(s){
  if(body.length%2)return null;
  return '0x'+body.toLowerCase();
 }
-// True when Text-mode content looks like a hex value pasted into the wrong tab. Text mode runs
-// textToHex() over the box, so saving "0x2437.." there stores the CHARACTERS 0,x,2,4,3,7 - not
-// the bytes they denote. That is how a blob in this database came to hold 307 bytes of hex-dump
-// text in place of a 102-byte hash. Only the 0x-prefixed form is flagged: a bare run of hex
-// digits is very often a genuine value (an MD5 written out as text, say).
 // The value a binary/BLOB cell hands to lit() for a given tab. Named and top-level so the tests
 // exercise this exact function rather than a restatement of it - an earlier version of those
 // tests reimplemented the empty-value rule and would have kept passing without it.
@@ -2497,8 +2492,24 @@ function hexCellValueForSave(mode, raw){
  // being quoted and stored the two CHARACTERS 0 and x instead of nothing at all.
  return (h===null||h==='0x')?'':h;
 }
+// True when Text-mode content looks like it contains a hex value that was meant for the Hex tab.
+// Text mode runs textToHex() over the whole box on save, so anything here is stored as the
+// CHARACTERS it consists of - "0x24.." becomes 0,x,2,4, not the bytes those digits denote.
+//
+// Two shapes, and the second is the one that keeps happening. An earlier version of this check
+// tested only the first, anchored ^...$, and so stayed silent for the case it was written to
+// prevent: a value pasted WITHOUT first selecting what was already in the box, which leaves the
+// hex sitting in front of (or behind) the old value. Two blobs in a real database were corrupted
+// that way - each holding a hex dump immediately followed by a crypt hash.
 function looksLikePastedHex(s){
- return /^0[xX][0-9A-Fa-f]{8,}$/.test(String(s==null?'':s).replace(/\s+/g,''));
+ const t=String(s==null?'':s).replace(/\s+/g,'');
+ if(t==='')return false;
+ // The whole box is a hex value: a clean paste into the wrong tab.
+ if(/^0[xX][0-9A-Fa-f]{8,}$/.test(t))return true;
+ // A hex run sits among other content: pasted alongside what was already there. 16 digits is
+ // 8 bytes - long enough that it is not going to be ordinary text that happens to start "0x".
+ if(/0[xX][0-9A-Fa-f]{16,}/.test(t))return true;
+ return false;
 }
 
 function textToHex(text){return bytesToHex(new TextEncoder().encode(text));}
@@ -2657,7 +2668,7 @@ if(opts.onSave)add('Save','go',async()=>{
    toast('That is not a usable hex value. Expected hex digits, optionally 0x-prefixed, an even number of them - spaces and line breaks are fine.',true);return;
   }
   if(_vHexState.mode==='text'&&looksLikePastedHex(ta.value)){
-   if(!(await ask('This looks like a hex value pasted into the Text tab.\n\nSaved as Text it stores the characters "0x24..." themselves, not the bytes they stand for. Switch to the Hex tab to store the bytes.\n\nSave it as literal text anyway?')))return;
+   if(!(await ask('This looks like a hex value (0x...) sitting in a text field.'+'\n\nSaved as Text it stores the characters "0x24..." themselves, not the bytes they stand for. If you pasted a copied cell here, use the Hex tab instead - and check you replaced the old value rather than pasting alongside it.'+'\n\nSave it as literal text anyway?')))return;
   }
  }
  opts.onSave(getVal());hide('mView');
