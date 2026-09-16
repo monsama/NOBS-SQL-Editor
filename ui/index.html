@@ -2505,6 +2505,32 @@ function normalizeHexInput(s){
 // The value a binary/BLOB cell hands to lit() for a given tab. Named and top-level so the tests
 // exercise this exact function rather than a restatement of it - an earlier version of those
 // tests reimplemented the empty-value rule and would have kept passing without it.
+// Screens staged grid edits for a hex value mixed into other content in a binary column, and
+// returns the columns that have one. Named and top-level so the tests drive this exact function
+// rather than a restatement of it.
+//
+// A binary cell DISPLAYS as 0x.., so a copied one pastes in as hex. Clean hex is how you set bytes
+// from the grid and passes through lit() unquoted - but hex with anything else attached is a paste
+// that landed alongside what was already in the cell, and lit() would quote the lot and store the
+// characters. A blob in a real database ended up holding 919 bytes of nested hex text in place of
+// a 102-byte hash that way, through the grid, after the value editor had already been fixed.
+function pastedHexColumns(t){
+ const out=[];
+ const bad=(ci,v)=>{
+  if(ci<0||!(t.binCols&&t.binCols[ci]))return false;
+  if(v===null||v===undefined)return false;
+  const s=String(v);
+  return looksLikePastedHex(s)&&normalizeHexInput(s)===null;
+ };
+ Object.keys((t.pending&&t.pending.upd)||{}).forEach(k=>{
+  const ci=Number(k.split(':')[1]);
+  if(bad(ci,t.pending.upd[k])) out.push(t.cols[ci]);
+ });
+ ((t.pending&&t.pending.ins)||[]).forEach(row=>{Object.keys(row).forEach(cn=>{
+  if(bad(t.cols.indexOf(cn),row[cn])) out.push(cn);
+ });});
+ return [...new Set(out)];
+}
 function hexCellValueForSave(mode, raw){
  const h = mode==='text' ? textToHex(raw) : normalizeHexInput(raw);
  // An empty box is an empty value, and both conversions give "0x" - zero digits. That is not
@@ -2994,6 +3020,16 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
  if(badBin.length){
   toast('These are BIT columns and only accept a plain integer or a 0x hex value:\n'+badBin.join('\n')
     +'\nUse 1 or 0x01 for on, 0 or 0x00 for off/zero.',true);
+  return;
+ }
+ // Screened before any SQL is built, so a bad paste writes nothing at all rather than part of a
+ // batch. Covers inline cell edits and new rows alike - the grid is the other way into a binary
+ // column, and the value editor's guard never sees it.
+ const badPaste=pastedHexColumns(t);
+ if(badPaste.length){
+  toast('Nothing was saved. A hex value is mixed into other content in: '+badPaste.join(', ')
+   +'\n\nThat usually means a paste landed alongside what was already in the cell instead of replacing it.'
+   +' Select the whole cell before pasting, or clear it first.',true);
   return;
  }
  // updates grouped by row

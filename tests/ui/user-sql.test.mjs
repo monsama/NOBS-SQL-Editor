@@ -316,3 +316,56 @@ test('copying a cell yields something that pastes back as the same bytes', () =>
   assert.equal(F.cellCopyValue('plain'), 'plain');
   assert.equal(F.cellCopyValue(null), '');
 });
+
+// --- the OTHER way into a binary column --------------------------------------------------------
+// The value editor is not the only route: you can type or paste straight into a grid cell, and
+// that never opens the editor, so the guard there never ran. A blob in a real database was
+// destroyed through this path after the editor had already been fixed - it ended up holding 919
+// bytes of nested hex text where a 102-byte hash belonged.
+//
+// applyChanges() screens staged edits before building any SQL (it already did so for BIT columns),
+// which is the one choke point both inline edits and new rows pass through. These drive that
+// screening function directly.
+test('a grid edit with hex mixed into a binary cell is refused before anything is written', () => {
+  // Drives the real pastedHexColumns - the function applyChanges calls - with a stand-in tab.
+  const src = ['bytesToHex','hexToBytes','normalizeHexInput','looksLikePastedHex','pastedHexColumns']
+    .map(n => extractFunction(html, n)).join('\n');
+  const F = new Function(src + '\nreturn pastedHexColumns;')();
+  const tab = (val) => ({ cols: ['id','data'], binCols: [false, true],
+                          pending: { upd: { '0:1': val }, ins: [] } });
+
+  const hex  = '0x24372443362e2e2e2e2f2e2e2e2e65306b307751397a566d78426c66416c67353867';
+  const hash = '$7$C6..../....hMYEng9e5.w8dP2TZwBhx.NwI9';
+
+  // The pastes that caused the loss, in both orders, and the doubly-encoded form that followed.
+  assert.deepEqual(F(tab(hex + hash)), ['data'], 'hex pasted in front of the cell contents');
+  assert.deepEqual(F(tab(hash + hex)), ['data'], 'hex pasted after the cell contents');
+  assert.deepEqual(F(tab(hex + hex + hash)), ['data'], 'hex pasted twice, then the old value');
+
+  // Clean hex is how you legitimately set bytes from the grid: lit() passes it through unquoted.
+  assert.deepEqual(F(tab('0x00ff10')), [], 'a clean hex value must still be allowed');
+  assert.deepEqual(F(tab(hex)), [], 'a clean copied cell must still be allowed');
+  assert.deepEqual(F(tab(hash)), [], 'the decoded value itself');
+  assert.deepEqual(F(tab('')), [], 'an emptied cell');
+  assert.deepEqual(F(tab(null)), [], 'a cell set to NULL');
+
+  // A NEW row goes through the same screen.
+  const insTab = { cols: ['id','data'], binCols: [false, true],
+                   pending: { upd: {}, ins: [{ data: hex + hash }] } };
+  assert.deepEqual(F(insTab), ['data'], 'a new row with a bad paste is screened too');
+
+  // A non-binary column is left alone - 0x.. is not this app's encoding there.
+  const textTab = { cols: ['id','note'], binCols: [false, false],
+                    pending: { upd: { '0:1': hex + hash }, ins: [] } };
+  assert.deepEqual(F(textTab), [], 'a text column is not screened');
+});
+
+test('applyChanges actually calls that screen', () => {
+  // The logic above can be perfect and still never run. This pins the wiring: an earlier version
+  // of this test checked a restatement of the rule and kept passing with the guard deleted.
+  const body = extractFunction(html, 'applyChanges');
+  assert.match(body, /pastedHexColumns\(/, 'applyChanges must screen staged edits before building SQL');
+  const callAt = body.indexOf('pastedHexColumns(');
+  const sqlAt = body.indexOf('UPDATE ');
+  assert.ok(callAt < sqlAt, 'the screen must run before any SQL is built');
+});
