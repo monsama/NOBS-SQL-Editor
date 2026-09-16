@@ -294,3 +294,21 @@ For anything that fails, the useful details are: which scenario, the exact SQL,
 what you expected, what happened, and whether the data survived. A failure in
 **1** or **2** is a stop-everything bug — those are the two guarantees that
 protect someone's data.
+
+## Checking real data for corruption
+
+Both editions write binary columns the same way, so the same audit covers either. The script lives
+in the sibling [NOBS-SQL-PS](https://github.com/monsama/NOBS-SQL-PS) repo, at
+`tools/Check-BlobIntegrity.ps1`, and is read-only — it runs SELECTs against a live server and
+writes nothing:
+
+```powershell
+pwsh -NoProfile -File ..\NOBS-SQL-PS\tools\Check-BlobIntegrity.ps1 -Dsn '127.0.0.1:3306:root:yourpassword'
+```
+
+It looks for the signatures this app has actually produced: a value beginning with the two
+characters `0x`, a long `0x` hex run embedded in other content, a value that is entirely bare hex,
+a U+FFFD replacement character, and NUL bytes in text columns. See that repo's docs/TESTING.md for
+what each one means and two worked examples - one a genuine loss, one a false alarm.
+
+Worth running after any session of hand-editing binary columns, and before trusting a backup.
