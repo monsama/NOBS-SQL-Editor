@@ -2801,7 +2801,17 @@ async function editWidgetFor(id,colName,curVal){
  if(colType&&/^date$/i.test(colType))dateType='date';
  else if(colType&&/^(datetime|timestamp)/i.test(colType))dateType='datetime-local';
  else if(colType&&/^time/i.test(colType))dateType='time';
- if(dateType&&(curVal==null||curVal===''||mysqlToNativeDate(curVal,dateType)))return {dateType};
+ // The picker is only safe for a value it can hand back unchanged. This used to ask merely
+ // whether the conversion produced SOMETHING, which is not the same thing: a DATETIME(6) of
+ // 2024-01-01 12:34:56.123456 converts happily to 2024-01-01T12:34:56, and saving that back
+ // dropped the fractional seconds without a word. Same for TIME(3). Require a real round trip -
+ // anything that does not survive one falls through to the plain text editor, where it is edited
+ // exactly as stored. That is what the comment below has always claimed; now it is true.
+ if(dateType&&(curVal==null||curVal==='')) return {dateType};
+ if(dateType){
+  const native=mysqlToNativeDate(curVal,dateType);
+  if(native&&nativeDateToMysql(native,dateType)===String(curVal)) return {dateType};
+ }
  // True binary/BLOB columns (not BIT - is_bit_col narrows binaryCols down to just BIT, see its
  // comment in main.rs) always render as "0x.." hex; offering a Text tab too lets you type/read
  // things like bcrypt hashes or tokens directly instead of hand-converting to hex, while Hex

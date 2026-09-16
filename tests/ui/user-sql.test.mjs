@@ -369,3 +369,54 @@ test('applyChanges actually calls that screen', () => {
   const sqlAt = body.indexOf('UPDATE ');
   assert.ok(callAt < sqlAt, 'the screen must run before any SQL is built');
 });
+
+// --- date and time cells: the picker must not quietly reshape a value -------------------------
+// The native date/time inputs cannot represent everything MySQL stores. A DATETIME(6) of
+// 2024-01-01 12:34:56.123456 converts cleanly to 2024-01-01T12:34:56, and saving that back
+// dropped the fractional seconds silently - the same shape as every other bug found here, a
+// conversion between two representations that loses part of the value on the way.
+//
+// The rule now: use the picker only for a value it hands back unchanged. Anything else gets the
+// plain text editor, where it is edited exactly as stored. These check the rule and the values
+// that drove it, all verified against what MariaDB actually returns for those column types.
+test('the date picker is offered only when it round-trips the stored value', () => {
+  const F = new Function(extractFunction(html, 'mysqlToNativeDate') + '\n' +
+                         extractFunction(html, 'nativeDateToMysql') +
+                         '\nreturn {mysqlToNativeDate,nativeDateToMysql};')();
+  // The test editWidgetFor applies.
+  const usesPicker = (v, t) => {
+    if (v == null || v === '') return true;
+    const n = F.mysqlToNativeDate(v, t);
+    return !!(n && F.nativeDateToMysql(n, t) === String(v));
+  };
+
+  // Values the picker represents exactly: offered, and lossless.
+  for (const [t, v] of [['datetime-local', '2024-01-01 12:34:56'],
+                        ['date', '2024-02-29'],
+                        ['time', '12:34:56']]) {
+    assert.equal(usesPicker(v, t), true, `${v} should use the picker`);
+    assert.equal(F.nativeDateToMysql(F.mysqlToNativeDate(v, t), t), v, `${v} must survive the round trip`);
+  }
+
+  // Fractional seconds: the picker drops them, so it must not be offered.
+  assert.equal(usesPicker('2024-01-01 12:34:56.123456', 'datetime-local'), false, 'DATETIME(6)');
+  assert.equal(usesPicker('2024-01-01 12:34:56.500', 'datetime-local'), false, 'DATETIME(3)');
+  assert.equal(usesPicker('12:34:56.789', 'time'), false, 'TIME(3)');
+
+  // MySQL TIME spans -838:59:59 to 838:59:59 - well outside a clock - and allows a zero date.
+  assert.equal(usesPicker('838:59:59', 'time'), false, 'a TIME beyond 24 hours');
+  assert.equal(usesPicker('-01:30:00', 'time'), false, 'a negative TIME');
+  assert.equal(usesPicker('0000-00-00', 'date'), false, 'the zero date');
+  assert.equal(usesPicker('0000-00-00 00:00:00', 'datetime-local'), false, 'the zero datetime');
+
+  // An empty or absent value has nothing to lose, so the picker is fine.
+  assert.equal(usesPicker(null, 'date'), true);
+  assert.equal(usesPicker('', 'date'), true);
+});
+
+test('editWidgetFor actually applies that round-trip test', () => {
+  // The rule above can be right and never run. This pins the wiring.
+  const body = extractFunction(html, 'editWidgetFor');
+  assert.match(body, /nativeDateToMysql\(/,
+    'editWidgetFor must convert back and compare, not just check the conversion produced something');
+});
