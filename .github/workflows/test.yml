@@ -86,6 +86,16 @@ jobs:
         shell: pwsh
         run: ./tests/ci/start-test-servers.ps1
 
+      # The GUI tests drive the built app over the Chrome DevTools protocol; run.mjs needs Node 22+.
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Build the app for the GUI tests
+        working-directory: src-tauri
+        run: cargo build
+
       - name: Live tests against MariaDB
         working-directory: src-tauri
         shell: pwsh
@@ -102,6 +112,22 @@ jobs:
           $env:NOBS_TEST_DSN = $env:NOBS_CI_MYSQL_DSN
           $env:NOBS_TEST_SERVER_CA = $env:NOBS_CI_MYSQL_CA
           cargo test -- --include-ignored --test-threads=1
+
+      # The real app, driven through its UI: grid edits, Compare, export and import, a script's
+      # results. See tests/gui/run.mjs.
+      - name: GUI tests against MariaDB
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $env:NOBS_TEST_DSN = $env:NOBS_CI_MARIADB_DSN
+          node tests/gui/run.mjs --app desktop --target src-tauri/target/debug/nobs-sql-editor.exe
+
+      - name: GUI tests against MySQL
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          $env:NOBS_TEST_DSN = $env:NOBS_CI_MYSQL_DSN
+          node tests/gui/run.mjs --app desktop --target src-tauri/target/debug/nobs-sql-editor.exe
 
       - name: Server logs
         if: ${{ failure() }}

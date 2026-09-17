@@ -176,6 +176,33 @@ Work through the scenarios in order — they are sorted by what a failure costs.
 
 ---
 
+## The GUI tests
+
+`tests/gui/run.mjs` starts the real app, drives it through its UI over the Chrome DevTools
+protocol, and checks what it does. That covers the flows the other tests cannot reach: grid
+display and saving, Compare, the export and import dialogs, foreign key lookups and quick
+filters, a script's results, and the update notice. It runs both editions:
+
+```powershell
+$env:NOBS_TEST_DSN = '127.0.0.1:3306:root:yourpassword'
+node tests/gui/run.mjs --app desktop --target src-tauri/target/debug/nobs-sql-editor.exe
+node tests/gui/run.mjs --app ps --target ..\NOBS-SQL-PS\NOBSSQL.ps1     # headless Edge
+```
+
+- **What it needs:** Node 22 or later.
+- **Scenarios:** they are in `tests/gui/scenarios` and run in name order, since later ones use
+  what earlier ones created. `--only <text>` runs a subset.
+- **Output:** each scenario reports its own checks, and any error message the app shows counts
+  as a failure.
+- **What it changes:** the scenarios create and drop their own `nobs_gui*` databases and remove
+  the connection profiles they save.
+  - The PowerShell edition gets a temporary browser profile.
+  - The desktop app keeps its own, so each scenario closes the tabs it opened.
+- **Server time zone:** a check that needs the hour when the clocks go back is skipped on a
+  server whose time zone has none (UTC, as in CI).
+- **CI:** the `live` job runs these after the live tests, against MariaDB and MySQL. The
+  NOBS-SQL-PS repository runs the same scenarios from here against its own script.
+
 ## 1. Read-only / safe mode
 
 The guarantee people rely on before pointing this at production. Connect with
