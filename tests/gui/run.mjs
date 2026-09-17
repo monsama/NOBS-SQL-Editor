@@ -80,7 +80,7 @@ async function connectPage() {
   }
   // What is running, and what the screen shows, before the app is stopped.
   const ps = spawnSync('powershell', ['-NoProfile', '-Command',
-    "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'nobs|webview|msedge' } | ForEach-Object { '{0} {1} {2}' -f $_.Name, $_.ProcessId, ([string]$_.CommandLine).Substring(0, [Math]::Min(300, ([string]$_.CommandLine).Length)) }" +
+    "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'nobs|webview|msedge' } | ForEach-Object { '{0} {1} {2}' -f $_.Name, $_.ProcessId, $(if ($_.CommandLine -match '--embedded-browser-webview' -and $_.CommandLine -notmatch '--type=') { $_.CommandLine } else { ([string]$_.CommandLine).Substring(0, [Math]::Min(120, ([string]$_.CommandLine).Length)) }) }" +
     (process.env.NOBS_GUI_SCREENSHOT ? "; Add-Type -AssemblyName System.Windows.Forms, System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $m=New-Object System.Drawing.Bitmap $b.Width,$b.Height; [System.Drawing.Graphics]::FromImage($m).CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $m.Save($env:NOBS_GUI_SCREENSHOT)" : '')],
     { encoding: 'utf8' });
   appOutput += '\n  processes:\n' + (ps.stdout || '') + (ps.stderr || '');
