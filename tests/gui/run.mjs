@@ -78,6 +78,12 @@ async function connectPage() {
     } catch { /* not up yet */ }
     await sleep(100);
   }
+  // What is running, and what the screen shows, before the app is stopped.
+  const ps = spawnSync('powershell', ['-NoProfile', '-Command',
+    "Get-CimInstance Win32_Process | Where-Object { $_.Name -match 'nobs|webview|msedge' } | ForEach-Object { '{0} {1} {2}' -f $_.Name, $_.ProcessId, ([string]$_.CommandLine).Substring(0, [Math]::Min(300, ([string]$_.CommandLine).Length)) }" +
+    (process.env.NOBS_GUI_SCREENSHOT ? "; Add-Type -AssemblyName System.Windows.Forms, System.Drawing; $b=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $m=New-Object System.Drawing.Bitmap $b.Width,$b.Height; [System.Drawing.Graphics]::FromImage($m).CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); $m.Save($env:NOBS_GUI_SCREENSHOT)" : '')],
+    { encoding: 'utf8' });
+  appOutput += '\n  processes:\n' + (ps.stdout || '') + (ps.stderr || '');
   let listed = 'nothing answers on that port';
   try { listed = JSON.stringify(await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()); } catch { /* keep the note */ }
   throw new Error(`no page to drive on port ${cdpPort} (${listed})` + (appOutput ? `

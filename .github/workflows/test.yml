@@ -129,6 +129,7 @@ jobs:
         shell: pwsh
         run: |
           $env:NOBS_TEST_DSN = $env:NOBS_CI_MARIADB_DSN
+          $env:NOBS_GUI_SCREENSHOT = Join-Path $env:RUNNER_TEMP 'screen.png'
           node tests/gui/run.mjs --app desktop --target src-tauri/target/debug/nobs-sql-editor.exe
 
       - name: GUI tests against MySQL
@@ -136,6 +137,7 @@ jobs:
         shell: pwsh
         run: |
           $env:NOBS_TEST_DSN = $env:NOBS_CI_MYSQL_DSN
+          $env:NOBS_GUI_SCREENSHOT = Join-Path $env:RUNNER_TEMP 'screen.png'
           node tests/gui/run.mjs --app desktop --target src-tauri/target/debug/nobs-sql-editor.exe
 
       - name: GUI diagnostics
@@ -148,14 +150,14 @@ jobs:
           $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
           $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
           [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
-          $bmp.Save((Join-Path $env:RUNNER_TEMP 'screen.png'))
+          $bmp.Save((Join-Path $env:RUNNER_TEMP 'screen-after.png'))
 
       - name: Screen at failure
         if: ${{ failure() }}
         uses: actions/upload-artifact@v7
         with:
           name: gui-screen
-          path: ${{ runner.temp }}/screen.png
+          path: ${{ runner.temp }}/screen*.png
 
       - name: Server logs
         if: ${{ failure() }}
