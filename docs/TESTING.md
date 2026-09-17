@@ -208,6 +208,22 @@ node tests/gui/run.mjs --app ps --target ..\NOBS-SQL-PS\NOBSSQL.ps1     # headle
 - **CI:** the `live` job runs these after the live tests, against MariaDB and MySQL. The
   NOBS-SQL-PS repository runs the same scenarios from here against its own script.
 
+### Upgrading from the previous release
+
+`.github/workflows/upgrade.yml` runs on GitHub Actions when a release is published, and by hand
+for any two releases (Actions -> upgrade -> Run workflow). For the setup.exe and for the MSI:
+
+1. It installs the previous release and saves data with it: a connection with its password, a
+   library query, a setting, a browser value and a file in the tools folder. It also checks that
+   the old version offers the new one.
+2. It installs the new release over it, and checks that only one copy is installed.
+3. It checks that all the data is still there and that the saved password still connects.
+4. It follows the README's uninstall steps: "Clear all app data" must remove the password from
+   Credential Manager, and uninstalling must remove the app but leave the data folder.
+
+`tests/upgrade/upgrade.mjs` drives the installed app with its real data folders, so it refuses to
+run anywhere but GitHub Actions.
+
 ## 1. Read-only / safe mode
 
 The guarantee people rely on before pointing this at production. Connect with

@@ -1,0 +1,29 @@
+# Weekly pull requests for outdated dependencies. Minor and patch updates come together, one pull
+# request per ecosystem; a major update comes on its own, since it can change behavior. Every pull
+# request runs the full test workflow, live and GUI tests included, before it is merged.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor:
+        update-types: [minor, patch]

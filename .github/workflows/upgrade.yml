@@ -1,0 +1,140 @@
+name: upgrade
+
+# Installs the previous release, saves a connection, a password, a library query and settings with
+# it, installs the new release over it and checks that all of it survived - for the setup.exe and
+# for the MSI. Then checks the README's uninstall steps: "Clear all app data" removes the saved
+# password, and uninstalling leaves the data folders the README names.
+#
+# Runs when a release is published, and by hand for any two releases (Actions -> upgrade -> Run
+# workflow). It works on the runner's own app data, so it never runs on a developer's machine.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      from:
+        description: 'Release to upgrade from (e.g. v1.3.2). Empty: the one before "to".'
+        required: false
+      to:
+        description: 'Release to upgrade to (e.g. v1.3.3). Empty: the latest.'
+        required: false
+
+jobs:
+  upgrade:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        installer: [setup.exe, msi]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      INPUT_FROM: ${{ inputs.from }}
+      INPUT_TO: ${{ inputs.to || github.event.release.tag_name }}
+      PATTERN: ${{ matrix.installer == 'msi' && '*.msi' || '*-setup.exe' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Pick the two releases
+        shell: pwsh
+        run: |
+          $tags = @(gh release list -R $env:GITHUB_REPOSITORY --exclude-drafts --exclude-pre-releases --limit 50 --json tagName,publishedAt |
+            ConvertFrom-Json | Sort-Object { [datetime]$_.publishedAt } -Descending | ForEach-Object tagName)
+          $to = if ($env:INPUT_TO) { $env:INPUT_TO } else { $tags[0] }
+          $at = [array]::IndexOf($tags, $to)
+          $from = if ($env:INPUT_FROM) { $env:INPUT_FROM } elseif ($at -ge 0 -and $at + 1 -lt $tags.Count) { $tags[$at + 1] } else { '' }
+          if (-not $from -or -not $to) { throw "Could not tell which releases to use (from '$from', to '$to')." }
+          "Upgrading from $from to $to"
+          "FROM_TAG=$from", "TO_TAG=$to", "FROM_VERSION=$($from.TrimStart('v'))", "TO_VERSION=$($to.TrimStart('v'))" | Add-Content $env:GITHUB_ENV
+
+      - name: Download both installers
+        shell: pwsh
+        run: |
+          gh release download $env:FROM_TAG -R $env:GITHUB_REPOSITORY -p $env:PATTERN -D "$env:RUNNER_TEMP\from"
+          gh release download $env:TO_TAG -R $env:GITHUB_REPOSITORY -p $env:PATTERN -D "$env:RUNNER_TEMP\to"
+          Get-ChildItem "$env:RUNNER_TEMP\from", "$env:RUNNER_TEMP\to" | ForEach-Object FullName
+
+      - name: Cache server downloads
+        uses: actions/cache@v6
+        with:
+          path: C:\nobs-ci\cache
+          key: nobs-ci-servers-${{ hashFiles('tests/ci/start-test-servers.ps1') }}
+
+      - name: Start MariaDB and MySQL
+        shell: pwsh
+        run: ./tests/ci/start-test-servers.ps1
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: Install the old release
+        shell: pwsh
+        run: |
+          $file = (Get-ChildItem "$env:RUNNER_TEMP\from" | Select-Object -First 1).FullName
+          $out = @(./tests/upgrade/installer.ps1 -Action install -File $file)
+          $out
+          if ($out.Count -ne 1 -or $out[0] -notlike "$env:FROM_VERSION *") { throw "expected one copy of $env:FROM_VERSION" }
+          "APP_EXE=$($out[0].Substring($out[0].IndexOf(' ') + 1))" | Add-Content $env:GITHUB_ENV
+
+      - name: Save data with the old release
+        shell: pwsh
+        run: |
+          $env:NOBS_TEST_DSN = $env:NOBS_CI_MARIADB_DSN
+          node tests/upgrade/upgrade.mjs --phase before --exe $env:APP_EXE --version $env:FROM_VERSION --latest $env:TO_VERSION
+          if ($LASTEXITCODE) { exit 1 }
+          # Stands in for client tools downloaded in Settings.
+          New-Item -ItemType Directory -Force "$env:APPDATA\NOBSSQL-Desktop\bin" | Out-Null
+          Set-Content "$env:APPDATA\NOBSSQL-Desktop\bin\upgrade-marker.txt" 'kept'
+
+      - name: Install the new release over it
+        shell: pwsh
+        run: |
+          $file = (Get-ChildItem "$env:RUNNER_TEMP\to" | Select-Object -First 1).FullName
+          $out = @(./tests/upgrade/installer.ps1 -Action install -File $file)
+          $out
+          # One entry under Settings -> Apps, not the old one next to the new one.
+          if ($out.Count -ne 1 -or $out[0] -notlike "$env:TO_VERSION *") { throw "expected only $env:TO_VERSION installed" }
+          "APP_EXE=$($out[0].Substring($out[0].IndexOf(' ') + 1))" | Add-Content $env:GITHUB_ENV
+
+      - name: Check the data with the new release
+        shell: pwsh
+        run: |
+          $env:NOBS_TEST_DSN = $env:NOBS_CI_MARIADB_DSN
+          node tests/upgrade/upgrade.mjs --phase after --exe $env:APP_EXE --version $env:TO_VERSION
+          if ($LASTEXITCODE) { exit 1 }
+          if ((Get-Content "$env:APPDATA\NOBSSQL-Desktop\bin\upgrade-marker.txt") -ne 'kept') { throw 'the downloaded tools folder was not kept' }
+          '  ok    the downloaded tools folder is still there'
+
+      - name: Clear all app data, as the README's uninstall steps say
+        shell: pwsh
+        run: |
+          $saved = { @(cmdkey /list | Select-String 'upgrade-test\.NOBSSQL-Desktop').Count }
+          if ((& $saved) -eq 0) { throw 'the saved password is not in Credential Manager under the name the README gives' }
+          '  ok    the password is in Credential Manager as upgrade-test.NOBSSQL-Desktop'
+          $env:NOBS_TEST_DSN = $env:NOBS_CI_MARIADB_DSN
+          node tests/upgrade/upgrade.mjs --phase clear --exe $env:APP_EXE
+          if ($LASTEXITCODE) { exit 1 }
+          if ((& $saved) -ne 0) { throw 'Clear all app data left the password in Credential Manager' }
+          '  ok    and Clear all app data removed it'
+
+      - name: Uninstall
+        shell: pwsh
+        run: |
+          $exe = $env:APP_EXE
+          $out = @(./tests/upgrade/installer.ps1 -Action uninstall)
+          $out
+          if ($out.Count) { throw 'still installed' }
+          if (Test-Path -LiteralPath $exe) { throw "$exe is still there" }
+          '  ok    the app is gone from Settings -> Apps and from disk'
+          # What the README says stays behind for the user to delete.
+          foreach ($d in "$env:APPDATA\NOBSSQL-Desktop", "$env:LOCALAPPDATA\ch.monsama.nobssqleditor") {
+            "  $(if (Test-Path $d) { 'left ' } else { 'gone ' }) $d"
+          }
+          if (-not (Test-Path "$env:APPDATA\NOBSSQL-Desktop\bin\upgrade-marker.txt")) { throw 'the README says the app data folder stays, but it was removed' }
+
+      - name: Installer log
+        if: ${{ failure() && matrix.installer == 'msi' }}
+        shell: pwsh
+        run: Get-ChildItem "$env:RUNNER_TEMP\msi-*.log" | ForEach-Object { "== $($_.Name)"; Get-Content $_ -Tail 80 }
