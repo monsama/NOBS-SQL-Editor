@@ -32,6 +32,7 @@ const [dbHost, dbPort, dbUser, dbPass] = dsn;
 const tmp = mkdtempSync(join(tmpdir(), 'nobs-gui-'));
 const cdpPort = 9300 + Math.floor(Math.random() * 500);
 const children = [];
+const cleanups = [];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const killTree = p => { if (p && p.pid) spawnSync('taskkill', ['/PID', String(p.pid), '/T', '/F'], { stdio: 'ignore' }); };
 
@@ -46,6 +47,14 @@ async function startApp() {
     // The app allows one instance: a second one hands over to the first and exits.
     const running = spawnSync('tasklist', ['/FI', 'IMAGENAME eq nobs-sql-editor.exe', '/NH'], { encoding: 'utf8' }).stdout || '';
     if (/nobs-sql-editor.exe/i.test(running)) throw new Error('NOBS SQL Editor is already running - close it first, the test starts its own');
+    // WebView2 ignores that environment variable in an elevated process, which is how CI runs;
+    // its per-app policy does the same job there. Only on CI: left behind on a workstation, it
+    // would open the debugging port every time the app starts.
+    if (process.env.CI) {
+      const key = 'HKCU\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments';
+      spawnSync('reg', ['add', key, '/v', 'nobs-sql-editor.exe', '/t', 'REG_SZ', '/d', `--remote-debugging-port=${cdpPort}`, '/f'], { stdio: 'ignore' });
+      cleanups.push(() => spawnSync('reg', ['delete', key, '/v', 'nobs-sql-editor.exe', '/f'], { stdio: 'ignore' }));
+    }
     const p = spawn(target, [], { env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}` }, stdio: ['ignore', 'pipe', 'pipe'] });
     p.stdout.on('data', d => { appOutput += d; });
     p.stderr.on('data', d => { appOutput += d; });
@@ -155,6 +164,7 @@ try {
   failed++; console.log(`  FAIL  ${e.message}`);
 } finally {
   children.reverse().forEach(killTree);
+  cleanups.forEach(f => f());
   await sleep(500);
   try { rmSync(tmp, { recursive: true, force: true }); } catch { /* a browser may still hold a file */ }
 }
