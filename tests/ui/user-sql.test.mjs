@@ -431,7 +431,8 @@ test('row values are written for their column type, and CR survives a script', (
   assert.equal(L.litAs('NULL', false), "'NULL'");
   assert.equal(L.litAs('0x41', null), '0x41', 'with the type unknown it is lit(), as before');
   const apply = extractFunction(html, 'applyChanges');
-  assert.match(apply, /litAs\(t\.rows\[ri\]/, 'applyChanges writes row keys by column type');
+  assert.match(apply, /keyWhere\(t,ri,bc,kt\)/, 'applyChanges finds rows through keyWhere');
+  assert.match(extractFunction(html, 'keyWhere'), /litAs\(v,bc\?bc\[ci\]:null\)/, 'which writes row keys by column type');
   assert.match(apply, /return litAs\(v,bc\?bc\[ci\]:null\)/, 'changed cells go through litAs');
   for (const f of ['insGrid', 'insSel', 'exportFull']) {
     assert.ok(extractFunction(html, f).includes('litAs('), f + ' writes rows by column type');

@@ -30,6 +30,26 @@ Run anyway** to continue. See [CODE_SIGNING.md](CODE_SIGNING.md) for the plan.
   CSV import, and a reusable query library (with export/import).
 - Data export / import via the MySQL/MariaDB command-line tools.
 
+## Keeping data exact
+
+- **Saving grid edits:** each change is checked, inside the same transaction, to match exactly
+  one row. Otherwise nothing is saved. This catches a row changed or deleted since it was loaded,
+  and a TIMESTAMP key in the hour the clocks go back (it shows the same as its neighbour). FLOAT
+  keys are shown rounded, so they are matched by their text.
+- **Grid edits go to the database the query ran in**, including after a leading `USE`.
+- **Compare runs both connections in UTC.** TIMESTAMP values therefore copy correctly between
+  servers in different time zones, and Compare shows them in UTC.
+- **Copies name their columns** (Compare, Duplicate table, INSERT exports). Invisible columns are
+  included; generated columns are left out, since the server computes them. CSV exports include
+  every column, and the CSV import skips generated ones.
+- **INSERT exports skip rows whose key already exists** (`ON DUPLICATE KEY UPDATE`). They used
+  `INSERT IGNORE`, which also cuts a value that does not fit instead of failing.
+- **The CSV import is strict.** Header names match the table's columns ignoring case. A column
+  the table does not have, or a row with more or fewer fields than the header, imports nothing.
+  Foreign key and unique checks stay on, and the whole file is one transaction.
+- **Schema sync writes each column as the source server defines it**, including its character
+  set, collation, comment and generated expression.
+
 ## SSL / TLS
 
 Each connection has an SSL mode, and optionally a CA certificate (a `.pem` file) that the two

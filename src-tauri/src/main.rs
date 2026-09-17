@@ -257,6 +257,7 @@ fn build_conn(connj: &Value) -> Result<Conn, String> {
         .tcp_connect_timeout(Some(std::time::Duration::from_secs(10)));
     let ca = connj["sslCa"].as_str().filter(|s| !s.is_empty());
     ob = ob.ssl_opts(ssl_opts_for(ssl, ca));
+    if connj["utc"].as_bool().unwrap_or(false) { ob = ob.init(vec!["SET time_zone='+00:00'"]); }
     Conn::new(Opts::from(ob)).map_err(|e| explain_conn_error(ssl, ca.is_some(), &e.to_string()))
 }
 
@@ -2335,7 +2336,7 @@ async fn importcsv(req: Value) -> R {
         let db = req["db"].as_str().unwrap_or("").to_string();
         let table = req["table"].as_str().unwrap_or("").to_string();
         let mut c = build_conn(&req["conn"])?;
-        let colsql = format!("SELECT COLUMN_NAME,DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION", sql_str_lit(&db), sql_str_lit(&table));
+        let colsql = format!("SELECT COLUMN_NAME,DATA_TYPE,EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION", sql_str_lit(&db), sql_str_lit(&table));
         let (_c, crows) = run_select(&mut c, &colsql)?;
         // sql_lit()'s "0xDEADBEEF passes through unquoted as a hex literal" rule exists so a
         // genuinely binary/BIT column can be filled from its own hex display - it was never meant
@@ -2351,6 +2352,9 @@ async fn importcsv(req: Value) -> R {
                 BIN_TYPES.contains(&ty.as_str())
             })
             .filter_map(|r| r.first().cloned().flatten()).collect();
+        let generated: Vec<String> = crows.iter()
+            .filter(|r| is_generated_extra(r.get(2).and_then(|v| v.as_deref()).unwrap_or("")))
+            .filter_map(|r| r.first().cloned().flatten()).collect();
         let table_cols: Vec<String> = crows.into_iter().filter_map(|r| r.into_iter().next().flatten()).collect();
         if table_cols.is_empty() { return Ok(json!({"ok":false,"error":"Table not found or has no columns."})); }
 
@@ -2361,9 +2365,19 @@ async fn importcsv(req: Value) -> R {
             rdr.headers().map_err(|e| e.to_string())?.iter().map(String::from).collect()
         } else { table_cols.clone() };
         let null_marker = req["nullValue"].as_str().unwrap_or("\\N").to_string();
-        let use_idx: Vec<usize> = csv_cols.iter().enumerate().filter(|(_, n)| table_cols.contains(n)).map(|(i, _)| i).collect();
-        if use_idx.is_empty() { return Ok(json!({"ok":false,"error":"No CSV columns match the table columns (check the header row)."})); }
-        let use_cols: Vec<String> = use_idx.iter().map(|&i| csv_cols[i].clone()).collect();
+        // A header is matched to the table's columns ignoring case, as MySQL does. A column the
+        // table does not have used to be skipped without a word - a typo in the header row left
+        // that column's data out of every row imported.
+        let matched: Vec<String> = match csv_import_columns(&csv_cols, &table_cols) {
+            Ok(c) => c,
+            Err(e) => return Ok(json!({"ok":false,"error":e})),
+        };
+        // A generated column cannot be given a value - the server computes it - so the CSV's copy
+        // of it (this app's own CSV export includes them) is left out.
+        let use_idx: Vec<usize> = (0..matched.len()).filter(|&i| !generated.contains(&matched[i])).collect();
+        let skipped: Vec<String> = matched.iter().filter(|c| generated.contains(c)).cloned().collect();
+        let use_cols: Vec<String> = use_idx.iter().map(|&i| matched[i].clone()).collect();
+        if use_cols.is_empty() { return Ok(json!({"ok":false,"error":"The CSV has no column that can be written."})); }
         let col_list = use_cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
         let obj = format!("{}.{}", sql_id(&db), sql_id(&table));
 
@@ -2383,10 +2397,19 @@ async fn importcsv(req: Value) -> R {
             if req["truncate"].as_bool().unwrap_or(false) {
                 c.query_drop(format!("DELETE FROM {}", obj)).map_err(|e| e.to_string())?;
             }
-            let _ = c.query_drop("SET FOREIGN_KEY_CHECKS=0; SET UNIQUE_CHECKS=0");
+            // Foreign key and unique checks stay on. They were switched off here, which let a CSV
+            // row point at a parent that does not exist - stored without an error.
             let mut n = 0usize; let mut batch: Vec<String> = Vec::new();
             for rec in rdr.records() {
                 let rec = rec.map_err(|e| e.to_string())?;
+                // A row with more or fewer fields than the header is a broken file (a stray
+                // separator, an unquoted line break), not a row with empty values. Missing fields
+                // used to become NULL and extra ones were dropped.
+                if rec.len() != csv_cols.len() {
+                    let line = rec.position().map(|p| p.line()).unwrap_or(0);
+                    return Err(format!("Line {} has {} field(s), but the {} has {}. Nothing was imported.",
+                        line, rec.len(), if has_header { "header" } else { "table" }, csv_cols.len()));
+                }
                 let vals: Vec<String> = use_idx.iter().enumerate().map(|(ci, &i)| {
                     // The marker decides what an empty cell means. With one set (the default, \N)
                     // the file states NULL explicitly, so an empty cell is an empty string and a
@@ -2409,12 +2432,12 @@ async fn importcsv(req: Value) -> R {
                 }).collect();
                 batch.push(format!("({})", vals.join(","))); n += 1;
                 if batch.len() >= 500 {
-                    c.query_drop(format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, batch.join(","))).map_err(|e| e.to_string())?;
+                    c.query_drop(format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, batch.join(","))).map_err(db_err)?;
                     batch.clear();
                 }
             }
             if !batch.is_empty() {
-                c.query_drop(format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, batch.join(","))).map_err(|e| e.to_string())?;
+                c.query_drop(format!("INSERT INTO {} ({}) VALUES {}", obj, col_list, batch.join(","))).map_err(db_err)?;
             }
             Ok(n)
         })();
@@ -2426,8 +2449,27 @@ async fn importcsv(req: Value) -> R {
             let _ = c.query_drop("ROLLBACK");
             return Ok(json!({"ok":false,"error":format!("Could not commit: {}\n\nNo rows were imported.", e.to_string())}));
         }
-        Ok(json!({"ok":true,"message":format!("Imported {} row(s) into {}.{} (columns: {})", n, db, table, use_cols.join(", "))}))
+        let note = if skipped.is_empty() { String::new() } else { format!("; generated, so computed by the server: {}", skipped.join(", ")) };
+        Ok(json!({"ok":true,"message":format!("Imported {} row(s) into {}.{} (columns: {}{})", n, db, table, use_cols.join(", "), note)}))
     }).await.map_err(|e| e.to_string())?
+}
+
+// The table column each CSV column goes into, in CSV order, matched ignoring case. Any CSV column
+// the table does not have is an error naming it, as is a column given twice.
+fn csv_import_columns(csv_cols: &[String], table_cols: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+    for h in csv_cols {
+        match table_cols.iter().find(|t| t.eq_ignore_ascii_case(h.trim())) {
+            Some(t) if out.iter().any(|o| o.eq_ignore_ascii_case(t)) => return Err(format!("The CSV has the column {} twice. Nothing was imported.", t)),
+            Some(t) => out.push(t.clone()),
+            None => unknown.push(if h.is_empty() { "(empty)".to_string() } else { h.clone() }),
+        }
+    }
+    if !unknown.is_empty() {
+        return Err(format!("The table has no column named {}. Nothing was imported - rename the CSV column(s) or remove them.", unknown.join(", ")));
+    }
+    Ok(out)
 }
 
 // ---------- connection profiles (config file + OS keychain) ----------
@@ -2546,20 +2588,26 @@ async fn conn_clear(_req: Value) -> R {
 // so both apps generate the same diffs and the same SQL for the same two databases.
 
 #[derive(Clone)]
-struct ColumnDef { name: String, ctype: String, nullable: String, default: Option<String>, extra: String }
+struct ColumnDef { name: String, ctype: String, nullable: String, default: Option<String>, extra: String,
+                   charset: Option<String>, collation: Option<String>, comment: String, generation: String }
 
 // Looks up a saved connection by name and returns (connection JSON usable with build_conn, readonly).
 fn resolve_saved_conn(name: &str) -> Result<(Value, bool), String> {
     let c = load_profiles().into_iter().find(|c| c["name"].as_str() == Some(name))
         .ok_or_else(|| "Connection not found.".to_string())?;
     let pass = keyring::Entry::new("NOBSSQL-Desktop", name).ok().and_then(|e| e.get_password().ok()).unwrap_or_default();
-    let connj = json!({"host":c["host"],"port":c["port"],"user":c["user"],"ssl":c["ssl"],"sslCa":c["sslCa"],"password":pass});
+    // Saved connections are what Compare uses, and Compare reads TIMESTAMP values as text on one
+    // server and writes that text on the other. Each server reads it in its own session time zone,
+    // so between servers in different zones every copied TIMESTAMP moved by the difference (Zurich
+    // to UTC: 12:00 UTC arrived as 14:00 UTC), and equal values showed as different. UTC on both
+    // sides makes the text mean the same instant everywhere.
+    let connj = json!({"host":c["host"],"port":c["port"],"user":c["user"],"ssl":c["ssl"],"sslCa":c["sslCa"],"password":pass,"utc":true});
     Ok((connj, c["readonly"].as_bool().unwrap_or(false)))
 }
 
 fn get_schema_columns(conn: &mut Conn, db: &str) -> Result<std::collections::BTreeMap<String, Vec<ColumnDef>>, String> {
     let sql = format!(
-        "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} ORDER BY TABLE_NAME,ORDINAL_POSITION",
+        "SELECT TABLE_NAME,COLUMN_NAME,COLUMN_TYPE,IS_NULLABLE,COLUMN_DEFAULT,EXTRA,CHARACTER_SET_NAME,COLLATION_NAME,COLUMN_COMMENT,GENERATION_EXPRESSION FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} ORDER BY TABLE_NAME,ORDINAL_POSITION",
         sql_lit(db)
     );
     let (_cols, rows) = run_select(conn, &sql)?;
@@ -2572,6 +2620,10 @@ fn get_schema_columns(conn: &mut Conn, db: &str) -> Result<std::collections::BTr
             nullable: r.get(3).cloned().flatten().unwrap_or_default(),
             default: r.get(4).cloned().flatten(),
             extra: r.get(5).cloned().flatten().unwrap_or_default(),
+            charset: r.get(6).cloned().flatten(),
+            collation: r.get(7).cloned().flatten(),
+            comment: r.get(8).cloned().flatten().unwrap_or_default(),
+            generation: r.get(9).cloned().flatten().unwrap_or_default(),
         };
         map.entry(t).or_default().push(cd);
     }
@@ -2594,6 +2646,44 @@ fn col_default_clause(default: &Option<String>) -> String {
             if is_numeric || is_keyword { format!(" DEFAULT {}", d) } else { format!(" DEFAULT {}", sql_lit(d)) }
         }
     }
+}
+// Each column's definition as the server writes it in SHOW CREATE TABLE, keyed by lower-cased name.
+// Schema sync used to rebuild a column from its type, NULL, default and EXTRA alone, so MODIFY
+// COLUMN turned a latin1_bin column into the table's default character set and collation (case-
+// insensitive utf8mb4), dropped its comment, and could not write a generated column at all.
+fn column_definitions(create: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for line in create.lines() {
+        let l = line.trim();
+        if !l.starts_with('`') { continue; }
+        let mut name = String::new();
+        let mut chars = l[1..].chars().peekable();
+        let mut closed = false;
+        while let Some(ch) = chars.next() {
+            if ch == '`' {
+                if chars.peek() == Some(&'`') { chars.next(); name.push('`'); continue; }
+                closed = true; break;
+            }
+            name.push(ch);
+        }
+        if closed { out.insert(name.to_lowercase(), l.trim_end_matches(',').to_string()); }
+    }
+    out
+}
+// The definition to write for col: the server's own line, with the character set and collation
+// spelled out when the line leaves them to the table default - which on the target may differ.
+fn col_definition(col: &ColumnDef, defs: &std::collections::HashMap<String, String>) -> String {
+    let Some(def) = defs.get(&col.name.to_lowercase()) else { return col_def_line(col) };
+    let upper = def.to_uppercase();
+    if let (Some(cs), Some(co)) = (&col.charset, &col.collation) {
+        if !upper.contains(" CHARACTER SET ") && !upper.contains(" COLLATE ") {
+            let head = format!("{} {}", sql_id(&col.name), col.ctype);
+            if def.len() >= head.len() && def[..head.len()].eq_ignore_ascii_case(&head) {
+                return format!("{} CHARACTER SET {} COLLATE {}{}", head, cs, co, &def[head.len()..]);
+            }
+        }
+    }
+    def.clone()
 }
 fn col_def_line(col: &ColumnDef) -> String {
     let null_part = if col.nullable == "YES" { "NULL" } else { "NOT NULL" };
@@ -2630,15 +2720,21 @@ fn compare_table_sets(
             continue;
         }
         let s_cols = &src_cols[t]; let t_cols = &tgt_cols[t];
+        let mut defs: Option<std::collections::HashMap<String, String>> = None;
+        let mut def_of = |c: &ColumnDef, conn: &mut Conn| -> String {
+            let d = defs.get_or_insert_with(|| get_create_table_sql(conn, src_db, t).map(|s| column_definitions(&s)).unwrap_or_default());
+            col_definition(c, d)
+        };
         let t_by_name: std::collections::HashMap<&str, &ColumnDef> = t_cols.iter().map(|c| (c.name.as_str(), c)).collect();
         let s_by_name: std::collections::HashMap<&str, &ColumnDef> = s_cols.iter().map(|c| (c.name.as_str(), c)).collect();
         let mut diffs = Vec::new();
         for c in s_cols {
             match t_by_name.get(c.name.as_str()) {
-                None => diffs.push(SqlStmt { stmt: format!("ALTER TABLE {} ADD COLUMN {};", sql_id(t), col_def_line(c)), checked: true, kind: "add_column" }),
+                None => diffs.push(SqlStmt { stmt: format!("ALTER TABLE {} ADD COLUMN {};", sql_id(t), def_of(c, &mut *src_conn)), checked: true, kind: "add_column" }),
                 Some(tc) => {
-                    if c.ctype != tc.ctype || c.nullable != tc.nullable || c.default != tc.default {
-                        diffs.push(SqlStmt { stmt: format!("ALTER TABLE {} MODIFY COLUMN {};", sql_id(t), col_def_line(c)), checked: true, kind: "modify_column" });
+                    if c.ctype != tc.ctype || c.nullable != tc.nullable || c.default != tc.default
+                        || c.collation != tc.collation || c.comment != tc.comment || c.generation != tc.generation {
+                        diffs.push(SqlStmt { stmt: format!("ALTER TABLE {} MODIFY COLUMN {};", sql_id(t), def_of(c, &mut *src_conn)), checked: true, kind: "modify_column" });
                     }
                 }
             }
@@ -2675,16 +2771,66 @@ fn get_table_fk_cols(conn: &mut Conn, db: &str, table: &str) -> Result<Vec<Strin
 // The columns of a table whose values this app shows as 0x.. hex (see is_binaryish): binary
 // strings, BIT and the spatial types. Lowercased, since MySQL column names ignore case.
 fn binary_column_set(conn: &mut Conn, db: &str, table: &str) -> Result<std::collections::HashSet<String>, String> {
-    const TYPES: &[&str] = &["binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob", "bit",
+    column_set_of(conn, db, table, &["binary", "varbinary", "tinyblob", "blob", "mediumblob", "longblob", "bit",
         "geometry", "point", "linestring", "polygon", "multipoint", "multilinestring", "multipolygon",
-        "geometrycollection", "geomcollection"];
+        "geometrycollection", "geomcollection"])
+}
+// A FLOAT is read as rounded text (1.1 is stored as 1.10000002384), and that text compared to the
+// column matches nothing - so rows keyed by one could not be fetched or updated by their key. Such
+// key columns are compared as text instead (see key_col).
+fn float_column_set(conn: &mut Conn, db: &str, table: &str) -> Result<std::collections::HashSet<String>, String> {
+    column_set_of(conn, db, table, &["float"])
+}
+fn key_col(col: &str, float: &std::collections::HashSet<String>) -> String {
+    if float.contains(&col.to_lowercase()) { format!("CAST({} AS CHAR)", sql_id(col)) } else { sql_id(col) }
+}
+// The columns of db.table in order, each with whether it is generated. Copies name their columns
+// from this rather than using SELECT *: SELECT * leaves out INVISIBLE columns (MySQL 8.0.23+,
+// MariaDB 10.3+), so a copy made from it stored NULL in them, and a generated column cannot be
+// given a value, so a copy that included one was refused.
+fn table_columns(conn: &mut Conn, db: &str, table: &str) -> Result<Vec<(String, bool)>, String> {
+    let (_c, rows) = run_select(conn, &format!(
+        "SELECT COLUMN_NAME, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION",
+        sql_str_lit(db), sql_str_lit(table)))?;
+    if rows.is_empty() { return Err(format!("Could not read the columns of {}.{}.", db, table)); }
+    Ok(rows.into_iter().map(|r| {
+        let name = r.first().cloned().flatten().unwrap_or_default();
+        let extra = r.get(1).cloned().flatten().unwrap_or_default().to_uppercase();
+        (name, is_generated_extra(&extra))
+    }).collect())
+}
+// EXTRA for a generated column: VIRTUAL/STORED GENERATED on both servers, PERSISTENT GENERATED on
+// older MariaDB. MySQL's DEFAULT_GENERATED only marks an expression default.
+fn is_generated_extra(extra: &str) -> bool {
+    let e = extra.to_uppercase();
+    e.contains("VIRTUAL GENERATED") || e.contains("STORED GENERATED") || e.contains("PERSISTENT GENERATED")
+}
+// The columns a copy of db.table reads: all but the generated ones, invisible ones included - plus
+// any generated column in keep (a key column), without which rows could not be told apart.
+fn copy_columns(conn: &mut Conn, db: &str, table: &str, keep: &[String]) -> Result<Vec<String>, String> {
+    Ok(table_columns(conn, db, table)?.into_iter()
+        .filter(|(n, g)| !*g || keep.iter().any(|k| k.eq_ignore_ascii_case(n)))
+        .map(|(n, _)| n).collect())
+}
+fn select_list(cols: &[String]) -> String { cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",") }
+// An INSERT that skips a row whose key already exists, as INSERT IGNORE did - without IGNORE's
+// other effect: it turns errors into warnings, so a value too long for its column was cut short and
+// an impossible date stored as 0000-00-00, silently, when the file was run.
+fn insert_skip_existing(tbl: &str, cols: &[String], values: &str) -> String {
+    let first = cols.first().map(|c| sql_id(c)).unwrap_or_default();
+    format!("INSERT INTO {} ({}) VALUES {} ON DUPLICATE KEY UPDATE {}={};
+", tbl, select_list(cols), values, first, first)
+}
+
+// Lower-cased names of the columns of db.table whose DATA_TYPE is one of types.
+fn column_set_of(conn: &mut Conn, db: &str, table: &str, types: &[&str]) -> Result<std::collections::HashSet<String>, String> {
     let (_c, rows) = run_select(conn, &format!(
         "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} AND TABLE_NAME={}",
         sql_str_lit(db), sql_str_lit(table)))?;
     if rows.is_empty() { return Err(format!("Could not read the column types of {}.{}.", db, table)); }
     Ok(rows.iter().filter(|r| {
         let ty = r.get(1).cloned().flatten().unwrap_or_default().to_lowercase();
-        TYPES.contains(&ty.as_str())
+        types.contains(&ty.as_str())
     }).filter_map(|r| r.first().cloned().flatten().map(|n| n.to_lowercase())).collect())
 }
 // sql_val_lit guesses from the value's shape, which is wrong both ways for data being copied: a
@@ -2706,15 +2852,17 @@ fn json_val_for(v: &Value, binary: bool) -> String {
     }
 }
 // A WHERE clause matching a chunk of primary-key tuples, each value written for its column's type.
-fn pk_where(pk_cols: &[String], chunk: &[&Vec<Option<String>>], bin: &std::collections::HashSet<String>) -> String {
+fn pk_where(pk_cols: &[String], chunk: &[&Vec<Option<String>>], bin: &std::collections::HashSet<String>, float: &std::collections::HashSet<String>) -> String {
     let is_bin: Vec<bool> = pk_cols.iter().map(|c| bin.contains(&c.to_lowercase())).collect();
+    let is_float: Vec<bool> = pk_cols.iter().map(|c| float.contains(&c.to_lowercase())).collect();
     let tuple = |r: &Vec<Option<String>>| r.iter().enumerate()
-        .map(|(i, v)| sql_val_for(v.as_deref(), is_bin.get(i).copied().unwrap_or(false))).collect::<Vec<_>>();
+        .map(|(i, v)| if is_float.get(i).copied().unwrap_or(false) { v.as_deref().map(sql_str_lit).unwrap_or_else(|| "NULL".into()) }
+                      else { sql_val_for(v.as_deref(), is_bin.get(i).copied().unwrap_or(false)) }).collect::<Vec<_>>();
     if pk_cols.len() == 1 {
         let vals = chunk.iter().map(|r| tuple(r).into_iter().next().unwrap_or_else(|| "NULL".into())).collect::<Vec<_>>().join(",");
-        format!("{} IN ({})", sql_id(&pk_cols[0]), vals)
+        format!("{} IN ({})", key_col(&pk_cols[0], float), vals)
     } else {
-        let pk_list = pk_cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
+        let pk_list = pk_cols.iter().map(|c| key_col(c, float)).collect::<Vec<_>>().join(",");
         let tuples = chunk.iter().map(|r| format!("({})", tuple(r).join(","))).collect::<Vec<_>>().join(",");
         format!("({}) IN ({})", pk_list, tuples)
     }
@@ -2732,13 +2880,15 @@ fn row_key(row: &[Option<String>]) -> String {
 fn get_rows_by_pk(conn: &mut Conn, db: &str, table: &str, pk_cols: &[String], pk_values: &[Vec<Option<String>>]) -> Result<Table, String> {
     if pk_values.is_empty() { return Ok((Vec::new(), Vec::new())); }
     let bin = binary_column_set(conn, db, table)?;
+    let float = float_column_set(conn, db, table)?;
+    let copy = select_list(&copy_columns(conn, db, table, pk_cols)?);
     let fetch_chunk = 200;
     let mut full_cols: Vec<String> = Vec::new();
     let mut full_rows: Vec<Vec<Option<String>>> = Vec::new();
     for chunk in pk_values.chunks(fetch_chunk) {
         let refs: Vec<&Vec<Option<String>>> = chunk.iter().collect();
-        let where_clause = pk_where(pk_cols, &refs, &bin);
-        let (cols, rows) = run_select(conn, &format!("SELECT * FROM {}.{} WHERE {}", sql_id(db), sql_id(table), where_clause))?;
+        let where_clause = pk_where(pk_cols, &refs, &bin, &float);
+        let (cols, rows) = run_select(conn, &format!("SELECT {} FROM {}.{} WHERE {}", copy, sql_id(db), sql_id(table), where_clause))?;
         if full_cols.is_empty() { full_cols = cols; }
         full_rows.extend(rows);
     }
@@ -3019,19 +3169,22 @@ async fn compare_rows_diff(req: Value) -> R {
         }
         let fetch_chunk = 200;
         let bin = binary_column_set(&mut src_conn, &src_db, &table)?;
+        let float = float_column_set(&mut src_conn, &src_db, &table)?;
+        // The same columns, in the same order, on both sides - SELECT * compared them by position.
+        let copy = select_list(&copy_columns(&mut src_conn, &src_db, &table, &pk)?);
         let mut full_cols: Option<Vec<String>> = None;
         let mut src_full: std::collections::HashMap<String, Vec<Option<String>>> = std::collections::HashMap::new();
         let mut tgt_full: std::collections::HashMap<String, Vec<Option<String>>> = std::collections::HashMap::new();
         let mut cancelled = false;
         for chunk in use_common.chunks(fetch_chunk) {
             if let Some(r) = &rid { if is_compare_cancelled(r) { cancelled = true; break; } }
-            let where_clause = pk_where(&pk, chunk, &bin);
-            let (sc, sr) = run_select(&mut src_conn, &format!("SELECT * FROM {}.{} WHERE {}", sql_id(&src_db), sql_id(&table), where_clause))?;
+            let where_clause = pk_where(&pk, chunk, &bin, &float);
+            let (sc, sr) = run_select(&mut src_conn, &format!("SELECT {} FROM {}.{} WHERE {}", copy, sql_id(&src_db), sql_id(&table), where_clause))?;
             if full_cols.is_none() { full_cols = Some(sc); }
             let cols_ref = full_cols.as_ref().unwrap();
             let pk_idx: Vec<usize> = pk.iter().map(|c| cols_ref.iter().position(|x| x == c).unwrap_or(0)).collect();
             for row in sr { let k = pk_idx.iter().map(|&i| row[i].clone().unwrap_or_default()).collect::<Vec<_>>().join("\u{1}"); src_full.insert(k, row); }
-            let (_tc, tr) = run_select(&mut tgt_conn, &format!("SELECT * FROM {}.{} WHERE {}", sql_id(&tgt_db), sql_id(&table), where_clause))?;
+            let (_tc, tr) = run_select(&mut tgt_conn, &format!("SELECT {} FROM {}.{} WHERE {}", copy, sql_id(&tgt_db), sql_id(&table), where_clause))?;
             for row in tr { let k = pk_idx.iter().map(|&i| row[i].clone().unwrap_or_default()).collect::<Vec<_>>().join("\u{1}"); tgt_full.insert(k, row); }
         }
         let cols_final = full_cols.unwrap_or_default();
@@ -3073,6 +3226,7 @@ async fn compare_rows_apply_diff(req: Value) -> R {
         let mut c = build_conn(&connj)?;
         let obj = format!("{}.{}", sql_id(&tgt_db), sql_id(&table));
         let bin = binary_column_set(&mut c, &tgt_db, &table)?;
+        let float = float_column_set(&mut c, &tgt_db, &table)?;
         // Unlike compare_rows_apply/compare_rows_insert_all (INSERT-only, each batch already
         // atomic as a single multi-row statement, and a chunk failing partway through a large
         // bulk insert shouldn't block the rest), this updates EXISTING target rows one at a time -
@@ -3094,9 +3248,18 @@ async fn compare_rows_apply_diff(req: Value) -> R {
                 format!("{}={}", sql_id(col), json_val_for(&cd["src"], bin.contains(&col.to_lowercase())))
             }).collect::<Vec<_>>().join(",");
             let wheres = pk_cols.iter().zip(pk_vals.iter()).map(|(col, v)| {
-                format!("{}={}", sql_id(col), json_val_for(v, bin.contains(&col.to_lowercase())))
+                if float.contains(&col.to_lowercase()) { format!("{}={}", key_col(col, &float), json_val_for(v, false)) }
+                else { format!("{}={}", sql_id(col), json_val_for(v, bin.contains(&col.to_lowercase()))) }
             }).collect::<Vec<_>>().join(" AND ");
             let pk_desc = pk_vals.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(",");
+            // The update used to count as done whatever it matched: a row deleted on the target
+            // since the comparison, or a key that could not be matched, was reported as updated.
+            let matched = run_select(&mut c, &format!("SELECT COUNT(*) FROM {} WHERE {}", obj, wheres))
+                .ok().and_then(|(_, r)| r.first().and_then(|x| x.first()).cloned().flatten());
+            if matched.as_deref() != Some("1") {
+                log.push(format!("FAILED id={} : the target has {} row(s) with this key, not 1", pk_desc, matched.unwrap_or_else(|| "?".into())));
+                failed = true; break;
+            }
             let sql = format!("UPDATE {} SET {} WHERE {} LIMIT 1", obj, sets, wheres);
             match c.query_drop(&sql) {
                 Ok(_) => log.push(format!("OK  updated id={}", pk_desc)),
@@ -3161,17 +3324,24 @@ async fn compare_rows_insert_all(req: Value) -> R {
         let chunk_size = 200;
         let src_bin = binary_column_set(&mut src_conn, &src_db, &table)?;
         let tgt_bin = binary_column_set(&mut tgt_conn, &tgt_db, &table)?;
+        let src_float = float_column_set(&mut src_conn, &src_db, &table)?;
+        let copy = select_list(&copy_columns(&mut src_conn, &src_db, &table, &pk)?);
         let mut log: Vec<String> = Vec::new();
         let mut inserted: usize = 0;
         let mut cancelled = false;
         for (ci, chunk) in missing.chunks(chunk_size).enumerate() {
             if let Some(r) = &rid { if is_compare_cancelled(r) { cancelled = true; break; } }
             let refs: Vec<&Vec<Option<String>>> = chunk.iter().collect();
-            let where_clause = pk_where(&pk, &refs, &src_bin);
-            let (full_cols, full_rows) = match run_select(&mut src_conn, &format!("SELECT * FROM {}.{} WHERE {}", sql_id(&src_db), sql_id(&table), where_clause)) {
+            let where_clause = pk_where(&pk, &refs, &src_bin, &src_float);
+            let (full_cols, full_rows) = match run_select(&mut src_conn, &format!("SELECT {} FROM {}.{} WHERE {}", copy, sql_id(&src_db), sql_id(&table), where_clause)) {
                 Ok(v) => v,
                 Err(e) => { log.push(format!("FAILED (fetch) chunk {} : {}", ci + 1, e)); continue; }
             };
+            // A row that cannot be read back by its key is not copied; say so rather than
+            // reporting the chunk as done.
+            if full_rows.len() != chunk.len() {
+                log.push(format!("FAILED (fetch) chunk {} : {} of {} row(s) could not be read back by their key and were not copied", ci + 1, chunk.len() - full_rows.len(), chunk.len()));
+            }
             if full_rows.is_empty() { continue; }
             let col_list = full_cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
             let obj = format!("{}.{}", sql_id(&tgt_db), sql_id(&table));
@@ -3504,14 +3674,17 @@ async fn export_table_run(app: Option<tauri::AppHandle>, req: Value) -> R {
         let f = std::fs::File::create(&file).map_err(|e| e.to_string())?;
         let mut w = std::io::BufWriter::new(f);
         let tbl = format!("{}.{}", sql_id(&db), sql_id(&table));
-        let mut result = c.query_iter(format!("SELECT * FROM {}", tbl)).map_err(|e| e.to_string())?;
+        // Every column for CSV, invisible ones included; INSERTs leave out generated columns, which
+        // cannot be given a value (the CSV import skips them).
+        let all = table_columns(&mut c, &db, &table)?;
+        let chosen: Vec<String> = all.iter().filter(|(_, g)| fmt != "inserts" || !*g).map(|(n, _)| n.clone()).collect();
+        let mut result = c.query_iter(format!("SELECT {} FROM {}", select_list(&chosen), tbl)).map_err(db_err)?;
         let (cols, bin): (Vec<String>, Vec<bool>) = {
             let cs = result.columns();
             let sl: &[Column] = cs.as_ref();
             (sl.iter().map(|c| c.name_str().to_string()).collect(),
              sl.iter().map(is_binaryish).collect())
         };
-        let collist = cols.iter().map(|c| sql_id(c)).collect::<Vec<_>>().join(",");
         // A NULL and an empty string both used to come out as an empty field, so the two were
         // indistinguishable in the file - and the CSV importer turns an empty cell into NULL, so
         // an empty string did not survive a round trip. Write NULL as an explicit marker
@@ -3542,7 +3715,7 @@ async fn export_table_run(app: Option<tauri::AppHandle>, req: Value) -> R {
                 let vals = cells.iter().enumerate().map(|(i, o)| sql_val_for(o.as_deref(), bin[i])).collect::<Vec<_>>().join(",");
                 batch.push(format!("({})", vals));
                 if batch.len() >= 1000 {
-                    w.write_all(format!("INSERT IGNORE INTO {} ({}) VALUES {};\n", tbl, collist, batch.join(",")).as_bytes()).map_err(|e| e.to_string())?;
+                    w.write_all(insert_skip_existing(&tbl, &cols, &batch.join(",")).as_bytes()).map_err(|e| e.to_string())?;
                     batch.clear();
                 }
             } else {
@@ -3553,7 +3726,7 @@ async fn export_table_run(app: Option<tauri::AppHandle>, req: Value) -> R {
             if n.is_multiple_of(2000) { if let Some(a) = &app { let _ = a.emit("export_progress", json!({"rows": n})); } }
         }
         if fmt == "inserts" && !batch.is_empty() && !cancelled {
-            w.write_all(format!("INSERT IGNORE INTO {} ({}) VALUES {};\n", tbl, collist, batch.join(",")).as_bytes()).map_err(|e| e.to_string())?;
+            w.write_all(insert_skip_existing(&tbl, &cols, &batch.join(",")).as_bytes()).map_err(|e| e.to_string())?;
         }
         w.flush().map_err(|e| e.to_string())?;
         drop(w);
@@ -4465,7 +4638,7 @@ mod tests {
 // `cargo test` does not on its own mean it ran - check the timing, or watch for
 // "... not set - skipping" under --nocapture.
 //
-//   NOBS_TEST_DSN   - host:port:user:password. Gates all 15 live tests.
+//   NOBS_TEST_DSN   - host:port:user:password. Gates all the live tests.
 //   MYSQL_BIN /     - full paths to the client tools. The 3 import/export tests
 //   MYSQLDUMP_BIN     shell out to them and fall back to a bare "mysql" /
 //                     "mysqldump", so without these they do not skip - they RUN
@@ -4902,6 +5075,66 @@ mod csv_null_tests {
         let _ = std::fs::remove_file(&file);
     }
 
+    // Exports read SELECT *, which leaves out INVISIBLE columns, and the INSERT export wrote a
+    // generated column (refused on import) under INSERT IGNORE (which cuts a too-long value short
+    // instead of failing). The CSV import skipped unknown columns, filled short rows with NULL and
+    // switched foreign key checks off.
+    #[tokio::test]
+    #[ignore]
+    async fn exports_and_csv_import_keep_every_value_and_refuse_broken_files() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let q = |sql: &str| { let c = conn.clone(); let s = sql.to_string();
+            async move { let r = script(json!({"sql":s,"conn":c,"db":"nobs_test"})).await.unwrap(); assert_eq!(r["ok"], true, "{r}"); } };
+        let one = |sql: &str| { let c = conn.clone(); let s = sql.to_string();
+            async move { let r = query(json!({"sql":s,"conn":c,"db":"nobs_test"})).await.unwrap(); r["rows"][0][0].as_str().unwrap_or("").to_string() } };
+        q("DROP TABLE IF EXISTS csv_x_child; DROP TABLE IF EXISTS csv_x_src; DROP TABLE IF EXISTS csv_x_dst; DROP TABLE IF EXISTS csv_x_parent").await;
+        q("CREATE TABLE csv_x_src (id INT PRIMARY KEY, a INT, secret VARCHAR(10) INVISIBLE, g INT GENERATED ALWAYS AS (a * 2) VIRTUAL)").await;
+        q("INSERT INTO csv_x_src (id, a, secret) VALUES (1, 5, 'hidden')").await;
+        q("CREATE TABLE csv_x_dst LIKE csv_x_src").await;
+        let dir = std::env::temp_dir();
+
+        let sqlf = dir.join("csv_x_src.sql");
+        let r = export_table_run(None, json!({"conn":conn,"db":"nobs_test","table":"csv_x_src","file":sqlf.to_string_lossy(),"format":"inserts"})).await.unwrap();
+        assert_eq!(r["ok"], true, "{r}");
+        let text = std::fs::read_to_string(&sqlf).unwrap();
+        assert!(text.contains("(`id`,`a`,`secret`)") && !text.contains("`g`") && text.contains("ON DUPLICATE KEY UPDATE `id`=`id`")
+                && !text.contains("IGNORE"), "{text}");
+        q(&text.replace("`nobs_test`.`csv_x_src`", "`nobs_test`.`csv_x_dst`")).await;
+        assert_eq!(one("SELECT CONCAT_WS('|', a, secret, g) FROM csv_x_dst").await, "5|hidden|10", "the INSERT export restores every value");
+
+        let csvf = dir.join("csv_x_src.csv");
+        let r = export_table_run(None, json!({"conn":conn,"db":"nobs_test","table":"csv_x_src","file":csvf.to_string_lossy(),"format":"csv","nullValue":"\\N"})).await.unwrap();
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(std::fs::read_to_string(&csvf).unwrap().starts_with("id,a,secret,g\n"), "the CSV has every column");
+        q("DELETE FROM csv_x_dst").await;
+        let ir = importcsv(json!({"conn":conn,"db":"nobs_test","table":"csv_x_dst","file":csvf.to_string_lossy(),"hasHeader":true,"nullValue":"\\N"})).await.unwrap();
+        assert_eq!(ir["ok"], true, "{ir}");
+        assert!(ir["message"].as_str().unwrap().contains("computed by the server: g"), "{ir}");
+        assert_eq!(one("SELECT CONCAT_WS('|', a, secret, g) FROM csv_x_dst").await, "5|hidden|10", "and the CSV import skips the generated column");
+
+        let bad = |name: &str, body: &str| { let p = dir.join(name); std::fs::write(&p, body).unwrap(); p };
+        let imp = |p: std::path::PathBuf, table: &str| { let c = conn.clone(); let t = table.to_string();
+            async move { importcsv(json!({"conn":c,"db":"nobs_test","table":t,"file":p.to_string_lossy(),"hasHeader":true,"nullValue":"\\N"})).await.unwrap() } };
+        q("DELETE FROM csv_x_dst").await;
+        let r = imp(bad("csv_x_unknown.csv", "ID,A,nmae\n2,3,x\n"), "csv_x_dst").await;
+        assert!(r["error"].as_str().unwrap_or("").contains("no column named nmae"), "an unknown column is refused, ID matches id: {r}");
+        let r = imp(bad("csv_x_short.csv", "id,a\n2,3\n4\n"), "csv_x_dst").await;
+        assert!(r["error"].as_str().unwrap_or("").contains("Line 3 has 1 field(s), but the header has 2"), "a short row is refused: {r}");
+        let r = imp(bad("csv_x_long.csv", "id,a\n2,3,9\n"), "csv_x_dst").await;
+        assert!(r["error"].as_str().unwrap_or("").contains("has 3 field(s)"), "a long row is refused: {r}");
+        assert_eq!(one("SELECT COUNT(*) FROM csv_x_dst").await, "0", "and nothing was imported");
+
+        q("CREATE TABLE csv_x_parent (id INT PRIMARY KEY)").await;
+        q("CREATE TABLE csv_x_child (id INT PRIMARY KEY, pid INT, FOREIGN KEY (pid) REFERENCES csv_x_parent (id))").await;
+        let r = imp(bad("csv_x_fk.csv", "id,pid\n1,999\n"), "csv_x_child").await;
+        assert_eq!(r["ok"], false, "a row pointing at a missing parent is refused: {r}");
+        assert!(!r["error"].as_str().unwrap_or("").contains("MySqlError"), "the error is shown without the driver's wrapper: {r}");
+        assert_eq!(one("SELECT COUNT(*) FROM csv_x_child").await, "0");
+
+        q("DROP TABLE csv_x_child; DROP TABLE csv_x_parent; DROP TABLE csv_x_src; DROP TABLE csv_x_dst").await;
+        for f in ["csv_x_src.sql", "csv_x_src.csv", "csv_x_unknown.csv", "csv_x_short.csv", "csv_x_long.csv", "csv_x_fk.csv"] { let _ = std::fs::remove_file(dir.join(f)); }
+    }
+
     // A CSV import with "Truncate table" checked used to leave the table permanently truncated
     // and only partially reloaded if a later row failed (e.g. a duplicate key) - every batch ran
     // on autocommit with nothing to undo the ones that had already landed. It's now wrapped in a
@@ -5329,6 +5562,101 @@ mod compare_tests {
         assert_eq!(qty1, "10", "row 1's update must have been rolled back along with row 2's failure, got qty={qty1}");
 
         raw("DROP DATABASE IF EXISTS cmp_diff_rt");
+    }
+
+    // Compare reads TIMESTAMP values as text on one server and writes them on another; between
+    // servers in different time zones every copied value moved. Its sessions now run in UTC.
+    #[tokio::test]
+    #[ignore]
+    async fn compare_sessions_run_in_utc() {
+        let Some(_guard) = setup_conns() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let (connj, _) = resolve_saved_conn(P_RW).unwrap();
+        let mut c = build_conn(&connj).unwrap();
+        let (_c, r) = run_select(&mut c, "SELECT @@session.time_zone").unwrap();
+        assert_eq!(r[0][0].as_deref(), Some("+00:00"));
+        assert_eq!(scalar("SELECT @@session.time_zone = '+00:00'"), "0", "an ordinary connection keeps the server's zone");
+    }
+
+    // A FLOAT key is read as rounded text, which matches nothing when compared to the column, so
+    // such rows could neither be fetched nor updated; and an update counted as done whatever it
+    // matched. Invisible columns were left out of copies (SELECT *), and generated ones made them fail.
+    #[tokio::test]
+    #[ignore]
+    async fn compare_copies_float_keys_invisible_and_generated_columns() {
+        let Some(_guard) = setup_conns() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        for db in ["cmp_kx_src", "cmp_kx_tgt"] {
+            raw(&format!("DROP DATABASE IF EXISTS {db}")); raw(&format!("CREATE DATABASE {db}"));
+            raw(&format!("CREATE TABLE {db}.t (k FLOAT PRIMARY KEY, a INT, secret VARCHAR(10) INVISIBLE, g INT GENERATED ALWAYS AS (a * 2) STORED)"));
+        }
+        raw("INSERT INTO cmp_kx_src.t (k, a, secret) VALUES (1.1, 5, 's1'), (0.3, 6, 's3')");
+        raw("INSERT INTO cmp_kx_tgt.t (k, a, secret) VALUES (0.3, 0, 'old')");
+        let base = json!({"sourceConnName":P_RW,"sourceDb":"cmp_kx_src","targetConnName":P_RW,"targetDb":"cmp_kx_tgt","table":"t"});
+
+        let ins = compare_rows_insert_all(base.clone()).await.unwrap();
+        assert_eq!(ins["inserted"], 1, "{ins}");
+        assert_eq!(scalar("SELECT CONCAT_WS('|', a, secret, g) FROM cmp_kx_tgt.t WHERE k > 1"), "5|s1|10",
+            "the missing row arrives whole, invisible column included, generated column computed");
+
+        let diff = compare_rows_diff(base.clone()).await.unwrap();
+        assert_eq!(diff["diffs"].as_array().map(|a| a.len()), Some(1), "the FLOAT-keyed common row is compared: {diff}");
+        let ap = compare_rows_apply_diff(json!({"targetConnName":P_RW,"targetDb":"cmp_kx_tgt","table":"t",
+            "pkCols":diff["pkCols"],"updates":diff["diffs"]})).await.unwrap();
+        assert_eq!(ap["ok"], true, "{ap}");
+        assert_eq!(scalar("SELECT CONCAT_WS('|', a, secret, g) FROM cmp_kx_tgt.t WHERE k < 1"), "6|s3|12", "and updated by its key");
+
+        // A row deleted on the target since the comparison fails the batch instead of counting as updated.
+        raw("DELETE FROM cmp_kx_tgt.t WHERE k < 1");
+        let gone = compare_rows_apply_diff(json!({"targetConnName":P_RW,"targetDb":"cmp_kx_tgt","table":"t",
+            "pkCols":diff["pkCols"],"updates":diff["diffs"]})).await.unwrap();
+        assert_eq!(gone["ok"], false, "{gone}");
+        assert!(gone["log"].to_string().contains("0 row(s) with this key"), "{gone}");
+        raw("DROP DATABASE cmp_kx_src"); raw("DROP DATABASE cmp_kx_tgt");
+    }
+
+    // Schema sync rebuilt a column from its type, NULL, default and EXTRA: MODIFY COLUMN changed a
+    // latin1_bin column to the table's default collation and dropped its comment, and a generated
+    // column could not be added at all.
+    #[tokio::test]
+    #[ignore]
+    async fn schema_sync_keeps_each_columns_full_definition() {
+        let Some(_guard) = setup_conns() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        for db in ["cmp_sd_src", "cmp_sd_tgt"] { raw(&format!("DROP DATABASE IF EXISTS {db}")); raw(&format!("CREATE DATABASE {db} DEFAULT CHARACTER SET utf8mb4")); }
+        raw("CREATE TABLE cmp_sd_src.t (id INT PRIMARY KEY, name VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL COMMENT 'customer name', a INT, g INT GENERATED ALWAYS AS (a * 2) VIRTUAL) DEFAULT CHARSET=utf8mb4");
+        raw("CREATE TABLE cmp_sd_tgt.t (id INT PRIMARY KEY, name VARCHAR(10) CHARACTER SET latin1 COLLATE latin1_bin NULL, a INT) DEFAULT CHARSET=utf8mb4");
+        let r = compare_schemas(json!({"sourceConnName":P_RW,"sourceDb":"cmp_sd_src","targetConnName":P_RW,"targetDb":"cmp_sd_tgt"})).await.unwrap();
+        assert_eq!(r["ok"], true, "{r}");
+        let stmts: Vec<Value> = r["tables"].as_array().unwrap().iter().flat_map(|t| t["sql"].as_array().cloned().unwrap_or_default())
+            .filter(|s| s["checked"] == true).map(|s| s["stmt"].clone()).collect();
+        assert_eq!(stmts.len(), 2, "one MODIFY and one ADD: {stmts:?}");
+        let ap = compare_apply(json!({"targetConnName":P_RW,"targetDb":"cmp_sd_tgt","statements":stmts})).await.unwrap();
+        assert!(!ap["log"].to_string().contains("FAILED"), "{ap}");
+        assert_eq!(scalar("SELECT CONCAT_WS('|', COLLATION_NAME, IS_NULLABLE, COLUMN_COMMENT) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='cmp_sd_tgt' AND COLUMN_NAME='name'"),
+                   "latin1_bin|NO|customer name");
+        assert_eq!(scalar("SELECT LOWER(GENERATION_EXPRESSION) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='cmp_sd_tgt' AND COLUMN_NAME='g'").replace(['`', ' ', '(', ')'], ""), "a*2");
+        let again = compare_schemas(json!({"sourceConnName":P_RW,"sourceDb":"cmp_sd_src","targetConnName":P_RW,"targetDb":"cmp_sd_tgt"})).await.unwrap();
+        assert!(again["tables"].as_array().unwrap().iter().all(|t| t["status"] == "same"), "nothing left to sync: {again}");
+        raw("DROP DATABASE cmp_sd_src"); raw("DROP DATABASE cmp_sd_tgt");
+    }
+}
+
+#[cfg(test)]
+mod column_definition_tests {
+    use super::*;
+    fn col(name: &str, ctype: &str, cs: Option<&str>, co: Option<&str>) -> ColumnDef {
+        ColumnDef { name: name.into(), ctype: ctype.into(), nullable: "NO".into(), default: None, extra: String::new(),
+                    charset: cs.map(String::from), collation: co.map(String::from), comment: String::new(), generation: String::new() }
+    }
+    #[test]
+    fn a_column_is_written_as_the_server_defines_it() {
+        let create = "CREATE TABLE `t` (\n  `id` int(11) NOT NULL,\n  `we``ird` varchar(10) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL COMMENT 'x, y',\n  `n` varchar(5) DEFAULT 'a',\n  `g` int(11) GENERATED ALWAYS AS (`id` * 2) VIRTUAL,\n  PRIMARY KEY (`id`)\n) ENGINE=InnoDB";
+        let defs = column_definitions(create);
+        assert_eq!(defs.len(), 4, "{defs:?}");
+        assert_eq!(col_definition(&col("we`ird", "varchar(10)", Some("latin1"), Some("latin1_bin")), &defs),
+                   "`we``ird` varchar(10) CHARACTER SET latin1 COLLATE latin1_bin NOT NULL COMMENT 'x, y'");
+        assert_eq!(col_definition(&col("n", "varchar(5)", Some("utf8mb4"), Some("utf8mb4_bin")), &defs),
+                   "`n` varchar(5) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin DEFAULT 'a'", "a table-default character set is spelled out");
+        assert_eq!(col_definition(&col("G", "int(11)", None, None), &defs), "`g` int(11) GENERATED ALWAYS AS (`id` * 2) VIRTUAL");
+        assert_eq!(col_definition(&col("missing", "int", None, None), &defs), "`missing` int NOT NULL", "without a line, the old way");
     }
 }
 

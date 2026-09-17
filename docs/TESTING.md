@@ -15,7 +15,7 @@ warning fails the build.
 that lives in `ui/index.html` and so is out of `cargo test`'s reach: the grid's
 sort/filter ordering, the SQL the Users dialog builds, the connection store and its
 request bridge (including reading a whole result for callers other than the grid),
-which table a result grid saves to, the new-version notice, the table designer (driven with real `information_schema` rows
+which table a result grid saves to and how saving finds each row, the new-version notice, the table designer (driven with real `information_schema` rows
 from MySQL 8 and MariaDB 12), and recovery from a failed procedure/trigger recreate. They pull the functions straight out
 of the HTML file rather than keeping a copy, so a change to the real code is
 what they measure. No dependencies, no `npm ci` needed. The PowerShell edition runs
@@ -60,8 +60,8 @@ count and the timing (`finished in 0.00s` means nothing happened), or run with
 
 | Variable | Gates | Without it |
 |---|---|---|
-| `NOBS_TEST_DSN` | all 25 live tests (and the live SSL/CA tests, which are not `#[ignore]`d) | skipped silently |
-| `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 6 import/export/CSV/compare tests *within* those 25 | they run, then **fail** with `program not found` |
+| `NOBS_TEST_DSN` | all 29 live tests (and the live SSL/CA tests, which are not `#[ignore]`d) | skipped silently |
+| `MYSQL_BIN` / `MYSQLDUMP_BIN` | the 6 import/export/CSV/compare tests *within* those 29 | they run, then **fail** with `program not found` |
 | `NOBS_TEST_SERVER_CA` | the 2 CA tests that need the server's **own** CA | skipped, with a message |
 
 `NOBS_TEST_SERVER_CA` exists because a CA test without it proves very little. `verify` refuses a

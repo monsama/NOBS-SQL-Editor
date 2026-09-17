@@ -783,6 +783,56 @@ async function gridBinCols(id){
  if(!t.table)return null;
  return tableBinCols(t.db,t.table,t.cols);
 }
+// A table's columns in order, each with whether it is generated; null when they cannot be read.
+// Copies name their columns from this rather than using SELECT *: SELECT * leaves out INVISIBLE
+// columns (MySQL 8.0.23+, MariaDB 10.3+), so a copy made from it stored NULL in them, and a
+// generated column cannot be given a value, so a copy that included one was refused.
+async function tableColumnsInfo(db,table){
+ try{
+  const r=await api('/api/query',{sql:"SELECT COLUMN_NAME, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="+strLit(db)+" AND TABLE_NAME="+strLit(table)+" ORDER BY ORDINAL_POSITION"});
+  if(!r.ok||!r.rows.length)return null;
+  return r.rows.map(x=>({name:String(x[0]),generated:GENERATED_EXTRA.test(String(x[1]||''))}));
+ }catch(e){return null;}
+}
+// EXTRA for a generated column; MySQL's DEFAULT_GENERATED only marks an expression default.
+const GENERATED_EXTRA=/(VIRTUAL|STORED|PERSISTENT) GENERATED/i;
+// An INSERT that skips a row whose key already exists, as INSERT IGNORE did - without IGNORE's
+// other effect: it turns errors into warnings, so a value too long for its column was cut short
+// and an impossible date stored as 0000-00-00, silently, when the file was run.
+function insertSkipExisting(tbl,cols,tuple){const f=qid(cols[0]);return 'INSERT INTO '+tbl+' ('+cols.map(qid).join(',')+') VALUES '+tuple+' ON DUPLICATE KEY UPDATE '+f+'='+f+';';}
+// How Apply finds a grid row: by its key, as the grid holds it. Two key types do not survive that:
+//  - FLOAT is shown rounded (1.1 is stored as 1.10000002384), so k = '1.1' matched nothing, and the
+//    edit or delete did nothing while the app reported it applied. Matched by its text instead.
+//  - TIMESTAMP is shown in the session time zone, where the hour clocks go back in autumn happens
+//    twice: two keys an hour apart both showed as 02:30, and editing one changed the other. Matched
+//    by its text within a few hours of it, so both show up and the guard below refuses.
+// null when a key column is not in the result.
+function keyWhere(t,ri,bc,types){
+ const parts=[];
+ for(const p of t.pk){
+  const ci=t.cols.indexOf(p);if(ci<0)return null;
+  const v=t.rows[ri][ci],q=qid(p),ty=types&&types[String(p).toLowerCase()];
+  if(v===null||v===undefined){parts.push(q+' IS NULL');continue;}
+  const l=strLit(String(v));
+  if(ty==='float'){parts.push('CAST('+q+' AS CHAR)='+l);continue;}
+  if(ty==='timestamp'){parts.push('('+q+' BETWEEN '+l+' - INTERVAL 3 HOUR AND '+l+' + INTERVAL 3 HOUR AND CAST('+q+' AS CHAR)='+l+')');continue;}
+  parts.push(q+'='+litAs(v,bc?bc[ci]:null));
+ }
+ return parts.join(' AND ');
+}
+// Stops the batch - which runs as one transaction - unless where matches exactly one row: none when
+// the row was changed or deleted since it was read, or its key cannot be matched; more when the key
+// is ambiguous. Both servers refuse to put two rows into a variable (error 1172).
+function oneRowGuard(tbl,where){return 'SELECT 1 FROM (SELECT 1 AS x UNION ALL SELECT 2) nobs_guard WHERE (SELECT COUNT(*) FROM '+tbl+' WHERE '+where+') <> 1 INTO @nobs_one_row;';}
+const ONE_ROW_REFUSED='Nothing was saved. A row you changed or deleted no longer matches exactly one row in the table: it may have been changed or deleted since it was loaded, or its key cannot be matched exactly (a FLOAT key shown rounded, or a TIMESTAMP key in the hour the clocks go back). Reload the table and try again.';
+async function tableColTypes(db,table){
+ try{
+  const r=await api('/api/query',{sql:"SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="+strLit(db)+" AND TABLE_NAME="+strLit(table)});
+  if(!r.ok)return null;
+  const m={};r.rows.forEach(x=>{m[String(x[0]).toLowerCase()]=String(x[1]).toLowerCase();});
+  return m;
+ }catch(e){return null;}
+}
 // lit() decides from the value's shape, which is wrong both ways for row data: a text cell holding
 // 0x41 was written as the byte A, and an empty binary value - shown as the bare 0x - as the two
 // characters 0x. With the column's type known (bin true/false) the type decides instead; with it
@@ -1719,10 +1769,10 @@ async function newTrigger(db,table){
   :('-- Fill in the trigger body, then click "Apply (recreate)".\nDROP TRIGGER IF EXISTS '+qid(db)+'.'+qid(name)+';\nDELIMITER $$\nCREATE TRIGGER '+qid(db)+'.'+qid(name)+'\n'+res.timing+' '+res.event+' ON '+qid(db)+'.'+qid(table)+'\nFOR EACH ROW\nBEGIN\n\n  -- your logic here\n\nEND$$\nDELIMITER ;\n');
  openTab('trigger: '+name,body,db,false,null,{type:'trigger',db,name});
 }
-async function dropSchema(db){if(!(await ask('DROP DATABASE '+db+' ? Deletes ALL its data.')))return;if(await exec('DROP DATABASE '+qid(db),'Dropped schema')){loadSchemas();$('objects').innerHTML='';}}
+async function dropSchema(db){if(!(await ask('DROP DATABASE '+db+' ? Deletes ALL its data.')))return;if(await exec('DROP DATABASE '+qid(db),'Dropped schema')){[...tabs].forEach(t=>{if(t.db===db&&t.table)closeTab(t.id);});loadSchemas();$('objects').innerHTML='';}}
 async function dropObject(db,type,name){const kw={table:'TABLE',view:'VIEW',procedure:'PROCEDURE',function:'FUNCTION',trigger:'TRIGGER',event:'EVENT'}[type];if(!(await ask('DROP '+kw+' '+db+'.'+name+'?\n\nThis permanently removes the '+type+' and cannot be undone.')))return;if(await exec('DROP '+kw+' IF EXISTS '+qid(db)+'.'+qid(name),'Dropped '+type+' '+db+'.'+name)){[...tabs].forEach(t=>{if(t.db===db&&t.table===name)closeTab(t.id);});loadObjects(db);}}
 async function truncateTable(db,name){if(!(await ask('TRUNCATE TABLE '+db+'.'+name+'?\n\nThis permanently deletes ALL rows and cannot be undone.')))return;if(await exec('TRUNCATE TABLE '+qid(db)+'.'+qid(name),'Truncated '+db+'.'+name)){invalidateTableCache(db,name);[...tabs].forEach(t=>{if(t.table===name&&t.db===db)openRun(t.id);});}}
-async function renameTable(db,name){const res=await inputBox({title:'Rename table',okText:'Rename',fields:[{key:'name',label:'New table name',value:name}]});if(!res||!res.name.trim()||res.name.trim()===name)return;if(await exec('RENAME TABLE '+qid(db)+'.'+qid(name)+' TO '+qid(db)+'.'+qid(res.name.trim()),'Renamed'))loadObjects(db);}
+async function renameTable(db,name){const res=await inputBox({title:'Rename table',okText:'Rename',fields:[{key:'name',label:'New table name',value:name}]});if(!res||!res.name.trim()||res.name.trim()===name)return;if(await exec('RENAME TABLE '+qid(db)+'.'+qid(name)+' TO '+qid(db)+'.'+qid(res.name.trim()),'Renamed')){[...tabs].forEach(t=>{if(t.db===db&&t.table===name)closeTab(t.id);});loadObjects(db);}}
 async function duplicateTable(db,name){
  const res=await inputBox({title:'Duplicate table',okText:'Create',fields:[
   {key:'name',label:'New table name',value:name+'_copy'},
@@ -1732,7 +1782,14 @@ async function duplicateTable(db,name){
  const newName=res.name.trim();
  if(roBlock())return;
  let sql='CREATE TABLE '+qid(db)+'.'+qid(newName)+' LIKE '+qid(db)+'.'+qid(name)+';';
- if(res.data){sql+='\nINSERT INTO '+qid(db)+'.'+qid(newName)+' SELECT * FROM '+qid(db)+'.'+qid(name)+';';}
+ if(res.data){
+  // Named columns: SELECT * left invisible columns NULL in the copy, and a generated column in it
+  // made the copy fail - after the empty table had already been created.
+  const info=await tableColumnsInfo(db,name);
+  if(!info){toast('Could not read the columns of '+db+'.'+name+'. Nothing was created.',true);return;}
+  const cl=info.filter(c=>!c.generated).map(c=>qid(c.name)).join(',');
+  sql+='\nINSERT INTO '+qid(db)+'.'+qid(newName)+' ('+cl+') SELECT '+cl+' FROM '+qid(db)+'.'+qid(name)+';';
+ }
  const r=await api('/api/script',{sql,db});
  if(r.ok){log('Duplicated '+name+' as '+newName+(res.data?' (with data)':' (structure only)')+'.');loadObjects(db);}
  else{toast(r.error||'Duplicate failed',true);}
@@ -3172,23 +3229,26 @@ async function applyChanges(id){if(roBlock())return;const t=T(id);const S=[];con
   return;
  }
  // updates grouped by row
+ const kt=await tableColTypes(t.db,t.table);let noKey=false;
  const byRow={};Object.keys(t.pending.upd).forEach(k=>{const[ri,ci]=k.split(':').map(Number);(byRow[ri]=byRow[ri]||{})[ci]=t.pending.upd[k];});
  Object.keys(byRow).forEach(ri=>{ri=+ri;const sets=Object.keys(byRow[ri]).map(ci=>qid(t.cols[ci])+'='+litForCol(+ci,byRow[ri][ci]));
-   const wh=t.pk.map(p=>qid(p)+'='+litAs(t.rows[ri][t.cols.indexOf(p)],bc?bc[t.cols.indexOf(p)]:null));S.push('UPDATE '+tbl+' SET '+sets.join(',')+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
- t.pending.del.forEach(ri=>{const wh=t.pk.map(p=>qid(p)+'='+litAs(t.rows[ri][t.cols.indexOf(p)],bc?bc[t.cols.indexOf(p)]:null));S.push('DELETE FROM '+tbl+' WHERE '+wh.join(' AND ')+' LIMIT 1;');});
+   const wh=keyWhere(t,ri,bc,kt);if(wh==null){noKey=true;return;}S.push(oneRowGuard(tbl,wh));S.push('UPDATE '+tbl+' SET '+sets.join(',')+' WHERE '+wh+' LIMIT 1;');});
+ t.pending.del.forEach(ri=>{const wh=keyWhere(t,ri,bc,kt);if(wh==null){noKey=true;return;}S.push(oneRowGuard(tbl,wh));S.push('DELETE FROM '+tbl+' WHERE '+wh+' LIMIT 1;');});
+ if(noKey){toast('Nothing was saved: the result does not include every key column ('+t.pk.join(', ')+'), so the rows cannot be found exactly. Include the key in the query.',true);return;}
  t.pending.ins.forEach(row=>{const cols=Object.keys(row);if(!cols.length)return;S.push('INSERT INTO '+tbl+' ('+cols.map(qid).join(',')+') VALUES ('+cols.map(c=>litForCol(t.cols.indexOf(c),row[c])).join(',')+');');});
  // Reachable even though Apply is only enabled when something's pending: a +Row with every
  // column left blank produces no INSERT (a deliberate no-op, not a bug - see the ins.forEach
  // above), and if that's the ONLY thing pending, S ends up empty with nothing to tell the user
  // apply didn't silently do something - say so instead of just doing nothing visibly.
  if(!S.length){toast('Nothing to apply - new row(s) with no values are ignored. Fill in a column, or Revert to remove them.',true);return;}
+ const changes=S.filter(s=>!s.startsWith('SELECT 1 FROM (SELECT 1 AS x')).length;
  log('APPLY:\n'+S.join('\n'));
  // Runs as one transaction, so a failure part-way leaves the table exactly as it was.
  // Foreign keys are NOT disabled here: they were, which let an edit point a row at a
  // parent that does not exist and silently break referential integrity the schema was
  // written to guarantee.
  const r=await api('/api/script',{sql:S.join('\n'),transaction:true});
- if(r.ok){log('Applied '+S.length+' change(s).');toast('Applied '+S.length+' change(s).','ok');invalidateTableCache(t.db,t.table);openRun(id).then(()=>refreshTabDirty(id));}else{log('APPLY error: '+r.error);toast('Apply failed: '+r.error,true);}}
+ if(r.ok){log('Applied '+changes+' change(s).');toast('Applied '+changes+' change(s).','ok');invalidateTableCache(t.db,t.table);openRun(id).then(()=>refreshTabDirty(id));}else{log('APPLY error: '+r.error);toast(/Result consisted of more than one row/.test(String(r.error))?ONE_ROW_REFUSED:'Apply failed: '+r.error,true);}}
 
 function ddlFailureNote(err, sql){
  const e = String(err || "");
@@ -3290,9 +3350,13 @@ function selAll(id,ch){const t=T(id);if(!t.selected)t.selected=new Set();const v
 function copySel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bTSV(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (TSV).'));}
 function copySelCsv(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bCSV(t.cols,rows)).then(()=>{csvNullHint(rows);}).then(()=>log('Copied '+rows.length+' selected row(s) (CSV).'));}
 function csvGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'csv');return;}dl(bCSV(t.cols,t.rows),'result.csv');}
-async function insGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'inserts');return;}const bc=await gridBinCols(id);const s=t.rows.map(r=>'INSERT IGNORE INTO `table` ('+t.cols.map(qid).join(',')+') VALUES ('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+');').join('\n');dl(s,'result_inserts.sql');log('Exported '+t.rows.length+' row(s) as INSERTs.');}
+async function insGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'inserts');return;}const bc=await gridBinCols(id);const s=t.rows.map(r=>insertSkipExisting('`table`',t.cols,'('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+')')).join('\n');dl(s,'result_inserts.sql');log('Exported '+t.rows.length+' row(s) as INSERTs.');}
 function csvSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}dl(bCSV(t.cols,rows),(t.table||'result')+'_selected.csv');log('Exported '+rows.length+' selected row(s) to CSV.');}
-async function insSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const tbl=t.table?(qid(t.db)+'.'+qid(t.table)):'`table`';const bc=await gridBinCols(id);const s=rows.map(r=>'INSERT IGNORE INTO '+tbl+' ('+t.cols.map(qid).join(',')+') VALUES ('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+');').join('\n');dl(s,(t.table||'result')+'_selected_inserts.sql');log('Exported '+rows.length+' selected row(s) as INSERTs.');}
+async function insSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const tbl=t.table?(qid(t.db)+'.'+qid(t.table)):'`table`';const bc=await gridBinCols(id);
+ // A generated column cannot be given a value, so it is left out.
+ const info=t.table?await tableColumnsInfo(t.db,t.table):null;const gen=new Set((info||[]).filter(c=>c.generated).map(c=>c.name.toLowerCase()));
+ const keep=t.cols.map((c,i)=>i).filter(i=>!gen.has(String(t.cols[i]).toLowerCase()));
+ const s=rows.map(r=>insertSkipExisting(tbl,keep.map(i=>t.cols[i]),'('+keep.map(i=>litAs(r[i],bc?bc[i]:null)).join(',')+')')).join('\n');dl(s,(t.table||'result')+'_selected_inserts.sql');log('Exported '+rows.length+' selected row(s) as INSERTs.');}
 async function dl(text,name){
  const ext=(name.split('.').pop()||'').toLowerCase();const filters=ext?[{name:ext.toUpperCase()+' file',extensions:[ext]}]:undefined;
  // Tauri: native Save As + backend write
@@ -4778,8 +4842,12 @@ async function exportFull(db,name,fmt){fmt=fmt||'csv';const ext=(fmt==='inserts'
      if(!(await ask('Continue exporting '+db+'.'+name+' via the query engine anyway? This may take a while for a table this size.'))){return;}
    }
  }catch(e){}
- const q=await api('/api/query',{sql:'SELECT * FROM '+qid(db)+'.'+qid(name),db:db});if(!q.ok){toast(q.error,true);return;}
- if(fmt==='inserts'){const tbl=qid(db)+'.'+qid(name);const bc=await tableBinCols(db,name,q.columns);const s=q.rows.map(r=>'INSERT IGNORE INTO '+tbl+' ('+q.columns.map(qid).join(',')+') VALUES ('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+');').join('\n');dl(s,defName);}
+ // Named columns: every one for CSV, invisible ones included (SELECT * leaves them out); INSERTs
+ // leave out generated columns, which cannot be given a value (the CSV import skips them).
+ const info=await tableColumnsInfo(db,name);if(!info){toast('Could not read the columns of '+db+'.'+name+'.',true);return;}
+ const expCols=info.filter(c=>fmt!=='inserts'||!c.generated).map(c=>c.name);
+ const q=await api('/api/query',{sql:'SELECT '+expCols.map(qid).join(',')+' FROM '+qid(db)+'.'+qid(name),db:db});if(!q.ok){toast(q.error,true);return;}
+ if(fmt==='inserts'){const tbl=qid(db)+'.'+qid(name);const bc=await tableBinCols(db,name,q.columns);const s=q.rows.map(r=>insertSkipExisting(tbl,q.columns,'('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+')')).join('\n');dl(s,defName);}
  else{dl(bCSV(q.columns,q.rows),defName);}}
 function importCsv(db,table){csvTarget={db,table};$('csvTitle').textContent='Import CSV into '+db+'.'+table;$('csvFile').value='';$('csvLog').textContent='';show('mCsv');}
 async function runCsvImport(){const f=$('csvFile').value.trim();if(!f){toast('Choose a CSV file.',true);return;}
