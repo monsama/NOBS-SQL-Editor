@@ -23,7 +23,7 @@ hex = "0.4"
 tempfile = "3"
 chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
-zip = "2"
+zip = "8"
 md-5 = "0.11"
 
 [profile.release]
