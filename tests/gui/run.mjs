@@ -39,6 +39,17 @@ const killTree = p => { if (p && p.pid) spawnSync('taskkill', ['/PID', String(p.
 // \N marker, UTF-8.
 writeFileSync(join(tmp, 'gp.csv'), Buffer.from(
   'id,t,b,n,bits,l1\n1,"line1\r\nline2",0xDEAD,NULL,0x01,é\n2,,0x,\\N,0x03,\\N\n3,x,\\N,0x42,\\N,Grüße\n', 'utf8'));
+// The files the strict CSV scenario reads: headers in another case with a generated column, and
+// files the import has to refuse as a whole.
+for (const [name, body] of Object.entries({
+  'csv-case.csv': 'ID,NAME,Pid,G,u\n1,a,1,99,7\n2,\\N,\\N,0,\\N\n',
+  'csv-unknown.csv': 'id,nmae\n3,x\n',
+  'csv-short.csv': 'id,name\n3,x\n4\n',
+  'csv-long.csv': 'id,name\n3,x,y\n',
+  'csv-fk.csv': 'id,pid\n3,1\n4,99\n',
+  'csv-unique.csv': 'id,u\n3,8\n4,7\n',
+  'csv-replace.csv': 'id,name\n5,z\n',
+})) writeFileSync(join(tmp, name), body);
 
 let appOutput = '';
 async function startApp() {

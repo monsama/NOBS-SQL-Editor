@@ -958,13 +958,17 @@ function renderToolsStatus(r){
 }
 async function showToolsInUse(st){
  const el=$('cfgStatus'),ma=$('cfgCardMaria'),my=$('cfgCardMysql');if(!el||!ma||!my)return;
- ma.classList.remove('inuse');my.classList.remove('inuse');
- if(!window._activeConn){el.textContent='Not connected. Which set is used is decided per server when you connect.';return;}
+ // The marks change only with the answer, and only the latest check writes one: Settings can check
+ // twice at once, and the second check cleared the marks under the first one's line.
+ const mark=c=>{ma.classList.toggle('inuse',c===ma);my.classList.toggle('inuse',c===my);};
+ const seq=showToolsInUse.seq=(showToolsInUse.seq||0)+1;
+ if(!window._activeConn){mark(null);el.textContent='Not connected. Which set is used is decided per server when you connect.';return;}
  let r=null;try{r=await api('/api/tools-for-conn');}catch(e){}
- if(!r||!r.ok||r.serverIsMariadb==null){el.textContent='Could not tell whether the connected server is MariaDB or MySQL; the tools for MariaDB servers are used.';ma.classList.add('inuse');return;}
+ if(seq!==showToolsInUse.seq)return;
+ if(!r||!r.ok||r.serverIsMariadb==null){el.textContent='Could not tell whether the connected server is MariaDB or MySQL; the tools for MariaDB servers are used.';mark(ma);return;}
  const ownMysql=!r.serverIsMariadb&&st&&st.mysqldump_for_mysql&&r.mysqldump===st.mysqldump_for_mysql;
  el.textContent='The connected server is '+(r.serverIsMariadb?'MariaDB':'MySQL')+', so it uses the tools for '+(ownMysql?'MySQL servers.':'MariaDB servers'+(r.serverIsMariadb?'.':' - there are no MySQL tools.'));
- (ownMysql?my:ma).classList.add('inuse');
+ mark(ownMysql?my:ma);
 }
 async function refreshToolsStatus(manual){const el=$('cfgStatus');if(!el)return;el.innerHTML='Checking...';
  const icon=$('cfgRecheckIcon'),btn=$('cfgRecheckBtn');

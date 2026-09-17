@@ -180,8 +180,9 @@ Work through the scenarios in order — they are sorted by what a failure costs.
 
 `tests/gui/run.mjs` starts the real app, drives it through its UI over the Chrome DevTools
 protocol, and checks what it does. That covers the flows the other tests cannot reach: grid
-display and saving, Compare, the export and import dialogs, foreign key lookups and quick
-filters, a script's results, and the update notice. It runs both editions:
+display and saving, Compare's row copies and schema sync, the export and import dialogs, the
+CSV import's refusals, foreign key lookups and quick filters, a script's results, the update
+notice and Settings. It runs both editions:
 
 ```powershell
 $env:NOBS_TEST_DSN = '127.0.0.1:3306:root:yourpassword'
