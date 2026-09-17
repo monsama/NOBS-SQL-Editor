@@ -250,6 +250,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
 
 <div class="modal floating" id="mView"><div class="box" style="width:1000px;max-width:95vw;display:flex;flex-direction:column;overflow:hidden;top:60px;left:100px"><div style="display:flex;align-items:center;justify-content:space-between;cursor:move;user-select:none;flex:none" onmousedown="floatDragStart(event,'mView')" title="Drag to move"><h3 id="vTitle" style="margin:0 0 10px">Value</h3><span style="display:flex;gap:2px"><span onmousedown="event.stopPropagation()" onclick="floatToggleMaximize('mView')" title="Maximize" id="maxBtn_mView" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:14px;line-height:1">&#9974;</span><span onmousedown="event.stopPropagation()" onclick="floatMinimize('mView')" title="Minimize" style="cursor:pointer;padding:2px 10px;font-weight:700;font-size:16px;line-height:1">&#8722;</span></span></div>
  <img id="vImg" style="display:none;max-width:100%;max-height:340px;margin-bottom:6px;border:1px solid var(--bd);border-radius:3px;flex:none">
+ <div id="vNote" style="display:none;font-size:11px;color:var(--log-warn);margin-bottom:4px;flex:none"></div>
  <textarea id="vText" style="width:100%;height:520px;flex:1;min-height:0;font-family:'Cascadia Code',Consolas,'SF Mono',Menlo,'DejaVu Sans Mono',monospace;font-size:12px"></textarea>
  <select id="vSelect" style="width:100%;display:none;padding:8px;font-size:13px;flex:none"></select>
  <div id="vMulti" style="width:100%;display:none;max-height:520px;overflow:auto;padding:8px;border:1px solid var(--bd);border-radius:3px;background:var(--in);box-sizing:border-box;font-size:13px;flex:1;min-height:0"></div>
@@ -2481,6 +2482,25 @@ function ctrlBadge(b){return '<span style="background:#4a3a1f;color:#e8c589;bord
 // like 'ab'. Marked the same way as above.
 const CTRL_RE=/[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
 function textCellHtml(s,maxChars){const h=esc(clip(s,maxChars));return h.search(CTRL_RE)<0?h:h.replace(CTRL_RE,ch=>ctrlBadge(ch.charCodeAt(0)));}
+// What a <textarea> cannot show. The grid marks a control character with a badge above, but the
+// cell editor is a plain textarea, where the same byte takes no space at all - so a value the grid
+// shows as a<NUL>b reads in there as "ab", and one that ends in a NUL looks like it just ends.
+// This is said BESIDE the box rather than marked up inside it on purpose: Text mode saves whatever
+// the box holds (textToHex runs over the whole thing), so a visible stand-in for an invisible byte
+// would be stored as that character's own bytes - the way to lose a value, not to show it.
+function ctrlCharNote(s,hasHexTab){
+ if(typeof s!=='string')return '';
+ const found=s.match(CTRL_RE);
+ if(!found)return '';
+ const counts={};
+ found.forEach(ch=>{const n=CTRL_NAMES[ch.charCodeAt(0)];counts[n]=(counts[n]||0)+1;});
+ const named=Object.keys(counts).map(n=>counts[n]>1?n+' ×'+counts[n]:n).join(', ');
+ const n=found.length;
+ return 'This value holds '+n+' control character'+(n>1?'s':'')+' ('+named+'), which take'+(n>1?'':'s')+' no space in the box above'
+  +(hasHexTab?' - switch to Hex to see or edit the bytes.'
+   :n>1?' - editing the text around them leaves them as they are.':' - editing the text around it leaves it as it is.');
+}
+function setVNote(text){const n=$('vNote');if(!n)return;n.textContent=text||'';n.style.display=text?'block':'none';}
 function decodeCtrlCharCell(hexStr,maxChars){
  const hex=hexStr.slice(2);const bytes=[];for(let i=0;i<hex.length;i+=2){bytes.push(parseInt(hex.substr(i,2),16));}
  const decoder=new TextDecoder('utf-8',{fatal:false});
@@ -2501,7 +2521,12 @@ function decodeCtrlCharCell(hexStr,maxChars){
  if(truncated)html+='\u2026';
  return html;
 }
-function cellHtml(v,isBit){if(v===null)return '<span style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return isBit?esc(hexToBitNumber(v)):decodeCtrlCharCell(v,300);return textCellHtml(v,300);}
+// A binary column holding no bytes arrives as a bare "0x" - the prefix with nothing after it. The
+// hex branch below needs at least one digit, so such a value used to fall through to the plain-text
+// renderer and print the marker itself, the one value in a grid shown as its own wire format. It is
+// only said for a column the server declared binary (binCols), because a VARCHAR can perfectly
+// well hold the two characters "0x" and that is exactly what should be shown for it.
+function cellHtml(v,isBit,isBin){if(v===null)return '<span style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(v==='0x'&&isBin)return '<span style="color:#999;font-style:italic;opacity:.6">(0 bytes)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return isBit?esc(hexToBitNumber(v)):decodeCtrlCharCell(v,300);return textCellHtml(v,300);}
 // When every data column is hidden (via "Hide all" or unchecking each one by hand), the leading
 // row-select checkbox and delete/undo columns are pointless to keep showing on their own - an
 // empty grid with just those two columns looks broken, not "hidden".
@@ -2673,10 +2698,10 @@ function renderBody(id){const t=T(id);const ed=!!t.pk;if(!t.selected)t.selected=
   if(ed)h+='<td class="delcell" onclick="toggleDel(\''+id+'\','+ri+')">'+(del?'\u21A9':'\u00D7')+'</td>';
   row.forEach((v,ci)=>{const key=ri+':'+ci;const pend=t.pending&&(key in t.pending.upd);const val=pend?t.pending.upd[key]:v;
    const attr=(ed?'class="editable'+(pend?' dirty':'')+'" onclick="cellClick(this,\''+id+'\','+ri+','+ci+')" ondblclick="editCell(this,\''+id+'\','+ri+','+ci+')" ':'')+'oncontextmenu="cellMenu(event,\''+id+'\','+ri+','+ci+')"';
-   h+='<td '+attr+' title="'+esc(clip(val,300))+'">'+cellHtml(val,t.bitCols&&t.bitCols[ci])+'</td>';});h+='</tr>';});
+   h+='<td '+attr+' title="'+esc(clip(val,300))+'">'+cellHtml(val,t.bitCols&&t.bitCols[ci],t.binCols&&t.binCols[ci])+'</td>';});h+='</tr>';});
  if(botH>0)h+='<tr class="vpad" style="height:'+botH+'px"><td colspan="'+nCols+'" style="padding:0;border:none"></td></tr>';
  if(ed)t.pending.ins.forEach((row,ii)=>{h+='<tr class="insrow"><td></td><td class="delcell" onclick="delIns(\''+id+'\','+ii+')">\u00D7</td>';
-   t.cols.forEach((c,ci)=>{const v=row[c];const cAttr=esc(c).replace(/\x27/g,'\\x27');h+='<td class="editable" onclick="insClick(this,\''+id+'\','+ii+',\''+cAttr+'\')" ondblclick="editIns(this,\''+id+'\','+ii+',\''+cAttr+'\')" oncontextmenu="insCellMenu(event,\''+id+'\','+ii+',\''+cAttr+'\')" title="'+esc(v)+'">'+cellHtml(v===undefined?null:v,t.bitCols&&t.bitCols[ci])+'</td>';});h+='</tr>';});
+   t.cols.forEach((c,ci)=>{const v=row[c];const cAttr=esc(c).replace(/\x27/g,'\\x27');h+='<td class="editable" onclick="insClick(this,\''+id+'\','+ii+',\''+cAttr+'\')" ondblclick="editIns(this,\''+id+'\','+ii+',\''+cAttr+'\')" oncontextmenu="insCellMenu(event,\''+id+'\','+ii+',\''+cAttr+'\')" title="'+esc(v)+'">'+cellHtml(v===undefined?null:v,t.bitCols&&t.bitCols[ci],t.binCols&&t.binCols[ci])+'</td>';});h+='</tr>';});
  $('tbody_'+id).innerHTML=h;
  if(wrap&&slice.length){const sampleTr=wrap.querySelector('tbody tr[data-r]');if(sampleTr){const mh=sampleTr.getBoundingClientRect().height;if(mh>4)t._rowH=mh;}}
  updateEditBar(id);}
@@ -2847,6 +2872,9 @@ let _vHexState=null; // {kind:'binText'|'bitNum', mode:'text'|'hex'} for the mod
 function updateHexTabButtons(){
  const bt=$('vTabText'),bh=$('vTabHex');if(!bt||!bh||!_vHexState)return;
  bt.classList.toggle('on',_vHexState.mode==='text');bh.classList.toggle('on',_vHexState.mode==='hex');
+ // Only Text mode hides control characters; in Hex mode the bytes are right there in the box.
+ const ta=$('vText');
+ if(_vHexState.kind==='binText'&&ta)setVNote(_vHexState.mode==='text'?ctrlCharNote(ta.value,true):'');
 }
 function switchHexTab(mode){
  if(!_vHexState||_vHexState.mode===mode)return;
@@ -2904,7 +2932,7 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
   // the widget if dragged smaller). Every other mView mode still needs it (long text, SET/BLOB).
   box.style.resize=opts.dateType?'none':'';
  }
- ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';hexTabs.style.display='none';img.style.display='none';img.removeAttribute('src');_vHexState=null;
+ ta.style.display='none';sel.style.display='none';multi.style.display='none';dt.style.display='none';hexTabs.style.display='none';img.style.display='none';img.removeAttribute('src');_vHexState=null;setVNote('');
  // Checkbox mode: SET columns, whose valid values are any comma-joined COMBINATION of the
  // column's defined members - unlike ENUM (exactly one value), a single dropdown can't represent
  // that, but a checkbox per member can, mirroring how Heidi/Workbench edit SET data.
@@ -2956,6 +2984,9 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
  } else {
   ta.style.display='block';
   ta.value=(text==null?'':text);ta.readOnly=!!opts.readonly;
+  // No Hex tab on this path (an ordinary text column), so this note is the only place the
+  // invisible bytes are mentioned at all.
+  setVNote(ctrlCharNote(ta.value,false));
  }
  const a=$('vActions');a.innerHTML='';const add=(label,cls,fn)=>{const b=document.createElement('button');b.textContent=label;if(cls)b.className=cls;b.onclick=fn;a.appendChild(b);};
  const getVal=()=>{
@@ -3151,9 +3182,9 @@ function insClick(td,id,ii,col){if(td.querySelector('input'))return;inlineEditIn
 // that state. Reverting only the one cell that actually needs reverting avoids the whole class of
 // race entirely.
 function cellRevert(td,id,ri,ci){const t=T(id);const key=ri+':'+ci;const pend=t.pending&&(key in t.pending.upd);const val=pend?t.pending.upd[key]:t.rows[ri][ci];
- td.className='editable'+(pend?' dirty':'');td.title=String(clip(val,300));td.innerHTML=cellHtml(val,t.bitCols&&t.bitCols[ci]);}
+ td.className='editable'+(pend?' dirty':'');td.title=String(clip(val,300));td.innerHTML=cellHtml(val,t.bitCols&&t.bitCols[ci],t.binCols&&t.binCols[ci]);}
 function insCellRevert(td,id,ii,col){const t=T(id);const v=t.pending.ins[ii][col];const ci=t.cols.indexOf(col);
- td.className='editable';td.title=(v===undefined?'undefined':String(v));td.innerHTML=cellHtml(v===undefined?null:v,t.bitCols&&t.bitCols[ci]);}
+ td.className='editable';td.title=(v===undefined?'undefined':String(v));td.innerHTML=cellHtml(v===undefined?null:v,t.bitCols&&t.bitCols[ci],t.binCols&&t.binCols[ci]);}
 async function inlineEdit(td,id,ri,ci){const t=T(id);const key=ri+':'+ci;const cur=(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci];
  // Enum/boolean columns always go through editCell's dropdown - a plain inline text input would
  // let you type a value the column can't actually hold, which the double-click path already avoids.

@@ -4244,77 +4244,81 @@ fn mysql_tools_dir() -> std::path::PathBuf { tools_dir().join("mysql") }
 
 #[tauri::command]
 async fn download_mysql_tools() -> R {
-    tokio::task::spawn_blocking(|| -> R {
-        use md5::Digest;
-        use std::io::{Read, Seek, Write};
-        let client = reqwest::blocking::Client::builder()
-            // dev.mysql.com answers a browser-like User-Agent with 403 (it expects the JavaScript a
-            // browser would run first) and serves the page to one that says it is curl. Measured.
-            .user_agent("curl/8.0 NOBSSQL-Desktop")
-            .timeout(std::time::Duration::from_secs(1800))
-            .build().map_err(|e| e.to_string())?;
-        let cfg = load_cfg();
-        let setting = |k: &str, d: &str| cfg.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or(d).to_string();
-        let page = setting("mysql_download_page", DEFAULT_MYSQL_DOWNLOAD_PAGE);
-        let html = client.get(&page).send().and_then(|r| r.error_for_status()).and_then(|r| r.text())
-            .map_err(|e| format!("Could not read MySQL's download page {page}: {e}"))?;
-        let (file_name, version, md5) = parse_mysql_download_page(&html)
-            .ok_or_else(|| format!("MySQL's download page {page} did not name a Windows ZIP archive."))?;
-        // A download that cannot be checked is not installed.
-        let md5 = md5.ok_or_else(|| format!("MySQL's download page did not show a checksum for {file_name}, so the download was not attempted."))?;
-        let series = version.split('.').take(2).collect::<Vec<_>>().join(".");
-        let fill = |t: &str| t.replace("{series}", &series).replace("{version}", &version).replace("{file_name}", &file_name);
-        let sources = [("download URL", fill(&setting("mysql_download_url_template", DEFAULT_MYSQL_DOWNLOAD_TEMPLATE))),
-                       ("MySQL archive", fill(MYSQL_ARCHIVE_TEMPLATE))];
-        let mut tmp = tempfile::tempfile().map_err(|e| e.to_string())?;
-        let mut ok = false;
-        let mut errs: Vec<String> = Vec::new();
-        for (label, url) in &sources {
-            let attempt = (|| -> Result<(), String> {
-                tmp.set_len(0).map_err(|e| e.to_string())?;
-                tmp.rewind().map_err(|e| e.to_string())?;
-                let mut resp = client.get(url).send().and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
-                let mut hasher = md5::Md5::new();
-                let mut buf = vec![0u8; 1 << 16];
-                loop {
-                    let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
-                    if n == 0 { break; }
-                    hasher.update(&buf[..n]);
-                    tmp.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-                }
-                let got = hex::encode(hasher.finalize());
-                if got != md5 { return Err(format!("checksum mismatch (got {got}, the page says {md5})")); }
-                Ok(())
-            })();
-            match attempt {
-                Ok(()) => { ok = true; break; }
-                Err(e) => errs.push(format!("{label} {url}: {e}")),
+    tokio::task::spawn_blocking(download_mysql_tools_blocking).await.map_err(|e| e.to_string())?
+}
+
+// Split out of the command for the same reason as download_mariadb_tools: so the download can be
+// run by a test (the_mysql_client_tools_download_verifies_and_extracts).
+fn download_mysql_tools_blocking() -> R {
+    use md5::Digest;
+    use std::io::{Read, Seek, Write};
+    let client = reqwest::blocking::Client::builder()
+        // dev.mysql.com answers a browser-like User-Agent with 403 (it expects the JavaScript a
+        // browser would run first) and serves the page to one that says it is curl. Measured.
+        .user_agent("curl/8.0 NOBSSQL-Desktop")
+        .timeout(std::time::Duration::from_secs(1800))
+        .build().map_err(|e| e.to_string())?;
+    let cfg = load_cfg();
+    let setting = |k: &str, d: &str| cfg.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or(d).to_string();
+    let page = setting("mysql_download_page", DEFAULT_MYSQL_DOWNLOAD_PAGE);
+    let html = client.get(&page).send().and_then(|r| r.error_for_status()).and_then(|r| r.text())
+        .map_err(|e| format!("Could not read MySQL's download page {page}: {e}"))?;
+    let (file_name, version, md5) = parse_mysql_download_page(&html)
+        .ok_or_else(|| format!("MySQL's download page {page} did not name a Windows ZIP archive."))?;
+    // A download that cannot be checked is not installed.
+    let md5 = md5.ok_or_else(|| format!("MySQL's download page did not show a checksum for {file_name}, so the download was not attempted."))?;
+    let series = version.split('.').take(2).collect::<Vec<_>>().join(".");
+    let fill = |t: &str| t.replace("{series}", &series).replace("{version}", &version).replace("{file_name}", &file_name);
+    let sources = [("download URL", fill(&setting("mysql_download_url_template", DEFAULT_MYSQL_DOWNLOAD_TEMPLATE))),
+                   ("MySQL archive", fill(MYSQL_ARCHIVE_TEMPLATE))];
+    let mut tmp = tempfile::tempfile().map_err(|e| e.to_string())?;
+    let mut ok = false;
+    let mut errs: Vec<String> = Vec::new();
+    for (label, url) in &sources {
+        let attempt = (|| -> Result<(), String> {
+            tmp.set_len(0).map_err(|e| e.to_string())?;
+            tmp.rewind().map_err(|e| e.to_string())?;
+            let mut resp = client.get(url).send().and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
+            let mut hasher = md5::Md5::new();
+            let mut buf = vec![0u8; 1 << 16];
+            loop {
+                let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
+                if n == 0 { break; }
+                hasher.update(&buf[..n]);
+                tmp.write_all(&buf[..n]).map_err(|e| e.to_string())?;
             }
+            let got = hex::encode(hasher.finalize());
+            if got != md5 { return Err(format!("checksum mismatch (got {got}, the page says {md5})")); }
+            Ok(())
+        })();
+        match attempt {
+            Ok(()) => { ok = true; break; }
+            Err(e) => errs.push(format!("{label} {url}: {e}")),
         }
-        if !ok { return Ok(json!({"ok":false,"error":format!("Could not download {file_name}.\n{}", errs.join("\n"))})); }
-        tmp.rewind().map_err(|e| e.to_string())?;
-        let mut zipf = zip::ZipArchive::new(tmp).map_err(|e| e.to_string())?;
-        let dest = mysql_tools_dir();
-        std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-        let mut got: Vec<&str> = Vec::new();
-        for i in 0..zipf.len() {
-            let mut f = zipf.by_index(i).map_err(|e| e.to_string())?;
-            let Some(base) = mysql_zip_member(f.name()) else { continue };
-            let mut o = std::fs::File::create(dest.join(base)).map_err(|e| e.to_string())?;
-            std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
-            got.push(base);
-        }
-        if got.len() < 2 {
-            return Ok(json!({"ok":false,"error":format!("{file_name} was downloaded and checked, but mysql.exe and mysqldump.exe were not both inside.")}));
-        }
-        let mut cfg = load_cfg();
-        cfg["mysql_bin_mysql"] = json!(dest.join("mysql.exe").to_string_lossy());
-        cfg["mysqldump_bin_mysql"] = json!(dest.join("mysqldump.exe").to_string_lossy());
-        std::fs::write(config_file(), serde_json::to_string_pretty(&cfg).unwrap_or_default()).map_err(|e| e.to_string())?;
-        *tools_status_cache().lock().unwrap() = None;
-        log_line(&format!("download_mysql_tools: {file_name}"));
-        Ok(json!({"ok":true, "message": format!("Downloaded MySQL {version} client tools to {} (checksum verified)", dest.to_string_lossy()), "config": cfg}))
-    }).await.map_err(|e| e.to_string())?
+    }
+    if !ok { return Ok(json!({"ok":false,"error":format!("Could not download {file_name}.\n{}", errs.join("\n"))})); }
+    tmp.rewind().map_err(|e| e.to_string())?;
+    let mut zipf = zip::ZipArchive::new(tmp).map_err(|e| e.to_string())?;
+    let dest = mysql_tools_dir();
+    std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+    let mut got: Vec<&str> = Vec::new();
+    for i in 0..zipf.len() {
+        let mut f = zipf.by_index(i).map_err(|e| e.to_string())?;
+        let Some(base) = mysql_zip_member(f.name()) else { continue };
+        let mut o = std::fs::File::create(dest.join(base)).map_err(|e| e.to_string())?;
+        std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
+        got.push(base);
+    }
+    if got.len() < 2 {
+        return Ok(json!({"ok":false,"error":format!("{file_name} was downloaded and checked, but mysql.exe and mysqldump.exe were not both inside.")}));
+    }
+    let mut cfg = load_cfg();
+    cfg["mysql_bin_mysql"] = json!(dest.join("mysql.exe").to_string_lossy());
+    cfg["mysqldump_bin_mysql"] = json!(dest.join("mysqldump.exe").to_string_lossy());
+    std::fs::write(config_file(), serde_json::to_string_pretty(&cfg).unwrap_or_default()).map_err(|e| e.to_string())?;
+    *tools_status_cache().lock().unwrap() = None;
+    log_line(&format!("download_mysql_tools: {file_name}"));
+    Ok(json!({"ok":true, "message": format!("Downloaded MySQL {version} client tools to {} (checksum verified)", dest.to_string_lossy()), "config": cfg}))
 }
 
 // ---------- update notice ----------
@@ -4891,6 +4895,32 @@ mod tests {
         // And the config now points at what was just unpacked, which is what makes export work.
         let cfg = load_cfg();
         assert!(cfg["mysql_bin"].as_str().unwrap_or("").ends_with(".exe"), "{cfg}");
+    }
+
+    // The MySQL download, same idea as the MariaDB one above and for a reason of its own: MySQL
+    // publishes no release API, so the version, the file name and the MD5 are all read out of the
+    // HTML of dev.mysql.com's download page (parse_mysql_download_page). A restyle of that page
+    // breaks the regex, and because the code then correctly refuses to install what it cannot
+    // check, the feature stops working silently - nothing fails until a user clicks the button.
+    // This is the check that notices. ~270 MB, so CI runs it on the weekly schedule rather than on
+    // every push (see .github/workflows/test.yml).
+    #[test]
+    #[ignore]
+    fn the_mysql_client_tools_download_verifies_and_extracts() {
+        if std::env::var("NOBS_TEST_TOOLS_DOWNLOAD").is_err() {
+            eprintln!("NOBS_TEST_TOOLS_DOWNLOAD not set - skipping"); return;
+        }
+        let r = download_mysql_tools_blocking().expect("the download returned an error");
+        assert_eq!(r["ok"], json!(true), "{r}");
+        // Only these two are kept out of the server archive, and they are what Export runs.
+        for exe in ["mysql.exe", "mysqldump.exe"] {
+            let p = mysql_tools_dir().join(exe);
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            assert!(size > 1_000_000, "{} is missing or truncated ({size} bytes)", p.display());
+        }
+        // The MySQL paths are separate from the MariaDB ones on purpose - MySQL servers use these.
+        let cfg = load_cfg();
+        assert!(cfg["mysql_bin_mysql"].as_str().unwrap_or("").ends_with(".exe"), "{cfg}");
     }
 
     #[test]

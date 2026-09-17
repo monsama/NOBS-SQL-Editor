@@ -34,7 +34,7 @@ function extractConst(src, name) {
 }
 
 const NAMES = ['sqlHead', 'useTarget', 'scriptShowsResults', 'parseSingleEditableTable', 'refreshRunTableBinding',
-  'esc', 'clip', 'ctrlBadge', 'textCellHtml'];
+  'esc', 'clip', 'ctrlBadge', 'textCellHtml', 'decodeCtrlCharCell', 'hexToBitNumber', 'cellHtml', 'ctrlCharNote'];
 const bundle = [extractConst(html, 'CTRL_NAMES'), extractConst(html, 'CTRL_RE'),
   ...NAMES.map(n => extractFunction(html, n))].join('\n');
 
@@ -90,6 +90,37 @@ test('a NUL inside text is shown, not swallowed', () => {
   assert.match(h, /^a<span[^>]*>NUL<\/span>b$/);
   assert.equal(f.textCellHtml('tab\there\nand <b>', 300), 'tab\there\nand &lt;b&gt;', 'tab and line break are ordinary text');
   assert.match(f.textCellHtml('x' + String.fromCharCode(27) + 'y', 300), />ESC</);
+});
+
+// A zero-byte binary value is "0x" - the prefix and nothing else - which misses the hex branch's
+// one-or-more-digits test and used to be printed as those two characters, the wire format leaking
+// into the grid. The column's declared type decides, because a VARCHAR really can hold "0x".
+test('a binary column with no bytes says so rather than printing 0x', () => {
+  const f = load({}, 'a');
+  assert.match(f.cellHtml('0x', false, true), /\(0 bytes\)/);
+  assert.equal(f.cellHtml('0x', false, false), '0x', 'a text column holding those two characters shows them');
+  assert.equal(f.cellHtml('0x', false, undefined), '0x', 'and so does a grid with no column types at all');
+  assert.match(f.cellHtml('', false, true), /\(empty\)/, 'an empty string stays (empty) - not the same thing');
+  assert.match(f.cellHtml(null, false, true), /\(NULL\)/);
+  assert.match(f.cellHtml('0x6100', false, true), />NUL</, 'a value with bytes still decodes, badges and all');
+});
+
+// The grid badges a control character; the cell editor is a textarea and cannot, so it says what is
+// in there instead. Deliberately not rendered into the box itself - Text mode saves the box's
+// contents byte for byte, so a visible stand-in would be saved as its own characters.
+test('the cell editor is told about control characters it cannot show', () => {
+  const f = load({}, 'a');
+  const N = String.fromCharCode(0);
+  assert.equal(f.ctrlCharNote('plain text', true), '', 'nothing to say about ordinary text');
+  assert.equal(f.ctrlCharNote('tab\there\nand a break', true), '', 'tab and line break are ordinary text, and visible');
+  const one = f.ctrlCharNote('a' + N, true);
+  assert.match(one, /1 control character \(NUL\)/);
+  assert.match(one, /takes no space/, 'singular reads as singular');
+  assert.match(one, /switch to Hex/, 'a binary cell can be edited as bytes instead');
+  const many = f.ctrlCharNote('a' + N + 'b' + N + String.fromCharCode(27), true);
+  assert.match(many, /3 control characters \(NUL ×2, ESC\), which take no space/);
+  assert.doesNotMatch(f.ctrlCharNote('a' + N, false), /Hex/, 'an ordinary text column has no Hex tab to point at');
+  assert.equal(f.ctrlCharNote(null, false), '', 'a NULL cell has no text to describe');
 });
 
 // A procedure's results, and every SELECT but the last in a script, were run and thrown away. Such a

@@ -13,6 +13,18 @@ on:
   push:
     branches: [main]
   pull_request: {}
+  # Weekly, because two of the jobs below depend on someone else's website keeping its shape:
+  # mariadb.org's release API (tools-download) and both vendors' download pages (the servers the
+  # live tests run against). Nothing here would notice such a break on its own - no push is
+  # needed to cause it - so without a schedule the first report comes from a user whose download
+  # button stopped working. Monday morning, and deliberately not on the hour (GitHub delays
+  # scheduled runs at popular times). Note GitHub disables scheduled workflows in a repository
+  # with no pushes for 60 days, and emails before it does.
+  schedule:
+    - cron: '17 6 * * 1'
+  # So the same checks can be run on demand without pushing anything - and, below, so the slower
+  # scheduled-only steps can be triggered by hand.
+  workflow_dispatch: {}
 
 jobs:
   test:
@@ -192,6 +204,19 @@ jobs:
         env:
           NOBS_TEST_TOOLS_DOWNLOAD: '1'
         run: cargo test the_mariadb_client_tools_download -- --ignored --nocapture
+
+      # MySQL's is ~270 MB (the whole server archive, of which two binaries are kept) and its
+      # version, file name and MD5 come out of the HTML of dev.mysql.com's download page rather
+      # than an API - so it is the more likely of the two to break, and the more expensive to
+      # check. On the schedule and on demand, then, not on every push: a restyled page breaks the
+      # download for users whether or not anyone pushed that week, which is the case a weekly run
+      # covers and a per-PR run would only make slower.
+      - name: Download, verify and extract the MySQL client tools
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        working-directory: src-tauri
+        env:
+          NOBS_TEST_TOOLS_DOWNLOAD: '1'
+        run: cargo test the_mysql_client_tools_download -- --ignored --nocapture
 
       # What it left on disk, when it failed - a truncated archive and a checksum mismatch look
       # the same in the assertion message, but not here.
