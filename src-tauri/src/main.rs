@@ -1754,7 +1754,7 @@ async fn script(req: Value) -> R {
         let mut c = build_conn(&req["conn"])?;
         let db = req["db"].as_str().unwrap_or("");
         if !db.is_empty() {
-            c.query_drop(format!("USE {}", sql_id(db))).map_err(|e| e.to_string())?;
+            c.query_drop(format!("USE {}", sql_id(db))).map_err(db_err)?;
         }
         let statements = split_sql_statements(&raw);
         let total = statements.len();
@@ -1805,6 +1805,69 @@ async fn script(req: Value) -> R {
             }
         }
         Ok(json!({"ok":failures.is_empty(),"total":total,"succeeded":succeeded,"failures":failures}))
+    }).await.map_err(|e| e.to_string())?
+}
+
+// Runs a script on one connection and returns every result set it produces - a procedure's
+// SELECTs, or several SELECTs in a row - which the plain script run discards. At most maxRows rows
+// (default 1000) are kept per result; rowCount counts them all. Stops at the first error and
+// returns it with the results produced before it.
+#[tauri::command]
+async fn script_results(req: Value) -> R {
+    tokio::task::spawn_blocking(move || {
+        let raw = req["sql"].as_str().unwrap_or("").to_string();
+        if req["ro"].as_bool().unwrap_or(false) && !sql_is_readonly(&raw) {
+            return Ok(json!({"ok":false,"error":"Read-only mode: statement blocked."}));
+        }
+        let max_rows = req["maxRows"].as_u64().unwrap_or(1000).max(1) as usize;
+        let mut c = build_conn(&req["conn"])?;
+        if let Some(db) = req["db"].as_str().filter(|d| !d.is_empty()) {
+            c.query_drop(format!("USE {}", sql_id(db))).map_err(db_err)?;
+        }
+        let request_id = req["requestId"].as_str().filter(|s| !s.is_empty()).map(String::from);
+        if let Some(rid) = &request_id {
+            if let Ok((_c, rows)) = run_select(&mut c, "SELECT CONNECTION_ID()") {
+                if let Some(cid) = rows.first().and_then(|r| r.first()).cloned().flatten().and_then(|s| s.parse::<u64>().ok()) {
+                    running_queries().lock().unwrap().insert(rid.clone(), (cid, req["conn"].clone()));
+                }
+            }
+        }
+        let statements = split_sql_statements(&raw);
+        let total = statements.len();
+        let mut results: Vec<Value> = Vec::new();
+        let mut error: Option<String> = None;
+        'statements: for (idx, stmt) in statements.iter().enumerate() {
+            let preview: String = stmt.chars().take(120).collect();
+            let mut qr = match c.query_iter(stmt) {
+                Ok(r) => r,
+                Err(e) => { error = Some(format!("Statement {} of {} failed: {}
+
+{}", idx + 1, total, db_err(e), preview)); break },
+            };
+            while let Some(set) = qr.iter() {
+                let (cols, bin, bit): (Vec<String>, Vec<bool>, Vec<bool>) = {
+                    let cs = set.columns();
+                    let sl: &[Column] = cs.as_ref();
+                    (sl.iter().map(|c| c.name_str().to_string()).collect(), sl.iter().map(is_binaryish).collect(), sl.iter().map(is_bit_col).collect())
+                };
+                if cols.is_empty() { continue; }   // the OK packet of a statement without rows
+                let mut rows: Vec<Vec<Option<String>>> = Vec::new();
+                let mut count = 0usize;
+                for r in set {
+                    match r {
+                        Ok(row) => { count += 1; if rows.len() < max_rows { rows.push(decode_row(&row, &bin)); } }
+                        Err(e) => { error = Some(format!("Statement {} of {} failed: {}
+
+{}", idx + 1, total, db_err(e), preview)); break 'statements; }
+                    }
+                }
+                results.push(json!({"statement": idx + 1, "sql": preview, "columns": cols, "binaryCols": bin, "bitCols": bit,
+                                    "rows": rows, "rowCount": count, "truncated": count > max_rows}));
+            }
+        }
+        let cancelled = request_id.as_deref().map(|rid| { running_queries().lock().unwrap().remove(rid); take_query_cancelled(rid) }).unwrap_or(false);
+        if cancelled { return Ok(json!({"ok":false,"cancelled":true,"error":"Query cancelled.","results":results,"total":total})); }
+        Ok(json!({"ok": error.is_none(), "error": error, "results": results, "total": total}))
     }).await.map_err(|e| e.to_string())?
 }
 
@@ -4192,7 +4255,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            connect, schemas, objects, ddl, pk, query, exec, rowop, script, fetch_cursor_batch, close_cursor,
+            connect, schemas, objects, ddl, pk, query, exec, rowop, script, script_results, fetch_cursor_batch, close_cursor,
             import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, download_mysql_tools, tools_status, tools_for_conn, update_check, open_release_page, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd, open_support_link
         ])
         .run(tauri::generate_context!())
@@ -5073,6 +5136,48 @@ mod csv_null_tests {
         q("DROP TABLE IF EXISTS csv_null_rt").await;
         q("DROP TABLE IF EXISTS csv_null_rt2").await;
         let _ = std::fs::remove_file(&file);
+    }
+
+    // A procedure's results, and every SELECT but the last in a script, were run and thrown away.
+    #[tokio::test]
+    #[ignore]
+    async fn a_script_returns_every_result_set() {
+        let Some(conn) = conn_json() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let run = |sql: &str, max: u64| { let c = conn.clone(); let s = sql.to_string();
+            async move { script_results(json!({"sql":s,"conn":c,"db":"nobs_test","maxRows":max})).await.unwrap() } };
+        let setup = script(json!({"conn":conn,"db":"nobs_test","sql":
+            "DROP PROCEDURE IF EXISTS sr_two; DROP TABLE IF EXISTS sr_t; CREATE TABLE sr_t (id INT PRIMARY KEY, v VARCHAR(10), b VARBINARY(4)); \
+             INSERT INTO sr_t VALUES (1,'one',0x00FF),(2,NULL,NULL),(3,'NULL',X'')"})).await.unwrap();
+        assert_eq!(setup["ok"], true, "{setup}");
+        let proc = script(json!({"conn":conn,"db":"nobs_test","sql":
+            "DELIMITER $$\nCREATE PROCEDURE sr_two(IN n INT)\nBEGIN\n  SELECT id, v FROM sr_t WHERE id <= n ORDER BY id;\n  UPDATE sr_t SET v = 'touched' WHERE id = 3;\n  SELECT COUNT(*) AS c, MAX(b) AS mb FROM sr_t;\nEND$$\nDELIMITER ;"})).await.unwrap();
+        assert_eq!(proc["ok"], true, "{proc}");
+
+        let r = run("CALL sr_two(2);", 1000).await;
+        assert_eq!(r["ok"], true, "{r}");
+        let sets = r["results"].as_array().unwrap();
+        assert_eq!(sets.len(), 2, "both of the procedure's results: {r}");
+        assert_eq!(sets[0]["columns"], json!(["id", "v"]));
+        assert_eq!(sets[0]["rows"], json!([["1", "one"], ["2", null]]), "NULL stays NULL");
+        assert_eq!(sets[1]["rows"], json!([["3", "0x00ff"]]), "binary as hex");
+        assert_eq!(sets[1]["binaryCols"], json!([false, true]));
+
+        let r = run("SELECT 'NULL' AS a; SELECT id FROM sr_t WHERE 0; SELECT id FROM bulk_rows ORDER BY id", 10).await;
+        let sets = r["results"].as_array().unwrap();
+        assert_eq!(sets.len(), 3, "{r}");
+        assert_eq!(sets[0]["rows"], json!([["NULL"]]), "the text NULL is text");
+        assert_eq!(sets[1]["columns"], json!(["id"]), "an empty result still has its columns");
+        assert_eq!((sets[2]["rows"].as_array().unwrap().len(), sets[2]["rowCount"].clone(), sets[2]["truncated"].clone()), (10, json!(100000), json!(true)));
+
+        let r = run("SELECT 1 AS a; SELECT * FROM sr_no_such_table; SELECT 2 AS b", 10).await;
+        assert_eq!(r["ok"], false);
+        assert!(r["error"].as_str().unwrap().starts_with("Statement 2 of 3 failed"), "{r}");
+        assert_eq!(r["results"].as_array().unwrap().len(), 1, "the result before the error is kept: {r}");
+
+        let ro = script_results(json!({"sql":"CALL sr_two(1)","conn":conn,"db":"nobs_test","ro":true})).await.unwrap();
+        assert_eq!(ro["ok"], false, "read-only mode refuses a CALL: {ro}");
+
+        let _ = script(json!({"conn":conn,"db":"nobs_test","sql":"DROP PROCEDURE sr_two; DROP TABLE sr_t"})).await;
     }
 
     // Exports read SELECT *, which leaves out INVISIBLE columns, and the INSERT export wrote a

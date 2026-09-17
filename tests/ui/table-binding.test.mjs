@@ -33,7 +33,7 @@ function extractConst(src, name) {
   return src.slice(start, src.indexOf(';\n', start) + 1)
 }
 
-const NAMES = ['sqlHead', 'useTarget', 'parseSingleEditableTable', 'refreshRunTableBinding',
+const NAMES = ['sqlHead', 'useTarget', 'scriptShowsResults', 'parseSingleEditableTable', 'refreshRunTableBinding',
   'esc', 'clip', 'ctrlBadge', 'textCellHtml'];
 const bundle = [extractConst(html, 'CTRL_NAMES'), extractConst(html, 'CTRL_RE'),
   ...NAMES.map(n => extractFunction(html, n))].join('\n');
@@ -90,4 +90,17 @@ test('a NUL inside text is shown, not swallowed', () => {
   assert.match(h, /^a<span[^>]*>NUL<\/span>b$/);
   assert.equal(f.textCellHtml('tab\there\nand <b>', 300), 'tab\there\nand &lt;b&gt;', 'tab and line break are ordinary text');
   assert.match(f.textCellHtml('x' + String.fromCharCode(27) + 'y', 300), />ESC</);
+});
+
+// A procedure's results, and every SELECT but the last in a script, were run and thrown away. Such a
+// script now shows each result; a single query keeps the editable grid.
+test('a script shows every result when it calls a procedure or has several SELECTs', () => {
+  const f = load({}, 'a');
+  assert.equal(f.scriptShowsResults(['CALL p(1)']), true);
+  assert.equal(f.scriptShowsResults(['-- first' + String.fromCharCode(10) + 'call p()']), true);
+  assert.equal(f.scriptShowsResults(['SELECT 1', 'SHOW TABLES']), true);
+  assert.equal(f.scriptShowsResults(['SELECT * FROM t']), false, 'one query: the editable grid');
+  assert.equal(f.scriptShowsResults(['USE b', 'SELECT * FROM t']), false);
+  assert.equal(f.scriptShowsResults(['UPDATE t SET a = 1', 'SELECT * FROM t']), false);
+  assert.equal(f.scriptShowsResults(['UPDATE t SET a = 1']), false);
 });

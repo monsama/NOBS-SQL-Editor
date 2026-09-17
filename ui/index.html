@@ -1849,7 +1849,7 @@ function openTab(title,sql,db,run,table,ddl){const id='t'+(++tabSeq);title=uniqu
   '<span class="tbsep"></span></span>'+
   '<span style="flex:1 1 auto"></span>'+
   '<span id="edit_'+id+'" style="display:inline-flex;align-items:center;gap:6px"></span>'+pager+'</div>'+
-  '<div class="result" id="res_'+id+'"></div><div class="status" id="st_'+id+'">Ready.</div>';
+  '<div id="rsets_'+id+'" style="display:none;gap:6px;align-items:center;flex-wrap:wrap;padding:4px 8px"></div><div class="result" id="res_'+id+'"></div><div class="status" id="st_'+id+'">Ready.</div>';
  $('panes').appendChild(pane);const ta=$('ed_'+id);ta.value=sql||'';
  const ra1=$('resultActions_'+id);if(ra1)ra1.style.display='none';
  (function(){const es=$('es_'+id),ew=$('ew_'+id);es.addEventListener('mousedown',e=>{e.preventDefault();const sy=e.clientY,sh=ew.offsetHeight,maxH=ew.parentElement.clientHeight-120;
@@ -2151,6 +2151,54 @@ function markEdited(id){
  if(edited!==!!t.sqlEdited){ t.sqlEdited=edited; if(activeTab===id) updateSchemaBadge(id); }
 }
 function dbOf(t){ if(t&&(t.table||t.ddl)&&!t.sqlEdited)return t.db||curSchema||null; /* table-view + DDL tabs keep their own schema, until their SQL is edited - see markEdited() */ return curSchema||(t&&t.db)||null; /* plain query tabs follow the selected sidebar schema */ }
+// Whether a script's results are all worth showing: it calls a procedure, or has more than one
+// statement that returns rows. Both used to show nothing but the last SELECT - a procedure's results
+// and every earlier SELECT were run and thrown away.
+function scriptShowsResults(stmts){
+ const heads=stmts.map(s=>sqlHead(s));
+ if(heads.some(h=>/^call\b/i.test(h)))return true;
+ return heads.filter(h=>/^(select|show|describe|desc|explain|with|table|values)\b/i.test(h)).length>1;
+}
+// Runs such a script on one connection and shows each result in a tab of its own. These grids
+// are read-only: a result of a script is not tied to one table's rows.
+async function runScriptResults(id,sql,reqId){
+ const t=T(id);const st=$('st_'+id);
+ const stmts=splitStmts(sql).filter(s=>!isCommentOnly(s));
+ const writes=stmts.some(s=>!/^(select|show|describe|desc|explain|with|table|values|use)\b/i.test(sqlHead(s)));
+ if(writes&&roBlock()){st.className='status';st.textContent='Read-only mode: statement blocked.';return;}
+ const r=await api('/api/script-results',{sql,db:dbOf(t),requestId:reqId,maxRows:PAGE_BATCH},t.abortCtrl.signal);
+ if(r.aborted){if(T(id)){st.className='status';st.textContent='Query cancelled.';}return;}
+ if(!T(id))return;
+ t.table=null;t.pk=null;t.pending=null;t.cursorId=null;t.cursorReqId=null;t.hasMore=false;t.exact=false;
+ {const eb=$('edit_'+id);eb.innerHTML='';delete eb.dataset.sig;}
+ const selb=$('selbtn_'+id);if(selb)selb.innerHTML='';
+ t.resultSets=r.results||[];
+ if(t.resultSets.length){showResultSet(id,0);}
+ else{t.cols=[];t.rows=[];$('res_'+id).innerHTML='';renderResultSetTabs(id);updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';}
+ const n=t.resultSets.length;
+ if(r.ok){st.className='status';st.textContent='OK. '+stmts.length+' statement(s) executed, '+n+' result(s).';log('SCRIPT OK ('+stmts.length+' statements, '+n+' results)');}
+ else{st.className='status err';st.textContent=(r.error||'Failed.')+(n?' - showing the '+n+' result(s) produced before it.':'');log(logErr(r.error||'Failed.'));}
+ if(writes&&t.db)loadObjects(t.db);
+}
+function showResultSet(id,i){
+ const t=T(id);if(!t||!t.resultSets||!t.resultSets[i])return;
+ const rs=t.resultSets[i];t.resultIdx=i;
+ t.cols=rs.columns;t.rows=rs.rows;t.binCols=rs.binaryCols||[];t.bitCols=rs.bitCols||null;
+ t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();t._total=null;
+ renderResultSetTabs(id);
+ const ra=$('resultActions_'+id);if(ra)ra.style.display=t.cols.length?'inline-flex':'none';
+ if(!t.cols.length){$('res_'+id).innerHTML='<div class="muted" style="padding:8px">No rows. (Column names are only known when there are rows.)</div>';}
+ else renderGrid(id);
+ updatePager(id);
+}
+function renderResultSetTabs(id){
+ const t=T(id);const el=$('rsets_'+id);if(!el)return;
+ const sets=(t&&t.resultSets)||[];const cur=sets[t&&t.resultIdx||0];
+ if(!sets.length||(sets.length===1&&!cur.truncated)){el.style.display='none';el.innerHTML='';return;}
+ el.style.display='flex';
+ el.innerHTML=(sets.length>1?sets.map((s,i)=>'<button class="sm" style="'+(i===t.resultIdx?'border-color:var(--accent);font-weight:600':'')+'" title="'+esc('Statement '+s.statement+': '+s.sql)+'" onclick="showResultSet(\''+id+'\','+i+')">Result '+(i+1)+' ('+fmtCount(s.rowCount)+')</button>').join(''):'')
+  +(cur&&cur.truncated?'<span class="muted">Showing the first '+fmtCount(cur.rows.length)+' of '+fmtCount(cur.rowCount)+' rows.</span>':'');
+}
 // runSql(): send the editor SQL to the server and show the rows (or the error).
 async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sql!==t.curRun){t.prevRun=t.curRun;t.curRun=sql;}const st=$('st_'+id);st.className='status';st.textContent='Running\u2026';
  addHistory(sql);
@@ -2175,6 +2223,9 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
  const leadingAreAllUse=stmts.length>1&&stmts.slice(0,-1).every(s=>/^use\s+\S/i.test(sqlHead(s)));
  const needsScriptStep=stmts.length>1&&isSelectLast&&!leadingAreAllUse;
  const isSelect=isSelectLast;
+ // A CALL, or more than one SELECT: every result is shown, each in its own tab.
+ const multiResult=scriptShowsResults(stmts);
+ if(t.resultSets){t.resultSets=null;renderResultSetTabs(id);}
  const reqId=(crypto.randomUUID?crypto.randomUUID():('r'+Date.now()+Math.random()));
  // Starting a fresh run in this tab (including "run again"/toggling the last query, which all
  // funnel through runSql) replaces whatever result set is currently loaded, so any cursor left
@@ -2183,7 +2234,9 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
  closeCursorFor(t);
  t.abortCtrl=new AbortController();t.runningReqId=reqId;setRunning(id,true);
  try{
-  if(isSelect){
+  if(multiResult){
+    await runScriptResults(id,sql,reqId);
+  } else if(isSelect){
     if(needsScriptStep){
       // Each leading statement was already correctly, individually extracted by splitStmts()
       // above - including correctly handling any DELIMITER directive within it (a procedure's

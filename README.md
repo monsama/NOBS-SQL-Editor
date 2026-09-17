@@ -21,6 +21,8 @@ Run anyway** to continue. See [CODE_SIGNING.md](CODE_SIGNING.md) for the plan.
   events) with quick filtering.
 - Tabbed SQL editor with syntax highlighting, lightweight autocomplete, run whole
   script or selection, and result grids with per-column filtering and sorting.
+  A procedure call, or a script with several SELECTs, shows each result in a tab
+  of its own.
 - Inline and full-row editing with a staged pending-changes model applied inside
   a transaction; add / delete rows.
 - Column resize and show/hide; row-detail form view for wide tables.
