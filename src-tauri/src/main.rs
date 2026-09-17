@@ -196,8 +196,9 @@ fn clear_compare_cancel(rid: &str) { cancelled_compares().lock().unwrap().remove
 // see until it finishes on its own - so Stop looked like it did nothing on any table big enough
 // for that one query to take a while, and closing the Compare Databases dialog mid-scan left it
 // running in the background for the same reason.
-fn running_compare_conns() -> &'static Mutex<std::collections::HashMap<String, Vec<(u64, Value)>>> {
-    static MAP: OnceLock<Mutex<std::collections::HashMap<String, Vec<(u64, Value)>>>> = OnceLock::new();
+type CompareConnMap = std::collections::HashMap<String, Vec<(u64, Value)>>;
+fn running_compare_conns() -> &'static Mutex<CompareConnMap> {
+    static MAP: OnceLock<Mutex<CompareConnMap>> = OnceLock::new();
     MAP.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 fn register_compare_conn(rid: &Option<String>, conn: &mut Conn, connj: &Value) {
@@ -428,10 +429,18 @@ fn db_err(e: impl std::string::ToString) -> String {
         .map(|r| r.to_string()).unwrap_or(s)
 }
 
+// A result read into memory: its column names and its rows, a value per column (None for NULL).
+type Rows = Vec<Vec<Option<String>>>;
+type Table = (Vec<String>, Rows);
+// What opening a cursor answers: column names, which are binary, and which are BIT.
+type CursorOpen = Result<(Vec<String>, Vec<bool>, Vec<bool>), String>;
+// What open_cursor answers: cursor id, columns, binary and BIT flags, the first rows, has_more.
+type CursorFirstPage = (String, Vec<String>, Vec<bool>, Vec<bool>, Rows, bool);
+
 // Which columns are binary/BIT is decided here for display encoding; run_select_bin also hands
 // it back so the grid can refuse to write a decimal into one. Typing 8 into a BIT(8) cell stored
 // 56 - the byte value of the character '8' - with no error at all.
-fn run_select_bin(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option<String>>>, Vec<bool>), String> {
+fn run_select_bin(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Rows, Vec<bool>), String> {
     let mut result = conn.query_iter(sql).map_err(db_err)?;
     let cols: Vec<String> = result.columns().as_ref().iter().map(|c| c.name_str().to_string()).collect();
     let bin: Vec<bool> = result.columns().as_ref().iter().map(is_binaryish).collect();
@@ -443,7 +452,7 @@ fn run_select_bin(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Op
     Ok((cols, rows, bin))
 }
 
-fn run_select(conn: &mut Conn, sql: &str) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+fn run_select(conn: &mut Conn, sql: &str) -> Result<Table, String> {
     let (c, r, _) = run_select_bin(conn, sql)?;
     Ok((c, r))
 }
@@ -510,10 +519,10 @@ fn next_cursor_id() -> String {
 // which are binary, or the error `conn.query_iter` failed with), and the sender used for every
 // Fetch/Close for the lifetime of the cursor.
 fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String, request_id: Option<String>) -> (
-    std::sync::mpsc::Receiver<Result<(Vec<String>, Vec<bool>, Vec<bool>), String>>,
+    std::sync::mpsc::Receiver<CursorOpen>,
     std::sync::mpsc::Sender<CursorCmd>,
 ) {
-    let (open_tx, open_rx) = std::sync::mpsc::channel::<Result<(Vec<String>, Vec<bool>, Vec<bool>), String>>();
+    let (open_tx, open_rx) = std::sync::mpsc::channel::<CursorOpen>();
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<CursorCmd>();
     std::thread::spawn(move || {
         let mut conn = conn;
@@ -599,7 +608,7 @@ fn spawn_cursor_thread(conn: Conn, sql: String, cursor_id: String, request_id: O
 // page of rows, and has_more. `request_id`, if supplied, is the same id query() registered in
 // running_queries() before calling this - handed to the cursor thread so it (not this function's
 // caller) can eventually clear that registration once the cursor genuinely closes.
-fn open_cursor(conn: Conn, sql: String, first_n: usize, request_id: Option<String>) -> Result<(String, Vec<String>, Vec<bool>, Vec<bool>, Vec<Vec<Option<String>>>, bool), String> {
+fn open_cursor(conn: Conn, sql: String, first_n: usize, request_id: Option<String>) -> Result<CursorFirstPage, String> {
     let cursor_id = next_cursor_id();
     let (open_rx, cmd_tx) = spawn_cursor_thread(conn, sql, cursor_id.clone(), request_id);
     let (cols, bin, bit) = match open_rx.recv() {
@@ -1223,16 +1232,11 @@ fn strip_leading_use_statements(sql: &str) -> (Option<String>, String) {
     let use_re = regex::Regex::new(r"(?is)^\s*use\s+(`[^`]+`|[A-Za-z0-9_$]+)\s*;\s*").unwrap();
     let mut remaining = sql.to_string();
     let mut last_db: Option<String> = None;
-    loop {
-        match use_re.captures(&remaining) {
-            Some(caps) => {
-                let raw = caps.get(1).unwrap().as_str();
-                last_db = Some(raw.trim_matches('`').to_string());
-                let matched_len = caps.get(0).unwrap().end();
-                remaining = remaining[matched_len..].to_string();
-            }
-            None => break,
-        }
+    while let Some(caps) = use_re.captures(&remaining) {
+        let raw = caps.get(1).unwrap().as_str();
+        last_db = Some(raw.trim_matches('`').to_string());
+        let matched_len = caps.get(0).unwrap().end();
+        remaining = remaining[matched_len..].to_string();
     }
     (last_db, remaining)
 }
@@ -2725,7 +2729,7 @@ fn row_key(row: &[Option<String>]) -> String {
 // reasoning as elsewhere: MySQL's max_allowed_packet and general sanity for very large IN-lists).
 // Shared by compare_rows (its first page) and compare_rows_fetch_by_pk (loading a later page the
 // client already knows about, without re-scanning the whole table again).
-fn get_rows_by_pk(conn: &mut Conn, db: &str, table: &str, pk_cols: &[String], pk_values: &[Vec<Option<String>>]) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+fn get_rows_by_pk(conn: &mut Conn, db: &str, table: &str, pk_cols: &[String], pk_values: &[Vec<Option<String>>]) -> Result<Table, String> {
     if pk_values.is_empty() { return Ok((Vec::new(), Vec::new())); }
     let bin = binary_column_set(conn, db, table)?;
     let fetch_chunk = 200;
@@ -3695,14 +3699,14 @@ async fn download_tools(_app: tauri::AppHandle) -> R {
             .filter(|r| r["release_status"].as_str() == Some("Stable")
                      && r["release_support_type"].as_str() == Some("Long Term Support"))
             .filter_map(|r| r["release_id"].as_str().map(String::from)).collect();
-        branches.sort_by(|a, b| ver_key(b).cmp(&ver_key(a)));
+        branches.sort_by_key(|a| std::cmp::Reverse(ver_key(a)));
         let branch = branches.first().cloned().ok_or("No stable LTS branch found.")?;
         // 2) latest patch version in that branch
         let binfo: Value = client.get(format!("https://downloads.mariadb.org/rest-api/mariadb/{}/", branch))
             .send().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
         let rel = binfo["releases"].as_object().ok_or("No releases in branch.")?;
         let mut patches: Vec<String> = rel.keys().cloned().collect();
-        patches.sort_by(|a, b| ver_key(b).cmp(&ver_key(a)));
+        patches.sort_by_key(|a| std::cmp::Reverse(ver_key(a)));
         let patch = patches.first().cloned().ok_or("No patch version found.")?;
         // 3) winx64 zip (non-debug)
         let files = binfo["releases"][&patch]["files"].as_array().cloned().unwrap_or_default();
@@ -5125,7 +5129,7 @@ mod compare_tests {
     fn scalar(sql: &str) -> String {
         let mut conn = build_conn(&conn_j()).unwrap();
         let (_c, r) = run_select(&mut conn, sql).unwrap();
-        r.get(0).and_then(|x| x.get(0)).cloned().flatten().unwrap_or_default()
+        r.first().and_then(|x| x.first()).cloned().flatten().unwrap_or_default()
     }
 
     #[tokio::test]

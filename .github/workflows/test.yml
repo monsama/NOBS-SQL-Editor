@@ -33,6 +33,12 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      # Clippy is clean, so any warning here is new. A newer stable Rust can add lints too - then
+      # this step names them and the fix is usually what clippy itself suggests.
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
       # node --test expands the tests/ui/*.test.mjs glob itself rather than relying on the shell
       # (the CI shell here is PowerShell, which would not), and that needs Node 21+ - so pin it
       # instead of taking whatever the runner image happens to ship.
