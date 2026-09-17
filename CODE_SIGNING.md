@@ -25,7 +25,20 @@ describes the policy that will apply once signing is active.
 - Release approval: the maintainer, who reviews and tags each release.
 
 ## Privacy
-This application does not transmit user data to the author. Database
-credentials are stored locally (OS keychain / local config). The only outbound
-network request is an optional, user-initiated download of the MariaDB client
-tools from mariadb.org.
+This application does not transmit user data to the author, and has no
+telemetry. Database credentials are stored locally (OS keychain / local
+config), and database connections go only to the servers the user configures.
+
+Apart from those, the application makes these network requests:
+- **Update check:** a few seconds after start, a request to the GitHub API
+  (`api.github.com`) for the latest release of this project, to show a notice
+  when a newer version exists. It sends nothing beyond the request itself, and
+  can be switched off under Settings -> Updates.
+- **Client tools download,** only when the user clicks the button in Settings:
+  - the MariaDB client tools, from mariadb.org (`downloads.mariadb.org` and
+    `mirror.mariadb.org`);
+  - the MySQL client tools, from dev.mysql.com (`dev.mysql.com` and
+    `cdn.mysql.com`, or `downloads.mysql.com` for older releases).
+
+The release page (github.com) and the author's donation page open in the
+user's browser only when the user clicks them.
