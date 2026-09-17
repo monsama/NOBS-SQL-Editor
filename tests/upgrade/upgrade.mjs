@@ -3,7 +3,7 @@
 // over the Chrome DevTools protocol:
 //
 //   node tests/upgrade/upgrade.mjs --phase before --exe <installed exe> --version <old> --latest <new>
-//       saves a connection with its password, a library query, a setting and a browser value, and
+//       saves a connection with its password, a library query, a setting and the theme, and
 //       checks that the old version offers the new one
 //   node tests/upgrade/upgrade.mjs --phase after --exe <installed exe> --version <new>
 //       checks that all of it is still there after the upgrade, and that the password still connects
@@ -90,7 +90,8 @@ try {
     check('a query is saved to the library', lib.ok, lib);
     const cfg = await ev(`api('/api/save-config',{config:{mariadb_download_url_template:${js(URL_TEMPLATE)}}})`);
     check('a setting is saved', cfg.ok, cfg);
-    await ev(`localStorage.setItem('upgradeTest','kept'),true`);
+    // The light theme: a choice the app keeps in browser storage.
+    await ev(`(localStorage.setItem('theme','light'),true)`);
     const n = await notice();
     check(`the old version offers ${latest}`, n.shown && n.text.includes(latest), n);
   }
@@ -109,7 +110,7 @@ try {
     check('the library query is still there', (lib.items || []).some(q => q.name === QUERY && q.sql === 'SELECT 42'), lib);
     const cfg = await ev(`api('/api/get-config')`);
     check('the setting is still there', cfg.config && cfg.config.mariadb_download_url_template === URL_TEMPLATE, cfg);
-    check('the browser value is still there', await ev(`localStorage.getItem('upgradeTest')`) === 'kept', 'gone');
+    check('the light theme is still chosen', await ev(`localStorage.getItem('theme')==='light'&&!document.body.classList.contains('dark')`), 'dark again');
     const n = await notice();
     check('no update is offered any more', !n.shown, n);
   }
@@ -123,7 +124,7 @@ try {
     check('Clear all app data removes the connection', list.ok && !(list.items || []).length, list);
     const lib = await after(`api('/api/lib-list')`);
     check('and the library', lib.ok && !(lib.items || []).length, lib);
-    check('and the browser value', await after(`localStorage.getItem('upgradeTest')`) === null, 'still there');
+    check('and the theme choice', await after(`localStorage.getItem('theme')`) === null, 'still there');
   }
   // Not awaited in the page: the app exits before it could answer.
   await ev(`(api('/api/quit'),true)`).catch(() => {});

@@ -76,7 +76,9 @@ jobs:
           $out = @(./tests/upgrade/installer.ps1 -Action install -File $file)
           $out
           if ($out.Count -ne 1 -or $out[0] -notlike "$env:FROM_VERSION *") { throw "expected one copy of $env:FROM_VERSION" }
-          "APP_EXE=$($out[0].Substring($out[0].IndexOf(' ') + 1))" | Add-Content $env:GITHUB_ENV
+          $exe = $out[0].Substring($out[0].IndexOf(' ') + 1)
+          if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { throw "the installed exe was not found ('$exe')" }
+          "APP_EXE=$exe" | Add-Content $env:GITHUB_ENV
 
       - name: Save data with the old release
         shell: pwsh
@@ -96,7 +98,9 @@ jobs:
           $out
           # One entry under Settings -> Apps, not the old one next to the new one.
           if ($out.Count -ne 1 -or $out[0] -notlike "$env:TO_VERSION *") { throw "expected only $env:TO_VERSION installed" }
-          "APP_EXE=$($out[0].Substring($out[0].IndexOf(' ') + 1))" | Add-Content $env:GITHUB_ENV
+          $exe = $out[0].Substring($out[0].IndexOf(' ') + 1)
+          if (-not $exe -or -not (Test-Path -LiteralPath $exe)) { throw "the installed exe was not found ('$exe')" }
+          "APP_EXE=$exe" | Add-Content $env:GITHUB_ENV
 
       - name: Check the data with the new release
         shell: pwsh

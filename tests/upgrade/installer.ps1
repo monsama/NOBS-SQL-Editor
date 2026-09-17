@@ -21,11 +21,13 @@ function Get-Installs {
             'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
     foreach ($k in $keys) {
         Get-ItemProperty $k -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'NOBS SQL Editor*' } | ForEach-Object {
-            $dir = [string]$_.InstallLocation
+            # The setup.exe names the exe as the icon; the MSI names the folder, or nothing.
+            $icon = ([string]$_.DisplayIcon -replace '"', '') -replace ',\d+$', ''
+            if ($icon -like '*.exe' -and $icon -notmatch 'uninstall' -and (Test-Path -LiteralPath $icon)) { $dir = Split-Path $icon } else { $dir = ([string]$_.InstallLocation) -replace '"', '' }
             if (-not $dir -and $_.UninstallString -notmatch 'msiexec') { $dir = Split-Path ($_.UninstallString -replace '"', '') }
             if (-not $dir) { $dir = Join-Path $env:ProgramFiles 'NOBS SQL Editor' }
             $exe = Get-ChildItem -LiteralPath $dir -Filter *.exe -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch 'uninstall' } | Select-Object -First 1
-            [pscustomobject]@{ Version = $_.DisplayVersion; Exe = $(if ($exe) { $exe.FullName } else { '' }); Key = $_.PSChildName; Uninstall = $_.UninstallString; Msi = ($_.UninstallString -match 'msiexec') }
+            [pscustomobject]@{ Version = $_.DisplayVersion; Exe = $(if ($exe) { $exe.FullName } else { '' }); Key = $_.PSChildName; Path = $_.PSPath; Uninstall = $_.UninstallString; Msi = ($_.UninstallString -match 'msiexec') }
         }
     }
 }
@@ -48,6 +50,7 @@ switch ($Action) {
         # The setup.exe returns before its entry is written on some runs; give it a moment.
         for ($i = 0; $i -lt 60 -and -not (Get-Installs | Where-Object Exe); $i++) { Start-Sleep -Milliseconds 500 }
         Get-Installs | ForEach-Object { "$($_.Version) $($_.Exe)" }
+        if (-not (Get-Installs | Where-Object Exe)) { Get-Installs | ForEach-Object { Get-ItemProperty -LiteralPath $_.Path | Format-List DisplayName, DisplayVersion, DisplayIcon, InstallLocation, UninstallString | Out-String | Write-Host } }
     }
     'list' { Get-Installs | ForEach-Object { "$($_.Version) $($_.Exe)" } }
     'uninstall' {
