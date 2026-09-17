@@ -41,7 +41,7 @@ jobs:
         run: npm run tauri build
 
       - name: Upload installers (unsigned)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-installers
           path: |
@@ -60,14 +60,14 @@ jobs:
       - name: Upload unsigned NSIS installer for signing
         id: upload-unsigned-nsis
         if: ${{ env.SIGNPATH_API_TOKEN != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unsigned-nsis
           path: "**/target/release/bundle/nsis/*-setup.exe"
 
       - name: Sign NSIS installer
         if: ${{ env.SIGNPATH_API_TOKEN != '' }}
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'
@@ -80,14 +80,14 @@ jobs:
       - name: Upload unsigned MSI installer for signing
         id: upload-unsigned-msi
         if: ${{ env.SIGNPATH_API_TOKEN != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: unsigned-msi
           path: "**/target/release/bundle/msi/*.msi"
 
       - name: Sign MSI installer
         if: ${{ env.SIGNPATH_API_TOKEN != '' }}
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
           organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'
@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload signed installers
         if: ${{ env.SIGNPATH_API_TOKEN != '' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-installers-signed
           path: |
@@ -115,7 +115,7 @@ jobs:
 
       - name: Publish GitHub Release (signed)
         if: ${{ startsWith(github.ref, 'refs/tags/v') && env.SIGNPATH_API_TOKEN != '' }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             signed/nsis/**/*.exe
@@ -126,7 +126,7 @@ jobs:
 
       - name: Publish GitHub Release (unsigned)
         if: ${{ startsWith(github.ref, 'refs/tags/v') && env.SIGNPATH_API_TOKEN == '' }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             src-tauri/target/release/bundle/nsis/*-setup.exe

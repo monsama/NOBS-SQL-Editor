@@ -37,7 +37,7 @@ jobs:
       # (the CI shell here is PowerShell, which would not), and that needs Node 21+ - so pin it
       # instead of taking whatever the runner image happens to ship.
       - name: Install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -69,7 +69,7 @@ jobs:
       # The two archives are ~90 MB and ~270 MB. The versions live in the script, so its hash is
       # the key.
       - name: Cache server downloads
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: C:\nobs-ci\cache
           key: nobs-ci-servers-${{ hashFiles('tests/ci/start-test-servers.ps1') }}
