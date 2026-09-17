@@ -2999,9 +2999,16 @@ function cellMenu(e,id,ri,ci){e.preventDefault();const t=T(id);const key=ri+':'+
   const fkd=(t.fkDetails||[]).find(f=>f[0]===col);
   if(fkd&&cur!=null){items.push(['Go to referenced row ('+fkd[1]+'.'+fkd[2]+')',()=>goToFkRow(t.db,fkd[1],fkd[2],cur)]);}
   items.push('-');}items.push(['Export to CSV (all rows)...',()=>csvGrid(id)],['Export to CSV (selected rows)...',()=>csvSel(id)],['Export to INSERTs (all rows)...',()=>insGrid(id)],['Export to INSERTs (selected rows)...',()=>insSel(id)],'-',['Set NULL',()=>setUpd(id,ri,ci,null)],['Set empty',()=>setUpd(id,ri,ci,'')]);menu(e.clientX,e.clientY,items);}
-function goToFkRow(db,refTable,refCol,val){
- const _i=openTab(refTable+' (FK: '+refCol+'='+val+')','SELECT * FROM '+qid(db)+'.'+qid(refTable)+' WHERE '+qid(refCol)+'='+lit(val)+';',db,false,refTable);
- openRun(_i);
+// The condition goes in as the tab's filter: openRun() rebuilds the query from the table and its
+// filters, so a WHERE written into the tab's SQL was dropped and the whole table came up. The
+// value is written for the column's type, so an empty binary key (0x) and a text key that looks
+// like hex both find their row.
+async function goToFkRow(db,refTable,refCol,val){
+ const bc=await tableBinCols(db,refTable,[refCol]);
+ const cond=qid(refCol)+'='+litAs(val,bc?bc[0]:null);
+ const _i=openTab(refTable+' (FK: '+refCol+'='+val+')','SELECT * FROM '+qid(db)+'.'+qid(refTable)+' WHERE '+cond+';',db,false,refTable);
+ T(_i).filterClauses=[cond];
+ await openRun(_i);
 }
 function copyRow(id,ri){const t=T(id);const vals=t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];});window._rowClipboard=vals;navigator.clipboard.writeText(vals.map(v=>v===null?'':v).join('\t')).then(()=>log('Copied 1 row (TSV, '+t.cols.length+' column(s)).'));}
 function copySelRows(id){const t=T(id);const idxs=viewIndices(id).filter(ri=>t.selected&&t.selected.has(ri));if(!idxs.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const rowsData=idxs.map(ri=>t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];}));window._rowsClipboard=rowsData;const lines=rowsData.map(vals=>vals.map(v=>v===null?'':v).join('\t'));navigator.clipboard.writeText(lines.join('\n')).then(()=>log('Copied '+idxs.length+' row(s) (TSV, '+t.cols.length+' column(s)).'));}
@@ -3023,14 +3030,18 @@ function pasteRowInto(id,ri){const t=T(id);if(!t.pk){toast('This result is not e
 function rowsClipboard(){if(window._rowsClipboard&&window._rowsClipboard.length)return window._rowsClipboard;if(window._rowClipboard&&window._rowClipboard.length)return [window._rowClipboard];return null;}
 function pasteRowsAsNew(id){const t=T(id);if(!t.pending){toast('This result is not editable (no primary key detected).',true);return;}const rowsData=rowsClipboard();if(!rowsData||!rowsData.length){toast('Copy some rows first (Copy rows (selected)), then paste them as new rows.',true);return;}const bad=rowsData.find(vals=>vals.length!==t.cols.length);if(bad){toast('Copied row(s) have a different number of columns than this table. Cannot paste.',true);return;}rowsData.forEach(vals=>{const obj={};t.cols.forEach((c,ci)=>{obj[c]=vals[ci];});t.pending.ins.push(obj);});renderGrid(id);log('Pasted '+rowsData.length+' row(s) as new rows. Review and click Apply to commit.');}
 function copyColumn(id,ci){const t=T(id);const vals=t.rows.map((row,ri)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:row[ci];});navigator.clipboard.writeText(vals.map(v=>v===null?'':v).join('\n')).then(()=>log('Copied '+vals.length+' value(s) from column "'+t.cols[ci]+'".'));}
-function qfSub(id,col,val){const q=qid(col);const lv=lit(val);const esc=s=>String(s).replace(/([%_\\])/g,'\\$1').replace(/'/g,"''");const sub=[];
+// The comparisons are built when picked, with the value written for the column's type (see litAs):
+// lit() alone turned an empty binary value into the text '0x' and a text value like 0x41 into a
+// byte, so the filter found nothing, or the wrong rows.
+function qfSub(id,col,val){const q=qid(col);const lv=lit(val);
+ const cmp=op=>async()=>{const bc=await gridBinCols(id);const ci=T(id).cols.indexOf(col);await addFilterClause(id,q+' '+op+' '+litAs(val,bc&&ci>=0?bc[ci]:null));};const esc=s=>String(s).replace(/([%_\\])/g,'\\$1').replace(/'/g,"''");const sub=[];
  if(val===null){sub.push([q+' IS NULL',()=>addFilterClause(id,q+' IS NULL')]);sub.push([q+' IS NOT NULL',()=>addFilterClause(id,q+' IS NOT NULL')]);return sub;}
  const sv=String(val).trim();const isNum=/^-?\d+(\.\d+)?$/.test(sv);const isDate=/^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?)?$/.test(sv);
  const like=String(val);const ld=(like.length>16?like.slice(0,16)+'\u2026':like);
  // display value for =/!= labels: truncated for readability; the actual filter still uses the full value (lv)
  const lvd="'"+(sv.length>16?sv.slice(0,16)+'\u2026':sv)+"'";const dv=isNum?lv:lvd;
- sub.push([q+' = '+dv,()=>addFilterClause(id,q+' = '+lv)]);sub.push([q+' != '+dv,()=>addFilterClause(id,q+' <> '+lv)]);
- if(isNum||isDate){sub.push('-');sub.push([q+' > '+dv,()=>addFilterClause(id,q+' > '+lv)]);sub.push([q+' >= '+dv,()=>addFilterClause(id,q+' >= '+lv)]);sub.push([q+' < '+dv,()=>addFilterClause(id,q+' < '+lv)]);sub.push([q+' <= '+dv,()=>addFilterClause(id,q+' <= '+lv)]);}
+ sub.push([q+' = '+dv,cmp('=')]);sub.push([q+' != '+dv,cmp('<>')]);
+ if(isNum||isDate){sub.push('-');sub.push([q+' > '+dv,cmp('>')]);sub.push([q+' >= '+dv,cmp('>=')]);sub.push([q+' < '+dv,cmp('<')]);sub.push([q+' <= '+dv,cmp('<=')]);}
  if(!isNum){sub.push('-');sub.push([q+" LIKE '%"+ld+"%'",()=>addFilterClause(id,q+" LIKE '%"+esc(like)+"%'")]);sub.push([q+" LIKE '"+ld+"%'",()=>addFilterClause(id,q+" LIKE '"+esc(like)+"%'")]);if(!isDate)sub.push([q+" LIKE '%"+ld+"'",()=>addFilterClause(id,q+" LIKE '%"+esc(like)+"'")]);}
  sub.push('-');sub.push([q+' IS NULL',()=>addFilterClause(id,q+' IS NULL')]);sub.push([q+' IS NOT NULL',()=>addFilterClause(id,q+' IS NOT NULL')]);return sub;}
 // Adds one more ANDed condition to the table tab's active quick filter (does not replace the

@@ -438,6 +438,41 @@ test('row values are written for their column type, and CR survives a script', (
   }
 });
 
+// "Go to referenced row" opened the whole referenced table: openRun() rebuilds the query from the
+// table and its filters, and dropped the WHERE written into the tab. Both it and the quick filter
+// also wrote the value by its shape, so an empty binary key (0x) and hex-looking text found nothing.
+test('following a foreign key, and the quick filter, find the right rows', async () => {
+  const SRC = html;
+  const CHECK = (c, l, d) => assert.ok(c, l + ' -> ' + d);
+  const names = ['goToFkRow', 'qfSub', 'litAs', 'lit', 'strLit'];
+  const body = names.map(n => extractFunction(SRC, n)).join('\n');
+  const make = (bin) => {
+    const tab = { cols: ['id', 'v'], filterClauses: null };
+    const seen = { opened: null, run: null, clauses: [] };
+    const env = {
+      qid: s => '`' + s + '`', T: () => tab,
+      tableBinCols: async () => [bin], gridBinCols: async () => [bin, false],
+      openTab: (title, sql) => { seen.opened = sql; return 't1'; },
+      openRun: async () => { seen.run = [...(tab.filterClauses || [])]; },
+      addFilterClause: async (id, c) => { seen.clauses.push(c); },
+    };
+    const keys = Object.keys(env);
+    const f = new Function(...keys, body + '\nreturn {goToFkRow, qfSub};')(...keys.map(k => env[k]));
+    return { f, seen };
+  };
+  const b = make(true);
+  await b.f.goToFkRow('d', 'p', 'id', '0x');
+  CHECK(b.seen.run && b.seen.run.join() === "`id`=X''", 'the referenced row is found by its filter, and an empty binary key is X\'\'', JSON.stringify(b.seen));
+  const t = make(false);
+  await t.f.goToFkRow('d', 'tp', 'code', '0x41');
+  CHECK(t.seen.run && t.seen.run.join() === "`code`='0x41'", 'a text key that looks like hex stays text', JSON.stringify(t.seen));
+  const q = make(true);
+  const sub = q.f.qfSub('t1', 'id', '0x');
+  await sub.find(x => Array.isArray(x) && / = /.test(x[0]))[1]();
+  await sub.find(x => Array.isArray(x) && / != /.test(x[0]))[1]();
+  CHECK(q.seen.clauses.join(' ; ') === "`id` = X'' ; `id` <> X''", 'the quick filter writes the value for its column type', q.seen.clauses.join(' ; '));
+});
+
 test('editWidgetFor actually applies that round-trip test', () => {
   // The rule above can be right and never run. This pins the wiring.
   const body = extractFunction(html, 'editWidgetFor');
