@@ -545,7 +545,25 @@ function toast(msg,kind){
 function showDead(){const d=$('deadOverlay');if(d)d.style.display='flex';}
 function hideDead(){const d=$('deadOverlay');if(d)d.style.display='none';}
 // --- api(): the ONE way the UI talks to the server. Adds token + connection + read-only flag, returns parsed JSON, and shows the 'server down' overlay on failure.
-async function api(path,p,signal){p=p||{};p.token=TOKEN;
+// /api/query answers with its first 1000 rows and a cursor for the rest, which the grid reads as
+// you scroll. Every other caller wants the whole result, and got only that first page: in the
+// PowerShell edition exporting a table from the tree left out every row past 1000 without a word, and
+// lists such as a schema's tables or its column names for autocomplete stopped at 1000 in both.
+// Only the grid passes pageSize; for everyone else the remaining rows are read here.
+async function api(path,p,signal){
+ const r=await apiCall(path,p,signal);
+ if(path!=='/api/query'||!p||p.pageSize!=null||!r||!r.ok||!r.hasMore||!r.cursorId)return r;
+ // The desktop backend does not repeat cursorId in a fetch answer; the id stays the same.
+ const rows=r.rows,cid=r.cursorId;let cur=r;
+ while(cur.hasMore){
+  cur=await apiCall('/api/fetch-cursor-batch',{cursorId:cid,requestId:p.requestId,pageSize:5000},signal);
+  if(!cur||!cur.ok){apiCall('/api/close-cursor',{cursorId:cid});return cur||{ok:false,error:'Reading the rest of the result failed.'};}
+  for(const x of cur.rows)rows.push(x);
+ }
+ r.rows=rows;r.hasMore=false;delete r.cursorId;
+ return r;
+}
+async function apiCall(path,p,signal){p=p||{};p.token=TOKEN;
  // Every call goes to the server you are actually CONNECTED to, never to whatever profile happens
  // to be loaded in the form - so the connection is filled in here rather than trusted from the
  // caller. conn-save is the one exception, because its conn is not a server to talk to at all:
@@ -763,7 +781,7 @@ async function gridBinCols(id){
  const t=T(id);if(!t||!t.cols)return null;
  if(t.binCols&&t.binCols.length===t.cols.length)return t.binCols.map(Boolean);
  if(!t.table)return null;
- return tableBinCols(dbOf(t),t.table,t.cols);
+ return tableBinCols(t.db,t.table,t.cols);
 }
 // lit() decides from the value's shape, which is wrong both ways for row data: a text cell holding
 // 0x41 was written as the byte A, and an empty binary value - shown as the bare 0x - as the two
@@ -2133,7 +2151,11 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     // pageSize is always sent for the main Run path: the backend opens a server-side cursor for
     // any SELECT-shaped result (with or without its own LIMIT) and hands back just the first
     // page, plus a cursorId to keep pulling more through - see fetchNextBatch().
-    const r=await api('/api/query',{sql:_q,db:dbOf(t),requestId:reqId,pageSize:PAGE_BATCH},t.abortCtrl.signal);
+    // The database a bare table name in the query refers to: the last leading USE, which runs in
+    // the same call, or else the one the query is sent with.
+    const runDb=dbOf(t);
+    const tableDb=(leadingAreAllUse&&useTarget(stmts))||runDb;
+    const r=await api('/api/query',{sql:_q,db:runDb,requestId:reqId,pageSize:PAGE_BATCH},t.abortCtrl.signal);
     if(r.aborted){if(T(id)){st.className='status';st.textContent='Query cancelled.';}return;}
     if(!T(id))return;
     if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));return;}
@@ -2149,7 +2171,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     t.cursorId=r.cursorId||null;t.hasMore=!!r.hasMore;t.cursorReqId=t.cursorId?reqId:null;
     if(!r.columns.length){st.textContent=r.message||'Query OK.';$('res_'+id).innerHTML='';updatePager(id);const ra0=$('resultActions_'+id);if(ra0)ra0.style.display='none';return;}
     const ra=$('resultActions_'+id);if(ra)ra.style.display='inline-flex';
-    refreshRunTableBinding(id,lastStmt);
+    refreshRunTableBinding(id,lastStmt,tableDb);
     if(t.table){const pk=await api('/api/pk',{db:t.db,table:t.table});if(pk.ok&&pk.pk.length){t.pk=pk.pk;t.pending={upd:{},del:new Set(),ins:[]};}
       const fk=await api('/api/fk',{db:t.db,table:t.table});if(fk.ok){t.fk=fk.fk||[];t.fkDetails=fk.fkDetails||[];}
       // Warms getColType's cache now (fire-and-forget) instead of waiting for the first cell click
@@ -2241,13 +2263,22 @@ function selBtnHtml(id,table){return table?'<button title="Toggle between your q
 // editing rows that were never really identified by the PK it thought it had. Called once per
 // run with the statement actually about to execute, so t.table always reflects the query that
 // produced what's on screen right now, not whatever the tab happened to start as.
-function refreshRunTableBinding(id,lastStmt){
+// fallbackDb is where the query itself looked for a table named without a database. Using the
+// tab's own database instead bound "USE b; SELECT * FROM t" - or an edited table tab run while
+// another schema was selected - to a different database's t, and Apply wrote to that table.
+function refreshRunTableBinding(id,lastStmt,fallbackDb){
  const t=T(id);if(!t||t.ddl)return;
- const m=parseSingleEditableTable(lastStmt,t.db||curSchema);
+ const m=parseSingleEditableTable(lastStmt,fallbackDb||t.db||curSchema);
  const newTable=m?m.table:null, newDb=m?m.db:(t.db||curSchema);
  if(t.table===newTable&&t.db===newDb)return;
  t.table=newTable;t.db=newDb;
  const sb=$('selbtn_'+id);if(sb)sb.innerHTML=selBtnHtml(id,t.table);
+}
+// The database the last "USE db" among these statements switches to, or null.
+function useTarget(stmts){
+ let db=null;
+ for(const s of stmts){const m=sqlHead(s).match(/^use\s+(`(?:[^`]|``)+`|[^\s;`]+)/i);if(m)db=m[1].startsWith('`')?m[1].slice(1,-1).replace(/``/g,'`'):m[1];}
+ return db;
 }
 // Conservative on purpose: only recognizes "SELECT ... FROM <one table>" with no JOIN/comma-join,
 // UNION, GROUP BY, or DISTINCT - any of those can produce a result that isn't one row per primary
@@ -2292,6 +2323,11 @@ function clip(v,n){const s=String(v);return s.length>n?s.slice(0,n)+'\u2026':s;}
 // that hex form is what makes round-tripping a value with a real embedded NUL byte safe (a raw
 // NUL in the actual SQL text risks truncation when passed as a command-line argument).
 const CTRL_NAMES={0:'NUL',1:'SOH',2:'STX',3:'ETX',4:'EOT',5:'ENQ',6:'ACK',7:'BEL',8:'BS',11:'VT',12:'FF',14:'SO',15:'SI',16:'DLE',17:'DC1',18:'DC2',19:'DC3',20:'DC4',21:'NAK',22:'SYN',23:'ETB',24:'CAN',25:'EM',26:'SUB',27:'ESC',28:'FS',29:'GS',30:'RS',31:'US'};
+function ctrlBadge(b){return '<span style="background:#4a3a1f;color:#e8c589;border-radius:3px;padding:0 3px;font-size:10px;font-weight:600;margin:0 1px" title="Control character (0x'+b.toString(16).padStart(2,'0').toUpperCase()+') - not printable text">'+CTRL_NAMES[b]+'</span>';}
+// Text holding a control character (a NUL, say) showed it as nothing at all, so 'a<NUL>b' looked
+// like 'ab'. Marked the same way as above.
+const CTRL_RE=/[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
+function textCellHtml(s,maxChars){const h=esc(clip(s,maxChars));return h.search(CTRL_RE)<0?h:h.replace(CTRL_RE,ch=>ctrlBadge(ch.charCodeAt(0)));}
 function decodeCtrlCharCell(hexStr,maxChars){
  const hex=hexStr.slice(2);const bytes=[];for(let i=0;i<hex.length;i+=2){bytes.push(parseInt(hex.substr(i,2),16));}
  const decoder=new TextDecoder('utf-8',{fatal:false});
@@ -2304,7 +2340,7 @@ function decodeCtrlCharCell(hexStr,maxChars){
     if(shown+segText.length>maxChars){html+=esc(segText.slice(0,Math.max(0,maxChars-shown)));shown=maxChars;truncated=true;}
     else{html+=esc(segText);shown+=segText.length;}
    }
-   if(isCtrl&&!truncated){html+='<span style="background:#4a3a1f;color:#e8c589;border-radius:3px;padding:0 3px;font-size:10px;font-weight:600;margin:0 1px" title="Control character (0x'+bytes[i].toString(16).padStart(2,'0').toUpperCase()+') - not printable text">'+CTRL_NAMES[bytes[i]]+'</span>';shown++;}
+   if(isCtrl&&!truncated){html+=ctrlBadge(bytes[i]);shown++;}
    segStart=i+1;
   }
   if(truncated)break;
@@ -2312,7 +2348,7 @@ function decodeCtrlCharCell(hexStr,maxChars){
  if(truncated)html+='\u2026';
  return html;
 }
-function cellHtml(v,isBit){if(v===null)return '<span style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return isBit?esc(hexToBitNumber(v)):decodeCtrlCharCell(v,300);return esc(clip(v,300));}
+function cellHtml(v,isBit){if(v===null)return '<span style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return isBit?esc(hexToBitNumber(v)):decodeCtrlCharCell(v,300);return textCellHtml(v,300);}
 // When every data column is hidden (via "Hide all" or unchecking each one by hand), the leading
 // row-select checkbox and delete/undo columns are pointless to keep showing on their own - an
 // empty grid with just those two columns looks broken, not "hidden".

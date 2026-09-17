@@ -8,12 +8,14 @@ you.
 
 `cargo test` from `src-tauri/` runs the offline helpers — statement splitting,
 read-only enforcement, literal escaping, CSV edge cases — and needs nothing set
-up.
+up. CI also runs `cargo clippy --all-targets -- -D warnings`, so a new clippy
+warning fails the build.
 
 `npm test` runs the frontend tests in `tests/ui/`, which cover the grid logic
 that lives in `ui/index.html` and so is out of `cargo test`'s reach: the grid's
 sort/filter ordering, the SQL the Users dialog builds, the connection store and its
-request bridge, the table designer (driven with real `information_schema` rows
+request bridge (including reading a whole result for callers other than the grid),
+which table a result grid saves to, the new-version notice, the table designer (driven with real `information_schema` rows
 from MySQL 8 and MariaDB 12), and recovery from a failed procedure/trigger recreate. They pull the functions straight out
 of the HTML file rather than keeping a copy, so a change to the real code is
 what they measure. No dependencies, no `npm ci` needed. The PowerShell edition runs

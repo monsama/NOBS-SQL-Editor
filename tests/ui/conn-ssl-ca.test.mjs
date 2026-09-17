@@ -145,17 +145,20 @@ function extractFn(src, name) {
   throw new Error('unbalanced braces in ' + name);
 }
 
-function bridge() {
+// reply(name, body) answers a request; name is the command without "/api/" (fetch-cursor-batch
+// arrives as fetch_cursor_batch from the Tauri bridge and is normalised to that).
+function bridge(reply = () => ({ ok: true })) {
   const sent = [];
+  const answer = (cmd, p) => reply(cmd.replace('/api/', '').replace(/-/g, '_'), p);
   const connected = { host: 'prod.example', port: '3306', user: 'admin', password: 'PROD-SECRET', ssl: 'default', sslCa: '' };
   const form = { host: 'form.example', port: '3310', user: 'formuser', password: 'form-pw', ssl: 'required', sslCa: '' };
   const window = {
     _activeConn: connected, _activeReadOnly: true, readOnly: false,
-    __TAURI__: { core: { invoke: async (cmd, args) => { sent.push({ cmd, p: args.req }); return { ok: true }; } } },
+    __TAURI__: { core: { invoke: async (cmd, args) => { sent.push({ cmd, p: args.req }); return answer(cmd, args.req); } } },
   };
-  const fetch = async (path, init) => { sent.push({ cmd: path, p: JSON.parse(init.body) }); return { json: async () => ({ ok: true }) }; };
+  const fetch = async (path, init) => { const p = JSON.parse(init.body); sent.push({ cmd: path, p }); return { json: async () => answer(path, p) }; };
   const api = new Function('window', 'fetch', 'getConn', 'busyStart', 'busyStop', 'showDead', 'TOKEN',
-    extractFn(html, 'api') + '\nreturn api;')(window, fetch, () => ({ ...form }), () => {}, () => {}, () => {}, 't');
+    extractFn(html, 'apiCall') + '\n' + extractFn(html, 'api') + '\nreturn api;')(window, fetch, () => ({ ...form }), () => {}, () => {}, () => {}, 't');
   return { api, sent, connected, form, window };
 }
 
@@ -194,4 +197,52 @@ test('a conn-save without a conn still gets one, rather than sending nothing', a
   const b = bridge();
   await b.api('/api/conn-save', { name: 'x' });
   assert.ok(b.sent[0].p.conn, 'the exception is only for a caller that supplied the profile');
+});
+
+// --- a query result is read in full, except by the grid ---------------------------------------
+// /api/query answers with a first page and a cursor. Exporting a table from the tree used that
+// first page as the whole table, so anything past row 1000 was left out of the file.
+function pagedServer(pages, { failAt = -1 } = {}) {
+  let n = 0;
+  return (name, p) => {
+    if (name === 'query') return { ok: true, columns: ['id'], rows: pages[0], hasMore: pages.length > 1, cursorId: pages.length > 1 ? 'c1' : undefined };
+    if (name === 'fetch_cursor_batch') {
+      n++;
+      if (n === failAt) return { ok: false, error: 'Lost connection' };
+      const more = n < pages.length - 1;
+      // No cursorId here: the desktop backend does not repeat it in a fetch answer.
+      return { ok: true, columns: ['id'], rows: pages[n], hasMore: more };
+    }
+    return { ok: true };
+  };
+}
+
+test('a caller without pageSize gets every row', async () => {
+  const b = bridge(pagedServer([[['1'], ['2']], [['3']], [['4']]]));
+  const r = await b.api('/api/query', { sql: 'SELECT * FROM t', requestId: 'q1' });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.rows, [['1'], ['2'], ['3'], ['4']]);
+  assert.equal(r.hasMore, false);
+  assert.equal(r.cursorId, undefined, 'the cursor is used up, so it must not be handed on');
+  const fetches = b.sent.filter(x => /fetch.cursor.batch/.test(x.cmd));
+  assert.equal(fetches.length, 2);
+  for (const f of fetches) { assert.equal(f.p.cursorId, 'c1'); assert.equal(f.p.requestId, 'q1', 'Cancel must still reach the rest of the read'); }
+});
+
+test('the grid gets its first page and the cursor, as before', async () => {
+  const b = bridge(pagedServer([[['1']], [['2']]]));
+  const r = await b.api('/api/query', { sql: 'SELECT * FROM t', pageSize: 1000 });
+  assert.deepEqual(r.rows, [['1']]);
+  assert.equal(r.hasMore, true);
+  assert.equal(r.cursorId, 'c1');
+  assert.equal(b.sent.length, 1);
+});
+
+test('a failure part way through is reported, not returned as a shorter result', async () => {
+  const b = bridge(pagedServer([[['1']], [['2']], [['3']]], { failAt: 2 }));
+  const r = await b.api('/api/query', { sql: 'SELECT * FROM t' });
+  assert.equal(r.ok, false);
+  assert.equal(r.error, 'Lost connection');
+  assert.equal(r.rows, undefined);
+  assert.ok(b.sent.some(x => /close.cursor/.test(x.cmd) && x.p.cursorId === 'c1'), 'the cursor is closed');
 });
