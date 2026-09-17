@@ -40,9 +40,18 @@ const killTree = p => { if (p && p.pid) spawnSync('taskkill', ['/PID', String(p.
 writeFileSync(join(tmp, 'gp.csv'), Buffer.from(
   'id,t,b,n,bits,l1\n1,"line1\r\nline2",0xDEAD,NULL,0x01,é\n2,,0x,\\N,0x03,\\N\n3,x,\\N,0x42,\\N,Grüße\n', 'utf8'));
 
+let appOutput = '';
 async function startApp() {
   if (app === 'desktop') {
-    children.push(spawn(target, [], { env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}` }, stdio: 'ignore' }));
+    // The app allows one instance: a second one hands over to the first and exits.
+    const running = spawnSync('tasklist', ['/FI', 'IMAGENAME eq nobs-sql-editor.exe', '/NH'], { encoding: 'utf8' }).stdout || '';
+    if (/nobs-sql-editor.exe/i.test(running)) throw new Error('NOBS SQL Editor is already running - close it first, the test starts its own');
+    const p = spawn(target, [], { env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}` }, stdio: ['ignore', 'pipe', 'pipe'] });
+    p.stdout.on('data', d => { appOutput += d; });
+    p.stderr.on('data', d => { appOutput += d; });
+    p.on('exit', code => { appOutput += `
+[the app exited with code ${code}]`; });
+    children.push(p);
     return;
   }
   const shell = spawnSync('where', ['pwsh'], { stdio: 'ignore' }).status === 0 ? 'pwsh' : 'powershell';
@@ -69,7 +78,10 @@ async function connectPage() {
     } catch { /* not up yet */ }
     await sleep(100);
   }
-  throw new Error('no page to drive on port ' + cdpPort);
+  let listed = 'nothing answers on that port';
+  try { listed = JSON.stringify(await (await fetch(`http://127.0.0.1:${cdpPort}/json`)).json()); } catch { /* keep the note */ }
+  throw new Error(`no page to drive on port ${cdpPort} (${listed})` + (appOutput ? `
+  app output: ${appOutput.slice(-2000)}` : ''));
 }
 
 function cdp(wsUrl) {

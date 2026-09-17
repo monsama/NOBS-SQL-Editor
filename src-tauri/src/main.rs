@@ -5121,7 +5121,13 @@ mod import_tests {
                 i
             })
         };
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Some orders before the snapshot, so it has something to be consistent about.
+        for _ in 0..200 {
+            let mut c = build_conn(&conn).unwrap();
+            let n: Option<i64> = c.query_first("SELECT COUNT(*) FROM snap_src.a_orders").unwrap();
+            if n.unwrap_or(0) >= 20 { break; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         let dir = tempfile::tempdir().unwrap();
         let ex = export_run(json!({"conn":conn,"dbs":["snap_src"],"folder":dir.path().to_string_lossy(),"mode":"table",
             "options":{"charset":"utf8mb4","singletx":true,"quick":true,"triggers":true,"extinsert":true}}), dbin).await.unwrap();
