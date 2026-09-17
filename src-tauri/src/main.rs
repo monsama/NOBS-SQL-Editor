@@ -938,6 +938,70 @@ fn resolve_bin(names: &[&str], env_key: &str) -> Result<String, String> {
     Err(format!("Could not find '{}'. Open Settings in the app to select {}.exe or download the MariaDB client tools. Alternatively add its bin folder to PATH, or set the {} environment variable to its full path.", name, name, env_key))
 }
 
+// ---------- which tools for which server ----------
+// MariaDB's and MySQL's client tools are not interchangeable against the other's server. MariaDB's
+// mysqldump writes values into a MySQL generated column, so the dump does not restore, and only
+// MySQL's client can check a CA without the host name. So the configured (or downloaded) pair
+// stays the default, and a MySQL server gets MySQL's own tools when they are available: set in
+// Settings (mysql_bin_mysql / mysqldump_bin_mysql), or found in a MySQL Server installation.
+//
+// The "bin" folders of MySQL Server installations under `bases`, newest version first:
+// <base>\MySQL\MySQL Server 8.4\bin, then 8.0, and so on.
+fn mysql_server_bin_dirs(bases: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    let mut found: Vec<(Vec<u64>, std::path::PathBuf)> = Vec::new();
+    for base in bases {
+        let Ok(rd) = std::fs::read_dir(base.join("MySQL")) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_dir() { continue; }
+            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let Some(ver) = name.to_lowercase().strip_prefix("mysql server").map(|v| v.trim().to_string()) else { continue };
+            found.push((ver_key(&ver), p.join("bin")));
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    found.into_iter().map(|(_, p)| p).collect()
+}
+fn program_files_dirs() -> Vec<std::path::PathBuf> {
+    #[cfg(windows)]
+    { vec![std::path::PathBuf::from("C:\\Program Files"), std::path::PathBuf::from("C:\\Program Files (x86)")] }
+    #[cfg(not(windows))]
+    { Vec::new() }
+}
+// The tool to use for a MySQL server, with where it came from - or None, meaning the default
+// pair is used for MySQL servers as well.
+fn mysql_flavor_tool(base: &str) -> Option<(String, String)> {
+    let cfg = load_cfg();
+    if let Some(p) = cfg.get(format!("{}_bin_mysql", base)).and_then(|v| v.as_str()) {
+        if !p.is_empty() && std::path::Path::new(p).exists() { return Some((p.to_string(), "configured".into())); }
+    }
+    for d in mysql_server_bin_dirs(&program_files_dirs()) {
+        let f = d.join(format!("{}.exe", base));
+        if f.exists() { return Some((f.to_string_lossy().to_string(), "found in a MySQL Server installation".into())); }
+    }
+    None
+}
+// Some(true) for MariaDB, Some(false) for MySQL, None if the server could not be asked.
+fn server_is_mariadb(connj: &Value) -> Option<bool> {
+    let mut c = build_conn(connj).ok()?;
+    let v: String = c.query_first("SELECT VERSION()").ok().flatten()?;
+    Some(v.to_lowercase().contains("mariadb"))
+}
+// resolve_tool, but for a particular server: MySQL's own tools for a MySQL server when there are
+// any, the default pair otherwise.
+fn resolve_tool_for(app: &tauri::AppHandle, base: &str, names: &[&str], env_key: &str, connj: &Value) -> Result<String, String> {
+    choose_tool(server_is_mariadb(connj), || mysql_flavor_tool(base).map(|x| x.0), || resolve_tool(app, base, names, env_key))
+}
+// Only a server known to be MySQL switches tools; MariaDB, or a server that could not be asked,
+// keeps the default pair - which is also the fallback when no MySQL tools exist.
+fn choose_tool(server_is_mariadb: Option<bool>, mysql_tool: impl FnOnce() -> Option<String>,
+               default: impl FnOnce() -> Result<String, String>) -> Result<String, String> {
+    if server_is_mariadb == Some(false) {
+        if let Some(p) = mysql_tool() { return Ok(p); }
+    }
+    default()
+}
+
 fn first_err(s: &str) -> String {
     // prefer the real "ERROR NNNN ..." line if present (mysql may echo the statement first)
     if let Some(l) = s.lines().map(|l| l.trim()).find(|l| l.starts_with("ERROR") || l.contains("ERROR ")) {
@@ -1744,7 +1808,7 @@ async fn import(app: tauri::AppHandle, req: Value) -> R {
     if req["ro"].as_bool().unwrap_or(false) {
         return Ok(json!({"ok":false,"error":"Read-only mode: statement blocked."}));
     }
-    let mbin = match resolve_tool(&app, "mysql", &["mysql", "mariadb"], "MYSQL_BIN") { Ok(b) => b, Err(e) => return Ok(json!({"ok":false,"error":e})) };
+    let mbin = match resolve_tool_for(&app, "mysql", &["mysql", "mariadb"], "MYSQL_BIN", &req["conn"]) { Ok(b) => b, Err(e) => return Ok(json!({"ok":false,"error":e})) };
     import_run(req, mbin).await
 }
 
@@ -1994,7 +2058,7 @@ fn mysql_generated_tables(connj: &Value, dbs: &[String], excl: &std::collections
 // extra "<db>.routines_events.sql" file per database, same as the PowerShell backend.
 #[tauri::command]
 async fn export(app: tauri::AppHandle, req: Value) -> R {
-    let dbin = match resolve_tool(&app, "mysqldump", &["mysqldump", "mariadb-dump"], "MYSQLDUMP_BIN") { Ok(b) => b, Err(e) => return Ok(json!({"ok":false,"error":e})) };
+    let dbin = match resolve_tool_for(&app, "mysqldump", &["mysqldump", "mariadb-dump"], "MYSQLDUMP_BIN", &req["conn"]) { Ok(b) => b, Err(e) => return Ok(json!({"ok":false,"error":e})) };
     export_run(req, dbin).await
 }
 
@@ -3542,16 +3606,32 @@ fn tools_status(app: tauri::AppHandle) -> R {
         Command::new(&d).arg("--version").output().ok()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("mariadb"))
     } else { None };
+    let (my_m, my_d) = (mysql_flavor_tool("mysql"), mysql_flavor_tool("mysqldump"));
     let result = json!({
         "ok": true,
         "mysql": m, "mysql_source": ms,
         "mysqldump": d, "mysqldump_source": ds,
         "mysqldump_is_mariadb": dump_is_mariadb,
+        "mysql_for_mysql": my_m.as_ref().map(|x| x.0.clone()), "mysql_for_mysql_source": my_m.as_ref().map(|x| x.1.clone()),
+        "mysqldump_for_mysql": my_d.as_ref().map(|x| x.0.clone()), "mysqldump_for_mysql_source": my_d.as_ref().map(|x| x.1.clone()),
         "download_dir": tools_dir().to_string_lossy(),
         "config_file": config_file().to_string_lossy()
     });
     *tools_status_cache().lock().unwrap() = Some(result.clone());
     Ok(result)
+}
+
+// The tools export and import will use for the CONNECTED server, and whether that mysqldump is
+// MariaDB's - the export dialog greys out the options only MySQL's understands.
+#[tauri::command]
+async fn tools_for_conn(app: tauri::AppHandle, req: Value) -> R {
+    tokio::task::spawn_blocking(move || {
+        let maria = server_is_mariadb(&req["conn"]);
+        let m = resolve_tool_for(&app, "mysql", &["mysql", "mariadb"], "MYSQL_BIN", &req["conn"]).ok();
+        let d = resolve_tool_for(&app, "mysqldump", &["mysqldump", "mariadb-dump"], "MYSQLDUMP_BIN", &req["conn"]).ok();
+        let dump_maria = d.as_deref().map(client_is_mariadb);
+        Ok(json!({"ok":true, "serverIsMariadb": maria, "mysql": m, "mysqldump": d, "mysqldumpIsMariadb": dump_maria}))
+    }).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -3758,7 +3838,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             connect, schemas, objects, ddl, pk, query, exec, rowop, script, fetch_cursor_batch, close_cursor,
-            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, tools_status, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd, open_support_link
+            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, tools_status, tools_for_conn, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd, open_support_link
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -4084,6 +4164,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // A MySQL server gets MySQL's own tools when an installation has them, newest version first.
+    // Version folders are compared as numbers, so 8.10 comes before 8.4.
+    #[test]
+    fn only_a_mysql_server_switches_to_mysql_tools() {
+        let def = || Ok::<String, String>("default".into());
+        assert_eq!(choose_tool(Some(false), || Some("mysql".into()), def).unwrap(), "mysql");
+        assert_eq!(choose_tool(Some(false), || None, def).unwrap(), "default", "no MySQL tools: the default pair");
+        assert_eq!(choose_tool(Some(true), || Some("mysql".into()), def).unwrap(), "default", "MariaDB keeps the default pair");
+        assert_eq!(choose_tool(None, || Some("mysql".into()), def).unwrap(), "default", "unknown server keeps the default pair");
+    }
+
+    #[test]
+    fn mysql_server_installs_are_found_newest_first() {
+        let root = std::env::temp_dir().join(format!("nobs-mysqldirs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for l in ["Program Files/MySQL/MySQL Server 8.0/bin", "Program Files/MySQL/MySQL Server 8.10/bin",
+                  "Program Files/MySQL/MySQL Server 8.4/bin", "Program Files/MySQL/MySQL Workbench 8.0 CE",
+                  "Program Files/MariaDB 11.4/bin", "Program Files (x86)/MySQL/MySQL Server 5.7/bin"] {
+            std::fs::create_dir_all(root.join(l)).unwrap();
+        }
+        let dirs = mysql_server_bin_dirs(&[root.join("Program Files"), root.join("Program Files (x86)"), root.join("missing")]);
+        let names: Vec<String> = dirs.iter()
+            .map(|d| d.parent().unwrap().file_name().unwrap().to_string_lossy().to_string()).collect();
+        assert_eq!(names, vec!["MySQL Server 8.10", "MySQL Server 8.4", "MySQL Server 8.0", "MySQL Server 5.7"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn first_err_prefers_the_error_line() {
         assert_eq!(first_err("some echoed statement\nERROR 1064 (42000): You have an error"),
@@ -4319,6 +4426,50 @@ mod import_tests {
         assert!(line.contains("error(s) SKIPPED"), "the skipped error was not reported: {line}");
         assert_eq!(r["errorsSkipped"], 1);
         let _ = std::fs::remove_file(&f);
+    }
+
+    // A MySQL server gets MySQL's own tools when there are any, because MariaDB's mysqldump writes
+    // values into a MySQL generated column and the dump does not restore. The tools are chosen as
+    // export and import choose them (choose_tool), and the table has to come back whole.
+    #[tokio::test]
+    #[ignore]
+    async fn generated_columns_survive_export_and_import_with_the_chosen_tools() {
+        let Some(dsn) = std::env::var("NOBS_TEST_DSN").ok() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let p: Vec<&str> = dsn.split(':').collect();
+        let conn = json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"});
+        let maria = server_is_mariadb(&conn);
+        let env_or = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.into());
+        let dbin = choose_tool(maria, || mysql_flavor_tool("mysqldump").map(|x| x.0), || Ok(env_or("MYSQLDUMP_BIN", "mysqldump"))).unwrap();
+        let mbin = choose_tool(maria, || mysql_flavor_tool("mysql").map(|x| x.0), || Ok(env_or("MYSQL_BIN", "mysql"))).unwrap();
+        println!("  server mariadb={maria:?}  mysqldump={dbin}  mysql={mbin}");
+        if maria == Some(false) && mysql_flavor_tool("mysqldump").is_some() {
+            assert!(!client_is_mariadb(&dbin), "a MySQL server with MySQL tools available must get MySQL's mysqldump, got {dbin}");
+        }
+        let sql = |s: &str| { let mut c = build_conn(&conn).unwrap(); c.query_drop(s).unwrap(); };
+        for s in ["DROP DATABASE IF EXISTS gen_rt_src", "DROP DATABASE IF EXISTS gen_rt_tgt",
+                  "CREATE DATABASE gen_rt_src", "CREATE DATABASE gen_rt_tgt",
+                  "CREATE TABLE gen_rt_src.t (id INT PRIMARY KEY, a INT, dbl INT GENERATED ALWAYS AS (a * 2) STORED, v VARCHAR(8) GENERATED ALWAYS AS (CONCAT('x', a)) VIRTUAL)",
+                  "INSERT INTO gen_rt_src.t (id, a) VALUES (1, 5), (2, 7)"] { sql(s); }
+        let dir = tempfile::tempdir().unwrap();
+        let ex = export_run(json!({"conn":conn,"dbs":["gen_rt_src"],"folder":dir.path().to_string_lossy(),"mode":"db",
+            "options":{"charset":"utf8mb4","singletx":true,"triggers":true,"extinsert":true,"createdb":true}}), dbin.clone()).await.unwrap();
+        if maria == Some(false) && client_is_mariadb(&dbin) {
+            // No MySQL tools on this machine: the export must refuse rather than write a dump that
+            // does not restore.
+            assert_eq!(ex["ok"], false, "{ex}");
+            assert!(ex["error"].as_str().unwrap_or("").contains("generated columns"), "{ex}");
+        } else {
+            assert!(!ex.to_string().contains("FAILED"), "export: {ex}");
+            let file = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.path())
+                .find(|p| p.extension().map(|x| x == "sql").unwrap_or(false)).expect("no dump written");
+            let im = import_run(json!({"conn":conn,"files":[file.to_string_lossy()],"targetDb":"gen_rt_tgt"}), mbin).await.unwrap();
+            assert!(im["log"].as_array().map(|l| l.iter().any(|x| x.as_str().unwrap_or("").starts_with("OK  "))).unwrap_or(false), "import: {im}");
+            let mut c = build_conn(&conn).unwrap();
+            let got: Option<String> = c.query_first("SELECT GROUP_CONCAT(CONCAT(id, ':', a, ':', dbl, ':', v) ORDER BY id) FROM gen_rt_tgt.t").unwrap();
+            assert_eq!(got.as_deref(), Some("1:5:10:x5,2:7:14:x7"));
+        }
+        sql("DROP DATABASE IF EXISTS gen_rt_src");
+        sql("DROP DATABASE IF EXISTS gen_rt_tgt");
     }
 
     // A per-table dump has no CREATE DATABASE or USE, so without a target it fails with a
@@ -4835,6 +4986,17 @@ mod compare_tests {
     // as JSON) and apply-diff - must copy every value exactly. Writing by the value's shape stored a
     // text '0x41' as the byte A and an empty binary value as the two characters 0x, and a binary
     // key written that way did not match its own row.
+    // Export and import pick their tools by what the server says it is.
+    #[test]
+    #[ignore]
+    fn the_server_flavor_is_read_from_the_server() {
+        if dsn().is_none() { eprintln!("NOBS_TEST_DSN not set - skipping"); return; }
+        let v = scalar("SELECT VERSION()");
+        assert_eq!(server_is_mariadb(&conn_j()), Some(v.to_lowercase().contains("mariadb")), "version {v}");
+        let nowhere = json!({"host":"127.0.0.1","port":"1","user":"x","password":"x","ssl":"default"});
+        assert_eq!(server_is_mariadb(&nowhere), None, "an unreachable server is unknown, not MariaDB or MySQL");
+    }
+
     #[tokio::test]
     #[ignore]
     async fn compare_copies_every_value_exactly() {

@@ -73,6 +73,15 @@ Export and Import use the official MySQL/MariaDB command-line tools. These are
 at an existing install (Settings) or let it download the official MariaDB client
 tools from mariadb.org on demand.
 
+**MySQL servers get MySQL's own tools** when there are any: the two optional
+"MySQL servers" paths in Settings, or else the newest MySQL Server installation
+(`Program Files\MySQL\MySQL Server *\bin`). Export and Import ask the server
+what it is and pick the pair to match; MariaDB servers, and MySQL servers on a
+machine without MySQL's tools, use the default pair. It matters because MariaDB's
+mysqldump writes values into a MySQL table's generated columns, which MySQL
+refuses when the dump is restored. Without MySQL's tools such an export is
+refused rather than written.
+
 ## Building from source
 
 Requirements: [Rust](https://rustup.rs) (with the MSVC toolchain on Windows),

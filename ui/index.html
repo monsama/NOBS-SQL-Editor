@@ -410,8 +410,13 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
  <div id="cfgStatus" style="background:var(--panel2);border:1px solid var(--bd);border-radius:6px;padding:8px 12px;font-size:12px"></div>
  <div style="margin:12px 0 4px;font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--muted)">PATHS</div>
  <div class="muted" style="font-size:11px;line-height:1.5;margin-bottom:6px">Auto-detection checks, in order: saved configuration &rarr; MYSQL_BIN / MYSQLDUMP_BIN environment variable &rarr; common install folders (Program Files\MariaDB*, Program Files\MySQL*, WAMP, XAMPP) &rarr; system PATH.</div>
+ <div style="font-size:12px;font-weight:600;margin:4px 0 2px">Default <span class="muted" style="font-weight:400">- MariaDB servers, and MySQL servers when there are no MySQL tools</span></div>
  <div class="row"><span style="width:92px">mysql</span><input id="cfgMysql" style="flex:1" placeholder="full path to mysql.exe (or mariadb.exe)"><button onclick="browse({title:'Select mysql.exe / mariadb.exe',filter:'*.exe',mode:'file',onPick:pp=>$('cfgMysql').value=pp})">Browse...</button></div>
  <div class="row"><span style="width:92px">mysqldump</span><input id="cfgDump" style="flex:1" placeholder="full path to mysqldump.exe (or mariadb-dump.exe)"><button onclick="browse({title:'Select mysqldump.exe / mariadb-dump.exe',filter:'*.exe',mode:'file',onPick:pp=>$('cfgDump').value=pp})">Browse...</button></div>
+ <div style="font-size:12px;font-weight:600;margin:10px 0 2px">MySQL servers <span class="muted" style="font-weight:400">- optional</span></div>
+ <div class="muted" style="font-size:11px;line-height:1.5;margin-bottom:6px">Export and Import use MySQL's own tools for a MySQL server: these two paths, or else the newest MySQL Server installation (Program Files\MySQL\MySQL Server *\bin). MariaDB's mysqldump cannot make a restorable dump of a MySQL table with generated columns, and only MySQL's client checks a CA without the host name. Leave empty to detect automatically.</div>
+ <div class="row"><span style="width:92px">mysql</span><input id="cfgMysqlMy" style="flex:1" placeholder="MySQL's mysql.exe - empty: detect a MySQL Server installation"><button onclick="browse({title:'Select MySQL\'s mysql.exe',filter:'*.exe',mode:'file',onPick:pp=>$('cfgMysqlMy').value=pp})">Browse...</button></div>
+ <div class="row"><span style="width:92px">mysqldump</span><input id="cfgDumpMy" style="flex:1" placeholder="MySQL's mysqldump.exe - empty: detect a MySQL Server installation"><button onclick="browse({title:'Select MySQL\'s mysqldump.exe',filter:'*.exe',mode:'file',onPick:pp=>$('cfgDumpMy').value=pp})">Browse...</button></div>
  <div style="margin:12px 0 4px;font-size:11px;font-weight:700;letter-spacing:.6px;color:var(--muted)">DOWNLOAD</div>
  <div class="row"><button class="go" onclick="downloadTools()">Download MariaDB client tools</button><span class="muted" style="font-size:12px">Latest LTS winx64 client from mariadb.org (~90 MB)</span></div>
  <div class="row" style="margin-top:6px"><span style="width:92px">Download URL</span><input id="cfgDownloadUrl" style="flex:1;font-family:Consolas,monospace;font-size:11px" placeholder="https://mirror.mariadb.org/mariadb-{version}/winx64-packages/{file_name}"><button onclick="resetDownloadUrl()" title="Reset to the built-in default">Reset</button></div>
@@ -815,7 +820,7 @@ if(localStorage.getItem('theme')!=='light')document.body.classList.add('dark');
 // context menu
 function _clearKeys(includeAll){const keys=[];for(let i=0;i<localStorage.length;i++){const k=localStorage.key(i);if(!k)continue;if(k.indexOf('overviewCache')===0||k.indexOf('tableSizes')===0){keys.push(k);}else if(includeAll&&['session','history','connmeta','accents','theme'].indexOf(k)>=0){keys.push(k);}}keys.forEach(k=>localStorage.removeItem(k));return keys.length;}
 async function clearAllData(){if(!(await ask('Clear ALL app data?\n\nThis permanently deletes:\n\u2022 saved connections (host / user / password)\n\u2022 the query library\n\u2022 caches, accent colors, environment labels, history and session tabs.\n\nThis cannot be undone.')))return;const n=_clearKeys(true);try{await api('/api/conn-clear');}catch(e){}try{await api('/api/lib-clear');}catch(e){}log('Cleared '+n+' local entr'+(n===1?'y':'ies')+' + saved connections + library. Reloading...');setTimeout(()=>location.reload(),500);}
-async function openSettings(){$('cfgLog').textContent='';try{const r=await api('/api/get-config');const c=(r&&r.config)||{};$('cfgMysql').value=c.mysql_bin||'';$('cfgDump').value=c.mysqldump_bin||'';window._mariadbDownloadUrlDefault=(r&&r.mariadbDownloadUrlDefault)||'';$('cfgDownloadUrl').value=c.mariadb_download_url_template||window._mariadbDownloadUrlDefault;}catch(e){}show('mSettings');refreshToolsStatus();}
+async function openSettings(){$('cfgLog').textContent='';try{const r=await api('/api/get-config');const c=(r&&r.config)||{};$('cfgMysql').value=c.mysql_bin||'';$('cfgDump').value=c.mysqldump_bin||'';$('cfgMysqlMy').value=c.mysql_bin_mysql||'';$('cfgDumpMy').value=c.mysqldump_bin_mysql||'';window._mariadbDownloadUrlDefault=(r&&r.mariadbDownloadUrlDefault)||'';$('cfgDownloadUrl').value=c.mariadb_download_url_template||window._mariadbDownloadUrlDefault;}catch(e){}show('mSettings');refreshToolsStatus();}
 function resetDownloadUrl(){$('cfgDownloadUrl').value=window._mariadbDownloadUrlDefault||'';}
 // The version comes from app_info (the Tauri package info) rather than being written into the
 // markup, so it can never drift from what was actually built and shipped.
@@ -850,13 +855,15 @@ async function openAbout(){
 async function refreshToolsStatus(manual){const el=$('cfgStatus');if(!el)return;el.innerHTML='Checking...';
  const icon=$('cfgRecheckIcon'),btn=$('cfgRecheckBtn');
  if(manual&&icon){icon.classList.add('spinning');btn.classList.add('disabled');}
- try{const r=await api('/api/tools-status');if(!r||!r.ok){el.textContent='';return;}const row=(name,path,src)=>{const ok=path&&path!=='(not found)';return '<div style="margin:2px 0"><b>'+name+':</b> <span style="font-family:Consolas,monospace">'+esc(path)+'</span> '+(ok?'<span style="color:#3fb950">&#10003;</span>':'<span style="color:#e5534b">&#10007; not found</span>')+(ok&&src?'<div class="muted" style="font-size:11px;margin-left:2px">'+esc(src)+'</div>':'')+'</div>';};el.innerHTML=row('mysql',r.mysql,r.mysql_source)+row('mysqldump',r.mysqldump,r.mysqldump_source);
+ try{const r=await api('/api/tools-status');if(!r||!r.ok){el.textContent='';return;}const row=(name,path,src)=>{const ok=path&&path!=='(not found)';return '<div style="margin:2px 0"><b>'+name+':</b> <span style="font-family:Consolas,monospace">'+esc(path)+'</span> '+(ok?'<span style="color:#3fb950">&#10003;</span>':'<span style="color:#e5534b">&#10007; not found</span>')+(ok&&src?'<div class="muted" style="font-size:11px;margin-left:2px">'+esc(src)+'</div>':'')+'</div>';};const myRow=(name,path,src)=>'<div style="margin:2px 0"><b>'+name+':</b> '+(path?'<span style="font-family:Consolas,monospace">'+esc(path)+'</span> <span style="color:#3fb950">&#10003;</span><div class="muted" style="font-size:11px;margin-left:2px">'+esc(src||'')+'</div>':'<span class="muted">none - the default above is used</span>')+'</div>';
+ el.innerHTML=row('mysql',r.mysql,r.mysql_source)+row('mysqldump',r.mysqldump,r.mysqldump_source)
+  +'<div class="muted" style="font-size:11px;margin-top:6px">For MySQL servers:</div>'+myRow('mysql',r.mysql_for_mysql,r.mysql_for_mysql_source)+myRow('mysqldump',r.mysqldump_for_mysql,r.mysqldump_for_mysql_source);
  if(r.mysql&&r.mysql!=='(not found)'&&!$('cfgMysql').value)$('cfgMysql').value=r.mysql;
  if(r.mysqldump&&r.mysqldump!=='(not found)'&&!$('cfgDump').value)$('cfgDump').value=r.mysqldump;
  const pe=$('cfgPaths');if(pe)pe.innerHTML='Downloads: '+esc(r.download_dir)+'<br>Config: '+esc(r.config_file);
  if(manual){const bothOk=r.mysql&&r.mysql!=='(not found)'&&r.mysqldump&&r.mysqldump!=='(not found)';toast(bothOk?'Both tools found.':'Still missing one or both tools.',!bothOk);}}catch(e){el.textContent='';}
  finally{if(manual&&icon){icon.classList.remove('spinning');btn.classList.remove('disabled');}}}
-async function saveSettings(){try{const r=await api('/api/save-config',{config:{mysql_bin:$('cfgMysql').value.trim(),mysqldump_bin:$('cfgDump').value.trim(),mariadb_download_url_template:$('cfgDownloadUrl').value.trim()}});if(r&&r.ok){log('Saved client-tool paths.');refreshToolsStatus();hide('mSettings');}else toast('Save failed: '+(r?r.error:''),true);}catch(e){toast('Save failed: '+e,true);}}
+async function saveSettings(){try{const r=await api('/api/save-config',{config:{mysql_bin:$('cfgMysql').value.trim(),mysqldump_bin:$('cfgDump').value.trim(),mysql_bin_mysql:$('cfgMysqlMy').value.trim(),mysqldump_bin_mysql:$('cfgDumpMy').value.trim(),mariadb_download_url_template:$('cfgDownloadUrl').value.trim()}});if(r&&r.ok){log('Saved client-tool paths.');refreshToolsStatus();hide('mSettings');}else toast('Save failed: '+(r?r.error:''),true);}catch(e){toast('Save failed: '+e,true);}}
 // Persists the download URL field first - otherwise editing it and clicking Download directly
 // (without a separate Save click first) would silently use whatever was last saved instead of
 // what's currently typed, since the backend reads the URL from saved config, not this live field.
@@ -4037,8 +4044,12 @@ const MYSQL_ONLY_EXPOPTS={
  colstats:'column-statistics is MySQL 8+ only - not supported by MariaDB’s mysqldump.'
 };
 async function expApplyDumpFlavor(){
- let r; try{ r=await api('/api/tools-status'); }catch(e){ return; }
- const isMariaDb=!!(r&&r.ok&&r.mysqldump_is_mariadb===true);
+ // The dump tool depends on the server (MySQL's own for a MySQL server, when there is one), so
+ // ask for the connected one; the global status is the fallback for a backend that cannot say.
+ let r=null; try{ r=await api('/api/tools-for-conn'); }catch(e){}
+ let isMariaDb;
+ if(r&&r.ok&&r.mysqldumpIsMariadb!=null){ isMariaDb=r.mysqldumpIsMariadb===true; }
+ else{ try{ r=await api('/api/tools-status'); }catch(e){ return; } isMariaDb=!!(r&&r.ok&&r.mysqldump_is_mariadb===true); }
  Object.keys(MYSQL_ONLY_EXPOPTS).forEach(k=>{
   const el=$('eo_'+k); if(!el)return;
   const lbl=el.closest('label');
