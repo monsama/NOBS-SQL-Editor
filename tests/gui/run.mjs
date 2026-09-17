@@ -51,7 +51,7 @@ async function startApp() {
     // its per-app policy does the same job there. Only on CI: left behind on a workstation, it
     // would open the debugging port every time the app starts.
     if (process.env.CI) {
-      const key = 'HKCU\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments';
+      const key = 'HKCU\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments';
       spawnSync('reg', ['add', key, '/v', 'nobs-sql-editor.exe', '/t', 'REG_SZ', '/d', `--remote-debugging-port=${cdpPort}`, '/f'], { stdio: 'ignore' });
       cleanups.push(() => spawnSync('reg', ['delete', key, '/v', 'nobs-sql-editor.exe', '/f'], { stdio: 'ignore' }));
     }
