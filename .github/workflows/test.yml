@@ -96,15 +96,6 @@ jobs:
         working-directory: src-tauri
         run: cargo build
 
-      # The app renders in WebView2. Its Evergreen installer does nothing when the runtime is there.
-      - name: Install the WebView2 runtime
-        shell: pwsh
-        run: |
-          $setup = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebview2Setup.exe'
-          Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $setup
-          Start-Process $setup -ArgumentList '/silent', '/install' -Wait
-          Get-ItemProperty 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue | Select-Object pv
-
       - name: Live tests against MariaDB
         working-directory: src-tauri
         shell: pwsh

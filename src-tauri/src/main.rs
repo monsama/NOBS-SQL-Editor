@@ -4399,9 +4399,23 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.maximize();
+            // The window is made here rather than by the config (create: false) so that the GUI
+            // tests can open WebView2's debugging port and give it a data folder of its own.
+            // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS does the first only where WebView2 honours it
+            // (not in the elevated session CI runs in), and a second copy of the app otherwise
+            // joins the first one's browser, whose port is not the one asked for.
+            let cfg = app.config().app.windows.first().cloned().ok_or("no window in tauri.conf.json")?;
+            let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &cfg)?;
+            if let Some(port) = std::env::var("NOBS_WEBVIEW_DEBUG_PORT").ok().and_then(|p| p.parse::<u16>().ok()) {
+                // wry's own defaults, which this replaces, plus the port.
+                builder = builder.additional_browser_args(&format!(
+                    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port={port}"));
             }
+            if let Ok(dir) = std::env::var("NOBS_WEBVIEW_DATA_DIR") {
+                if !dir.is_empty() { builder = builder.data_directory(std::path::PathBuf::from(dir)); }
+            }
+            let w = builder.build()?;
+            let _ = w.maximize();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

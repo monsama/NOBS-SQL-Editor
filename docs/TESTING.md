@@ -195,9 +195,13 @@ node tests/gui/run.mjs --app ps --target ..\NOBS-SQL-PS\NOBSSQL.ps1     # headle
 - **Output:** each scenario reports its own checks, and any error message the app shows counts
   as a failure.
 - **What it changes:** the scenarios create and drop their own `nobs_gui*` databases and remove
-  the connection profiles they save.
-  - The PowerShell edition gets a temporary browser profile.
-  - The desktop app keeps its own, so each scenario closes the tabs it opened.
+  the connection profiles they save. Both editions get browser storage of their own in a
+  temporary folder, so your saved tabs are left alone, and a copy of the app you have open does
+  not get in the way.
+- **How the desktop app is driven:** the runner sets `NOBS_WEBVIEW_DEBUG_PORT` and
+  `NOBS_WEBVIEW_DATA_DIR`, which make the app open WebView2's debugging port and use that folder.
+  WebView2's own `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` is not enough: it is ignored in the
+  elevated session CI runs in.
 - **Server time zone:** a check that needs the hour when the clocks go back is skipped on a
   server whose time zone has none (UTC, as in CI).
 - **CI:** the `live` job runs these after the live tests, against MariaDB and MySQL. The

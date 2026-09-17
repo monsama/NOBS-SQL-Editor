@@ -6,8 +6,8 @@
 //
 // NOBS_TEST_DSN (host:port:user:password) names the server, as for the live tests; the scenarios
 // create and drop their own nobs_gui* databases and remove the connection profiles they save.
-// The PowerShell edition runs with its own browser profile in a temporary folder. The desktop app
-// keeps its browser storage, so each scenario closes the tabs it opened.
+// Both run with their own browser storage in a temporary folder, so saved tabs and settings of
+// the app you use are left alone.
 //
 // Scenarios live in tests/gui/scenarios and run in name order (later ones use what earlier ones
 // left); --only <text> runs those whose file name contains it. Needs Node 22 or later.
@@ -32,7 +32,6 @@ const [dbHost, dbPort, dbUser, dbPass] = dsn;
 const tmp = mkdtempSync(join(tmpdir(), 'nobs-gui-'));
 const cdpPort = 9300 + Math.floor(Math.random() * 500);
 const children = [];
-const cleanups = [];
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const killTree = p => { if (p && p.pid) spawnSync('taskkill', ['/PID', String(p.pid), '/T', '/F'], { stdio: 'ignore' }); };
 
@@ -44,18 +43,13 @@ writeFileSync(join(tmp, 'gp.csv'), Buffer.from(
 let appOutput = '';
 async function startApp() {
   if (app === 'desktop') {
-    // The app allows one instance: a second one hands over to the first and exits.
-    const running = spawnSync('tasklist', ['/FI', 'IMAGENAME eq nobs-sql-editor.exe', '/NH'], { encoding: 'utf8' }).stdout || '';
-    if (/nobs-sql-editor.exe/i.test(running)) throw new Error('NOBS SQL Editor is already running - close it first, the test starts its own');
-    // WebView2 ignores that environment variable in an elevated process, which is how CI runs;
-    // its per-app policy does the same job there. Only on CI: left behind on a workstation, it
-    // would open the debugging port every time the app starts.
-    if (process.env.CI) {
-      const key = 'HKCU\\Software\\Policies\\Microsoft\\Edge\\WebView2\\AdditionalBrowserArguments';
-      spawnSync('reg', ['add', key, '/v', 'nobs-sql-editor.exe', '/t', 'REG_SZ', '/d', `--remote-debugging-port=${cdpPort}`, '/f'], { stdio: 'ignore' });
-      cleanups.push(() => spawnSync('reg', ['delete', key, '/v', 'nobs-sql-editor.exe', '/f'], { stdio: 'ignore' }));
-    }
-    const p = spawn(target, [], { env: { ...process.env, WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: `--remote-debugging-port=${cdpPort}` }, stdio: ['ignore', 'pipe', 'pipe'] });
+    // Its own WebView2 data folder, so a copy of the app already open (whose browser a second one
+    // would otherwise join) and your saved tabs stay out of it; and the debugging port, which the
+    // app opens when asked to (see main() in src-tauri/src/main.rs).
+    const p = spawn(target, [], {
+      env: { ...process.env, NOBS_WEBVIEW_DEBUG_PORT: String(cdpPort), NOBS_WEBVIEW_DATA_DIR: join(tmp, 'webview') },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     p.stdout.on('data', d => { appOutput += d; });
     p.stderr.on('data', d => { appOutput += d; });
     p.on('exit', code => { appOutput += `
@@ -164,7 +158,6 @@ try {
   failed++; console.log(`  FAIL  ${e.message}`);
 } finally {
   children.reverse().forEach(killTree);
-  cleanups.forEach(f => f());
   await sleep(500);
   try { rmSync(tmp, { recursive: true, force: true }); } catch { /* a browser may still hold a file */ }
 }
