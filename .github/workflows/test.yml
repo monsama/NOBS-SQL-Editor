@@ -5,6 +5,10 @@ name: test
 # caught by hand-testing later. Tests marked #[ignore] need a live NOBS_TEST_DSN database and are
 # skipped here (cargo test's default behavior) - everything else (SQL statement splitting, CSV
 # import edge cases, read-only mode enforcement, SQL-literal escaping, etc.) still runs.
+#
+# Three jobs, run in parallel: `test` (unit tests, clippy, the UI tests), `live` (both servers and
+# the GUI scenarios against them) and `tools-download` (the app's own client-tools download, run
+# for real against mariadb.org - the one #[ignore]d test that needs no database).
 on:
   push:
     branches: [main]
@@ -154,3 +158,44 @@ jobs:
         if: ${{ failure() }}
         shell: pwsh
         run: Get-Content C:\nobs-ci\mariadb.err, C:\nobs-ci\mysql.err -Tail 60 -ErrorAction SilentlyContinue
+
+  # The app's own "Download MariaDB client tools" button, run for real against mariadb.org. Neither
+  # of the jobs above reaches it: the unit tests cannot (it is a network download) and the GUI
+  # scenario only checks that Settings draws the two cards, so until this job existed the whole
+  # path - the release API's response shape, the SHA-256 the archive is checked against, and the
+  # zip crate reading a genuine 90 MB archive - was covered by a line in the manual test plan. A
+  # zip major bump therefore could not break it in CI; it broke it for whoever clicked the button
+  # next. Dependabot bumps zip on its own schedule, which is exactly why this runs unattended.
+  #
+  # Separate job, not a step in `test`: it is the only one that needs the network for anything but
+  # crates.io, it takes a couple of minutes, and a failure here means "the download is broken",
+  # which should not read as "the unit tests failed". It runs in parallel with them either way.
+  tools-download:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The test is #[ignore]d and additionally gated on NOBS_TEST_TOOLS_DOWNLOAD, so that running
+      # the ignored tests locally cannot replace a developer's own client tools behind their back.
+      # Here the runner is disposable, so the variable is simply set.
+      - name: Download, verify and extract the MariaDB client tools
+        working-directory: src-tauri
+        env:
+          NOBS_TEST_TOOLS_DOWNLOAD: '1'
+        run: cargo test the_mariadb_client_tools_download -- --ignored --nocapture
+
+      # What it left on disk, when it failed - a truncated archive and a checksum mismatch look
+      # the same in the assertion message, but not here.
+      - name: What was extracted
+        if: ${{ failure() }}
+        shell: pwsh
+        run: Get-ChildItem -Recurse "$env:APPDATA\NOBSSQL-Desktop\bin" | Select-Object FullName, Length

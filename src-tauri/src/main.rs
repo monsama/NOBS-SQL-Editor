@@ -4071,110 +4071,145 @@ fn save_config(req: Value) -> R {
 // the actual archive.
 const DEFAULT_MARIADB_DOWNLOAD_TEMPLATE: &str = "https://mirror.mariadb.org/mariadb-{version}/winx64-packages/{file_name}";
 
+// The winx64 archive in one patch release's file list, as the release API describes it: its name,
+// the API's own download URL, and the SHA-256 it must hash to (None when the API lists no usable
+// checksum). Kept out of download_tools() for the same reason as parse_mysql_download_page below -
+// so the part that reads someone else's response format can be tested without the network.
+fn mariadb_winx64_zip(files: &[Value]) -> Option<(String, String, Option<String>)> {
+    let entry = files.iter().find(|f| {
+        let n = f["file_name"].as_str().unwrap_or("");
+        n.contains("winx64") && n.ends_with(".zip") && !n.contains("debug")
+    })?;
+    let file_name = entry["file_name"].as_str()?.to_string();
+    let api_url = entry["file_download_url"].as_str()?.to_string();
+    // Anything that is not a full hex SHA-256 is treated as no checksum at all rather than
+    // compared and failed - a truncated or renamed field must read as "cannot be checked".
+    let sha256 = entry["checksum"]["sha256sum"].as_str().map(|s| s.trim().to_lowercase())
+        .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()));
+    Some((file_name, api_url, sha256))
+}
+
+// A downloaded archive is the one the release API describes, or it is not installed - the rule the
+// MySQL side already applies with its MD5. The checksum always comes from the API, never from the
+// mirror that served the bytes: a mirror that returned the wrong archive cannot also vouch for it,
+// and the mirror URL here is a user-editable template while the API address is not.
+fn verify_sha256(bytes: &[u8], want: &str) -> Result<(), String> {
+    use sha2::Digest as _;
+    let got = hex::encode(sha2::Sha256::digest(bytes));
+    if got == want { Ok(()) } else { Err(format!("checksum mismatch (got {got}, the release API says {want})")) }
+}
+
 #[tauri::command]
-async fn download_tools(_app: tauri::AppHandle) -> R {
-    tokio::task::spawn_blocking(|| -> R {
-        let client = reqwest::blocking::Client::builder()
-            .user_agent("NOBSSQL-Desktop")
-            .timeout(std::time::Duration::from_secs(600))
-            .build().map_err(|e| e.to_string())?;
-        // 1) latest LTS stable branch
-        let root: Value = client.get("https://downloads.mariadb.org/rest-api/mariadb/")
-            .send().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
-        let mut branches: Vec<String> = root["major_releases"].as_array().cloned().unwrap_or_default().iter()
-            .filter(|r| r["release_status"].as_str() == Some("Stable")
-                     && r["release_support_type"].as_str() == Some("Long Term Support"))
-            .filter_map(|r| r["release_id"].as_str().map(String::from)).collect();
-        branches.sort_by_key(|a| std::cmp::Reverse(ver_key(a)));
-        let branch = branches.first().cloned().ok_or("No stable LTS branch found.")?;
-        // 2) latest patch version in that branch
-        let binfo: Value = client.get(format!("https://downloads.mariadb.org/rest-api/mariadb/{}/", branch))
-            .send().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
-        let rel = binfo["releases"].as_object().ok_or("No releases in branch.")?;
-        let mut patches: Vec<String> = rel.keys().cloned().collect();
-        patches.sort_by_key(|a| std::cmp::Reverse(ver_key(a)));
-        let patch = patches.first().cloned().ok_or("No patch version found.")?;
-        // 3) winx64 zip (non-debug)
-        let files = binfo["releases"][&patch]["files"].as_array().cloned().unwrap_or_default();
-        let zip_entry = files.iter().find(|f| {
-            let n = f["file_name"].as_str().unwrap_or("");
-            n.contains("winx64") && n.ends_with(".zip") && !n.contains("debug")
-        }).ok_or("No winx64 zip found in the MariaDB release.")?;
-        let file_name = zip_entry["file_name"].as_str().unwrap_or("").to_string();
-        let api_url = zip_entry["file_download_url"].as_str().ok_or("No download URL.")?.to_string();
-        // 4) download - the API's own file_download_url has been observed returning an error
-        // page (403) instead of the actual archive, which is exactly what produces "Could not
-        // find EOCD": the downloaded bytes simply aren't a valid zip at all. A direct mirror URL
-        // is more reliable, so it's tried first here, falling back to the API's own URL only if
-        // that fails too. The mirror URL is a user-editable template (Settings), not hardcoded,
-        // so this can be corrected without a code update if mariadb.org's layout changes again.
-        let cfg = load_cfg();
-        let template = cfg.get("mariadb_download_url_template").and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty()).unwrap_or(DEFAULT_MARIADB_DOWNLOAD_TEMPLATE).to_string();
-        let primary_url = template.replace("{version}", &patch).replace("{file_name}", &file_name);
-        let mut zipf = None;
-        let mut errs: Vec<String> = Vec::new();
-        for (label, u) in [("configured download URL", primary_url.as_str()), ("MariaDB API URL", api_url.as_str())] {
-            let attempt = client.get(u).send().map_err(|e| e.to_string())
-                .and_then(|r| r.bytes().map_err(|e| e.to_string()))
-                .and_then(|b| zip::ZipArchive::new(std::io::Cursor::new(b)).map_err(|e| e.to_string()));
-            match attempt {
-                Ok(z) => { zipf = Some(z); break; }
-                Err(e) => errs.push(format!("{}: {}", label, e)),
-            }
+async fn download_tools() -> R {
+    tokio::task::spawn_blocking(download_mariadb_tools).await.map_err(|e| e.to_string())?
+}
+
+// The download itself, as a plain blocking function rather than a closure inside the command, so
+// that a test can run the real thing end to end - see the_mariadb_client_tools_download_verifies
+// _and_extracts. The command above only moves it off the async runtime, and takes no arguments,
+// like download_mysql_tools.
+fn download_mariadb_tools() -> R {
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("NOBSSQL-Desktop")
+        .timeout(std::time::Duration::from_secs(600))
+        .build().map_err(|e| e.to_string())?;
+    // 1) latest LTS stable branch
+    let root: Value = client.get("https://downloads.mariadb.org/rest-api/mariadb/")
+        .send().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
+    let mut branches: Vec<String> = root["major_releases"].as_array().cloned().unwrap_or_default().iter()
+        .filter(|r| r["release_status"].as_str() == Some("Stable")
+                 && r["release_support_type"].as_str() == Some("Long Term Support"))
+        .filter_map(|r| r["release_id"].as_str().map(String::from)).collect();
+    branches.sort_by_key(|a| std::cmp::Reverse(ver_key(a)));
+    let branch = branches.first().cloned().ok_or("No stable LTS branch found.")?;
+    // 2) latest patch version in that branch
+    let binfo: Value = client.get(format!("https://downloads.mariadb.org/rest-api/mariadb/{}/", branch))
+        .send().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
+    let rel = binfo["releases"].as_object().ok_or("No releases in branch.")?;
+    let mut patches: Vec<String> = rel.keys().cloned().collect();
+    patches.sort_by_key(|a| std::cmp::Reverse(ver_key(a)));
+    let patch = patches.first().cloned().ok_or("No patch version found.")?;
+    // 3) winx64 zip (non-debug)
+    let files = binfo["releases"][&patch]["files"].as_array().cloned().unwrap_or_default();
+    let (file_name, api_url, sha256) = mariadb_winx64_zip(&files)
+        .ok_or("No winx64 zip found in the MariaDB release.")?;
+    // A download that cannot be checked is not installed - the binaries and authentication
+    // plugins unpacked below are executed by this app afterwards.
+    let want_sha = sha256.ok_or_else(|| format!(
+        "The MariaDB release API listed no SHA-256 checksum for {file_name}, so the download was not attempted."))?;
+    // 4) download - the API's own file_download_url has been observed returning an error
+    // page (403) instead of the actual archive, which is exactly what produces "Could not
+    // find EOCD": the downloaded bytes simply aren't a valid zip at all. A direct mirror URL
+    // is more reliable, so it's tried first here, falling back to the API's own URL only if
+    // that fails too. The mirror URL is a user-editable template (Settings), not hardcoded,
+    // so this can be corrected without a code update if mariadb.org's layout changes again.
+    let cfg = load_cfg();
+    let template = cfg.get("mariadb_download_url_template").and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty()).unwrap_or(DEFAULT_MARIADB_DOWNLOAD_TEMPLATE).to_string();
+    let primary_url = template.replace("{version}", &patch).replace("{file_name}", &file_name);
+    let mut zipf = None;
+    let mut errs: Vec<String> = Vec::new();
+    for (label, u) in [("configured download URL", primary_url.as_str()), ("MariaDB API URL", api_url.as_str())] {
+        let attempt = client.get(u).send().map_err(|e| e.to_string())
+            .and_then(|r| r.bytes().map_err(|e| e.to_string()))
+            .and_then(|b| verify_sha256(&b, &want_sha).map(|()| b))
+            .and_then(|b| zip::ZipArchive::new(std::io::Cursor::new(b)).map_err(|e| e.to_string()));
+        match attempt {
+            Ok(z) => { zipf = Some(z); break; }
+            Err(e) => errs.push(format!("{}: {}", label, e)),
         }
-        let mut zipf = zipf.ok_or_else(|| format!("Could not download a valid archive from either source.\n{}", errs.join("\n")))?;
-        // 5) extract wanted client binaries
-        let dest = tools_dir();
-        std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
-        let want = ["mysqldump.exe", "mysql.exe", "mysqlimport.exe", "mysqlcheck.exe", "mariadb.exe", "mariadb-dump.exe"];
-        // The client AUTHENTICATION plugins, which were not being unpacked at all - without
-        // caching_sha2_password the client cannot log in to a stock MySQL 8 server, so export and
-        // import failed against one however the connection itself was configured. The archive also
-        // carries storage engines and audit plugins; those belong to a server, not here.
-        let want_plugins = ["caching_sha2_password.dll", "sha256_password.dll",
-                            "client_ed25519.dll", "parsec.dll",
-                            "dialog.dll", "mysql_clear_password.dll",
-                            "auth_gssapi_client.dll", "authentication_windows_client.dll",
-                            "auth_named_pipe.dll"];
-        let plugin_dest = dest.join("plugin");
-        let mut got: Vec<String> = Vec::new();
-        let mut got_plugins = 0usize;
-        for i in 0..zipf.len() {
-            let mut f = zipf.by_index(i).map_err(|e| e.to_string())?;
-            let full = f.name().to_string();
-            let base = full.rsplit(['/', '\\']).next().unwrap_or("").to_string();
-            if want.contains(&base.as_str()) {
-                let out = dest.join(&base);
-                let mut o = std::fs::File::create(&out).map_err(|e| e.to_string())?;
-                std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
-                got.push(base);
-            } else if want_plugins.contains(&base.as_str())
-                   && full.replace('\\', "/").contains("/lib/plugin/") {
-                // Matched on the archive path too, so these come from lib/plugin and not from
-                // something else that happens to share a file name.
-                std::fs::create_dir_all(&plugin_dest).map_err(|e| e.to_string())?;
-                let mut o = std::fs::File::create(plugin_dest.join(&base)).map_err(|e| e.to_string())?;
-                std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
-                got_plugins += 1;
-            }
+    }
+    let mut zipf = zipf.ok_or_else(|| format!("Could not download a valid archive from either source.\n{}", errs.join("\n")))?;
+    // 5) extract wanted client binaries
+    let dest = tools_dir();
+    std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+    let want = ["mysqldump.exe", "mysql.exe", "mysqlimport.exe", "mysqlcheck.exe", "mariadb.exe", "mariadb-dump.exe"];
+    // The client AUTHENTICATION plugins, which were not being unpacked at all - without
+    // caching_sha2_password the client cannot log in to a stock MySQL 8 server, so export and
+    // import failed against one however the connection itself was configured. The archive also
+    // carries storage engines and audit plugins; those belong to a server, not here.
+    let want_plugins = ["caching_sha2_password.dll", "sha256_password.dll",
+                        "client_ed25519.dll", "parsec.dll",
+                        "dialog.dll", "mysql_clear_password.dll",
+                        "auth_gssapi_client.dll", "authentication_windows_client.dll",
+                        "auth_named_pipe.dll"];
+    let plugin_dest = dest.join("plugin");
+    let mut got: Vec<String> = Vec::new();
+    let mut got_plugins = 0usize;
+    for i in 0..zipf.len() {
+        let mut f = zipf.by_index(i).map_err(|e| e.to_string())?;
+        let full = f.name().to_string();
+        let base = full.rsplit(['/', '\\']).next().unwrap_or("").to_string();
+        if want.contains(&base.as_str()) {
+            let out = dest.join(&base);
+            let mut o = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+            std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
+            got.push(base);
+        } else if want_plugins.contains(&base.as_str())
+               && full.replace('\\', "/").contains("/lib/plugin/") {
+            // Matched on the archive path too, so these come from lib/plugin and not from
+            // something else that happens to share a file name.
+            std::fs::create_dir_all(&plugin_dest).map_err(|e| e.to_string())?;
+            let mut o = std::fs::File::create(plugin_dest.join(&base)).map_err(|e| e.to_string())?;
+            std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
+            got_plugins += 1;
         }
-        log_line(&format!("download_tools: {} binaries, {} auth plugins", got.len(), got_plugins));
-        if got.is_empty() { return Ok(json!({"ok":false,"error":"Downloaded the archive but found no client binaries inside."})); }
-        // 6) record paths in config
-        let pick = |a: &str, b: &str| -> Option<String> {
-            for n in [a, b] { let p = dest.join(n); if p.exists() { return Some(p.to_string_lossy().to_string()); } }
-            None
-        };
-        let mut cfg = load_cfg();
-        if let Some(p) = pick("mysql.exe", "mariadb.exe") { cfg["mysql_bin"] = json!(p); }
-        if let Some(p) = pick("mysqldump.exe", "mariadb-dump.exe") { cfg["mysqldump_bin"] = json!(p); }
-        std::fs::write(config_file(), serde_json::to_string_pretty(&cfg).unwrap_or_default()).map_err(|e| e.to_string())?;
-        // New binaries just landed on disk and the config above may point at them now - the
-        // cached tools_status result (if any) is stale.
-        *tools_status_cache().lock().unwrap() = None;
-        Ok(json!({"ok":true, "message": format!("Downloaded MariaDB {} client tools to {}", patch, dest.to_string_lossy()), "config": cfg}))
-    }).await.map_err(|e| e.to_string())?
+    }
+    log_line(&format!("download_tools: {} binaries, {} auth plugins", got.len(), got_plugins));
+    if got.is_empty() { return Ok(json!({"ok":false,"error":"Downloaded the archive but found no client binaries inside."})); }
+    // 6) record paths in config
+    let pick = |a: &str, b: &str| -> Option<String> {
+        for n in [a, b] { let p = dest.join(n); if p.exists() { return Some(p.to_string_lossy().to_string()); } }
+        None
+    };
+    let mut cfg = load_cfg();
+    if let Some(p) = pick("mysql.exe", "mariadb.exe") { cfg["mysql_bin"] = json!(p); }
+    if let Some(p) = pick("mysqldump.exe", "mariadb-dump.exe") { cfg["mysqldump_bin"] = json!(p); }
+    std::fs::write(config_file(), serde_json::to_string_pretty(&cfg).unwrap_or_default()).map_err(|e| e.to_string())?;
+    // New binaries just landed on disk and the config above may point at them now - the
+    // cached tools_status result (if any) is stale.
+    *tools_status_cache().lock().unwrap() = None;
+    Ok(json!({"ok":true, "message": format!("Downloaded MariaDB {} client tools to {}", patch, dest.to_string_lossy()), "config": cfg}))
 }
 
 // ---------- MySQL's own client tools ----------
@@ -4773,6 +4808,89 @@ mod tests {
         assert!(parse_mysql_download_page("<html>nothing here</html>").is_none());
         let (_, _, none) = parse_mysql_download_page("(mysql-9.1.0-winx64.zip) no checksum").unwrap();
         assert!(none.is_none(), "no checksum on the page must not produce one");
+    }
+
+    // One patch release's file list, shaped like the real https://downloads.mariadb.org/rest-api/
+    // response: the debug archive first (so picking the first winx64 zip would be wrong), the one
+    // that is wanted second, and a source tarball that has no business being chosen.
+    fn mariadb_files() -> Vec<Value> {
+        vec![
+            json!({"file_name":"mariadb-11.8.9-winx64-debug.zip","file_download_url":"https://dlm.mariadb.com/debug",
+                   "checksum":{"sha256sum":"1111111111111111111111111111111111111111111111111111111111111111"}}),
+            json!({"file_name":"mariadb-11.8.9-winx64.zip","file_download_url":"https://dlm.mariadb.com/winx64",
+                   "checksum":{"md5sum":"d41d8cd98f00b204e9800998ecf8427e",
+                               "sha256sum":"830C46727D9278EAE212AE3ECA44EEB9E71B2A68704E95F344A64FBA7B1963F5"}}),
+            json!({"file_name":"mariadb-11.8.9.tar.gz","file_download_url":"https://dlm.mariadb.com/src",
+                   "checksum":{"sha256sum":"2222222222222222222222222222222222222222222222222222222222222222"}}),
+        ]
+    }
+
+    #[test]
+    fn the_mariadb_api_gives_the_winx64_zip_and_its_checksum() {
+        let (file, url, sha) = mariadb_winx64_zip(&mariadb_files()).unwrap();
+        assert_eq!(file, "mariadb-11.8.9-winx64.zip");
+        assert_eq!(url, "https://dlm.mariadb.com/winx64");
+        // Lower-cased, so it compares equal to what hex::encode produces.
+        assert_eq!(sha.as_deref(), Some("830c46727d9278eae212ae3eca44eeb9e71b2a68704e95f344a64fba7b1963f5"));
+        assert!(mariadb_winx64_zip(&[]).is_none());
+        assert!(mariadb_winx64_zip(&[json!({"file_name":"mariadb-11.8.9-winx64-debug.zip","file_download_url":"u"})]).is_none(),
+            "only a debug archive must not be offered as the client tools");
+    }
+
+    #[test]
+    fn a_checksum_that_is_not_a_sha256_reads_as_no_checksum() {
+        // Each of these must leave the caller refusing the download rather than comparing against
+        // something that cannot match: missing, truncated, and not hex.
+        for entry in [json!({"file_name":"mariadb-1-winx64.zip","file_download_url":"u"}),
+                      json!({"file_name":"mariadb-1-winx64.zip","file_download_url":"u","checksum":{"md5sum":"d41d8cd98f00b204e9800998ecf8427e"}}),
+                      json!({"file_name":"mariadb-1-winx64.zip","file_download_url":"u","checksum":{"sha256sum":"830c4672"}}),
+                      json!({"file_name":"mariadb-1-winx64.zip","file_download_url":"u","checksum":{"sha256sum":"not hex, sixty-four characters long, but still not hexadecimal!!"}})] {
+            let (_, _, sha) = mariadb_winx64_zip(std::slice::from_ref(&entry)).unwrap();
+            assert!(sha.is_none(), "{entry} must not yield a checksum");
+        }
+    }
+
+    #[test]
+    fn an_archive_is_accepted_only_when_it_hashes_to_what_the_api_said() {
+        // The published SHA-256 of "abc", so this asserts the real digest and not just that two
+        // calls agree with each other.
+        const ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        assert!(verify_sha256(b"abc", ABC).is_ok());
+        let wrong = verify_sha256(b"abd", ABC).unwrap_err();
+        assert!(wrong.contains("checksum mismatch"), "{wrong}");
+        assert!(wrong.contains(ABC), "the message must name what was expected: {wrong}");
+        // A truncated download is the realistic failure, not a crafted one.
+        assert!(verify_sha256(b"ab", ABC).is_err());
+        assert!(verify_sha256(b"", ABC).is_err());
+    }
+
+    // The real download, against mariadb.org: the one path that exercises the release API's
+    // current response shape, the checksum, and the zip crate against a genuine 90 MB archive.
+    // Nothing else covers it - the GUI scenario only checks that Settings draws the buttons - so a
+    // zip or API change would otherwise surface as a user's failed download. CI runs it (see
+    // .github/workflows/test.yml, the tools-download job); it is #[ignore]d and env-gated on top
+    // of that because it downloads 90 MB and installs into the config directory, which is not
+    // something `cargo test -- --include-ignored` should do to a developer's own tools.
+    #[test]
+    #[ignore]
+    fn the_mariadb_client_tools_download_verifies_and_extracts() {
+        if std::env::var("NOBS_TEST_TOOLS_DOWNLOAD").is_err() {
+            eprintln!("NOBS_TEST_TOOLS_DOWNLOAD not set - skipping"); return;
+        }
+        let r = download_mariadb_tools().expect("the download returned an error");
+        assert_eq!(r["ok"], json!(true), "{r}");
+        // The two the app actually runs, and one authentication plugin - the plugins live deeper in
+        // the archive and were once missed entirely, so they are worth asserting separately.
+        for exe in ["mysql.exe", "mysqldump.exe"] {
+            let p = tools_dir().join(exe);
+            let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+            assert!(size > 1_000_000, "{} is missing or truncated ({size} bytes)", p.display());
+        }
+        assert!(tools_dir().join("plugin").join("caching_sha2_password.dll").exists(),
+            "the client authentication plugins were not extracted");
+        // And the config now points at what was just unpacked, which is what makes export work.
+        let cfg = load_cfg();
+        assert!(cfg["mysql_bin"].as_str().unwrap_or("").ends_with(".exe"), "{cfg}");
     }
 
     #[test]

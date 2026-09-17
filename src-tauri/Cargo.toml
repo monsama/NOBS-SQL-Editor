@@ -25,6 +25,7 @@ chrono = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 zip = "8"
 md-5 = "0.11"
+sha2 = "0.11"   # verifies the MariaDB client-tools archive against the release API's SHA-256
 
 [profile.release]
 strip = true

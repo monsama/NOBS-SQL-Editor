@@ -1,7 +1,12 @@
 # NOBS SQL Editor
 
-A lightweight, cross-platform desktop client for **MySQL** and **MariaDB**, built
-with [Tauri](https://tauri.app) (Rust backend + HTML/JS frontend).
+A lightweight desktop client for **MySQL** and **MariaDB**, built with
+[Tauri](https://tauri.app) (Rust backend + HTML/JS frontend).
+
+**Windows** is the platform that is built, tested and released. The code itself is
+portable and Tauri supports macOS and Linux, so it can be built from source there
+(see [Building from source](#building-from-source)) - but no installers are published
+for them, and CI does not test them, so treat that as unsupported rather than ready.
 
 ## Download
 
@@ -112,7 +117,11 @@ for — at worst a remote export fails where a query on the same connection work
 Export and Import use the official MySQL/MariaDB command-line tools. These are
 **not bundled** with this application. On first use you can either point the app
 at an existing install (Settings) or let it download the official MariaDB client
-tools from mariadb.org on demand.
+tools from mariadb.org on demand. The archive is checked against the SHA-256 that
+MariaDB's own release API publishes for it before anything is unpacked, and a
+mismatch installs nothing — the checksum comes from the API, not from the mirror
+the bytes came from, so a redirected or altered download fails the check. If the
+API lists no checksum, nothing is downloaded at all.
 
 **MySQL servers get MySQL's own tools** when there are any: the two optional
 "MySQL servers" paths in Settings, or else the newest MySQL Server installation
