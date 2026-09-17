@@ -22,6 +22,34 @@ change to one of them changes both editions' tests.
 
 Everything below is what neither of those can reach.
 
+## The live tests in CI
+
+The `live` job in `.github/workflows/test.yml` runs every `#[ignore]`d test on each push, once
+against MariaDB and once against MySQL. `tests/ci/start-test-servers.ps1` sets that up on the
+Windows runner:
+
+- It downloads MariaDB and MySQL as zip archives (the versions are at the top of the script),
+  starts both, and loads `tests/fixtures/seed.sql` into each.
+- MySQL is unpacked where a real installation lives (`Program Files\MySQL\MySQL Server <series>`),
+  so the app finds MySQL's own client tools there. MariaDB's client tools and login plugins go
+  where the app's own download puts them.
+- Each server's CA certificate is saved to a file: MySQL's from its data directory, MariaDB's off
+  the wire with `openssl`. That way the right-CA checks run too.
+- It writes `NOBS_CI_*` values and `MYSQL_BIN`/`MYSQLDUMP_BIN` for the later steps. The
+  NOBS-SQL-PS repository runs its live suite with the same script.
+
+It also runs locally, on spare ports and in a folder of your choosing, next to servers you
+already have:
+
+```powershell
+pwsh -File tests/ci/start-test-servers.ps1 -Root C:\nobs-ci -MariaPort 3316 -MysqlPort 3318 `
+     -MysqlHome C:\nobs-ci\mysql -AppData C:\nobs-ci\appdata
+```
+
+The servers keep running afterwards; stop `mariadbd` and `mysqld` when done. They write their
+own log files (`mariadb.err`, `mysql.err` in the root folder). Redirecting their output
+instead made them inherit the script's output handles, and a CI step waits for those to close.
+
 The live tests are `#[ignore]`d so a plain `cargo test` stays offline. A test
 whose environment is missing prints one line to stderr and then **passes**, so
 `cargo test` reporting `ok` does *not* by itself mean the test ran — check the

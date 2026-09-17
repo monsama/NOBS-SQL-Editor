@@ -46,3 +46,56 @@ jobs:
       # built-in runner - no dependencies to install, so this needs no npm ci.
       - name: Run UI tests
         run: npm test
+
+  # The #[ignore]d tests need real servers, and they are the ones that have caught real bugs. The
+  # setup script downloads MariaDB and MySQL, starts both on this runner (MySQL where a real
+  # installation lives, so the app finds MySQL's own client tools there), loads the fixture and
+  # puts MariaDB's client tools where the app's own download would. Every push is then checked
+  # against both servers, not only on a developer's machine.
+  live:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # The two archives are ~90 MB and ~270 MB. The versions live in the script, so its hash is
+      # the key.
+      - name: Cache server downloads
+        uses: actions/cache@v4
+        with:
+          path: C:\nobs-ci\cache
+          key: nobs-ci-servers-${{ hashFiles('tests/ci/start-test-servers.ps1') }}
+
+      - name: Start MariaDB and MySQL
+        shell: pwsh
+        run: ./tests/ci/start-test-servers.ps1
+
+      - name: Live tests against MariaDB
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          $env:NOBS_TEST_DSN = $env:NOBS_CI_MARIADB_DSN
+          $env:NOBS_TEST_SERVER_CA = $env:NOBS_CI_MARIADB_CA
+          cargo test -- --include-ignored --test-threads=1
+
+      - name: Live tests against MySQL
+        if: ${{ !cancelled() }}
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          $env:NOBS_TEST_DSN = $env:NOBS_CI_MYSQL_DSN
+          $env:NOBS_TEST_SERVER_CA = $env:NOBS_CI_MYSQL_CA
+          cargo test -- --include-ignored --test-threads=1
+
+      - name: Server logs
+        if: ${{ failure() }}
+        shell: pwsh
+        run: Get-Content C:\nobs-ci\mariadb.err, C:\nobs-ci\mysql.err -Tail 60 -ErrorAction SilentlyContinue
