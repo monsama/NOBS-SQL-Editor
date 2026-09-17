@@ -2162,6 +2162,113 @@ fn table_filter_args(d: &str, excl: &std::collections::HashSet<String>, conn_req
     }
 }
 
+// The name in a mysqldump section heading - "-- Table structure for table `t`" and the view
+// headings of both dump tools - or None for any other line. Data never looks like this: every
+// data line is a statement, and a line break inside a value is written as \n.
+fn dump_section_name(line: &[u8]) -> Option<String> {
+    let s = std::str::from_utf8(trim_eol(line)).ok()?;
+    let rest = ["-- Table structure for table ", "-- Temporary view structure for view ",
+                "-- Temporary table structure for view ", "-- Final view structure for view "]
+        .iter().find_map(|p| s.strip_prefix(p))?;
+    Some(rest.strip_prefix('`')?.strip_suffix('`')?.replace("``", "`"))
+}
+fn trim_eol(line: &[u8]) -> &[u8] {
+    let mut l = line;
+    while let [rest @ .., b'\n' | b'\r'] = l { l = rest; }
+    l
+}
+
+// Splits a whole-database dump into one file per table or view, each with the dump's own opening
+// and closing lines, so each restores on its own - the files the per-table export writes.
+//
+// That export used to run mysqldump once per table. --single-transaction makes one run
+// consistent, not several, so with writes going on the files came from different moments - an
+// order in one, its lines missing from the next. One dump of the whole database is one snapshot;
+// splitting it keeps that. file_for gives each name its file (called once per name). Returns
+// (name, file) in dump order. The dump is streamed, never held in memory.
+fn split_dump_by_table(src: &std::path::Path, file_for: &mut dyn FnMut(&str) -> String) -> Result<Vec<(String, String)>, String> {
+    use std::io::{BufRead, Read, Seek, Write};
+    let open = || std::fs::File::open(src).map_err(|e| format!("{}: {}", src.display(), e));
+    // Pass 1: where the sections start and where the closing lines begin.
+    let mut r = std::io::BufReader::new(open()?);
+    let (mut off, mut prev_off, mut prev_dashes) = (0u64, 0u64, false);
+    let (mut first, mut last_section, mut tz, mut mode): (Option<u64>, u64, Option<u64>, Option<u64>) = (None, 0, None, None);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let n = r.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
+        if n == 0 { break; }
+        if dump_section_name(&line).is_some() {
+            first.get_or_insert(if prev_dashes { prev_off } else { off });
+            last_section = off;
+        }
+        let t = trim_eol(&line);
+        if t == b"/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;" { tz = Some(off); }
+        if t == b"/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;" { mode = Some(off); }
+        prev_dashes = t == b"--";
+        prev_off = off;
+        off += n as u64;
+    }
+    let total = off;
+    let Some(first) = first else { return Ok(Vec::new()) };
+    // The closing lines restore what the opening ones set; they start with the time zone (when
+    // --tz-utc set one) or the SQL mode. A view's own closing lines look alike but come earlier.
+    let closing = match (tz, mode) {
+        (Some(z), Some(m)) if z > last_section && z < m => z,
+        (_, Some(m)) if m > last_section => m,
+        _ => total,
+    };
+    let mut f = open()?;
+    let mut header = vec![0u8; first as usize];
+    f.read_exact(&mut header).map_err(|e| e.to_string())?;
+    let mut footer = Vec::new();
+    f.seek(std::io::SeekFrom::Start(closing)).map_err(|e| e.to_string())?;
+    f.read_to_end(&mut footer).map_err(|e| e.to_string())?;
+
+    // Pass 2: each section to its name's file. A "--" line belongs to the section it heads.
+    f.seek(std::io::SeekFrom::Start(first)).map_err(|e| e.to_string())?;
+    let mut r = std::io::BufReader::new(f);
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut cur: Option<std::io::BufWriter<std::fs::File>> = None;
+    let mut pending: Option<Vec<u8>> = None;
+    let mut off = first;
+    let write = |w: &mut Option<std::io::BufWriter<std::fs::File>>, b: &[u8]| -> Result<(), String> {
+        match w { Some(w) => w.write_all(b).map_err(|e| e.to_string()), None => Ok(()) }
+    };
+    while off < closing {
+        line.clear();
+        let n = r.read_until(b'\n', &mut line).map_err(|e| e.to_string())?;
+        if n == 0 { break; }
+        off += n as u64;
+        if let Some(name) = dump_section_name(&line) {
+            if let Some(mut w) = cur.take() { w.flush().map_err(|e| e.to_string())?; }
+            let path = match out.iter().find(|(n2, _)| *n2 == name) {
+                Some((_, p)) => p.clone(),
+                None => {
+                    let p = file_for(&name);
+                    std::fs::write(&p, &header).map_err(|e| format!("{}: {}", p, e))?;
+                    out.push((name.clone(), p.clone()));
+                    p
+                }
+            };
+            let fh = std::fs::OpenOptions::new().append(true).open(&path).map_err(|e| format!("{}: {}", path, e))?;
+            cur = Some(std::io::BufWriter::new(fh));
+            if let Some(p) = pending.take() { write(&mut cur, &p)?; }
+            write(&mut cur, &line)?;
+            continue;
+        }
+        if let Some(p) = pending.take() { write(&mut cur, &p)?; }
+        if trim_eol(&line) == b"--" { pending = Some(line.clone()); } else { write(&mut cur, &line)?; }
+    }
+    if let Some(p) = pending.take() { write(&mut cur, &p)?; }
+    if let Some(mut w) = cur.take() { w.flush().map_err(|e| e.to_string())?; }
+    for (_, p) in &out {
+        let mut fh = std::fs::OpenOptions::new().append(true).open(p).map_err(|e| format!("{}: {}", p, e))?;
+        fh.write_all(&footer).map_err(|e| e.to_string())?;
+    }
+    Ok(out)
+}
+
 // The body, split out so it can be driven from a test without a tauri::AppHandle - resolving
 // the mysqldump path is the only thing the handle was needed for.
 async fn export_run(req: Value, dbin: String) -> R {
@@ -2342,7 +2449,9 @@ async fn export_run(req: Value, dbin: String) -> R {
                 }
             }
         } else {
-            // PER TABLE (default): dump every table to its own file, like Workbench's Dump Project Folder.
+            // PER TABLE (default): every table to its own file, like Workbench's Dump Project Folder -
+            // cut from one dump of the database, so all of them come from the same moment (see
+            // split_dump_by_table).
             'dbloop: for d in &dbs {
                 if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { log.push("CANCELLED (remaining databases skipped)".into()); cancelled = true; break; }
                 let mut conn = match build_conn(&req["conn"]) { Ok(c) => c, Err(e) => { log.push(format!("FAILED (connect) {} : {}", d, e)); continue; } };
@@ -2352,22 +2461,58 @@ async fn export_run(req: Value, dbin: String) -> R {
                     Err(e) => { log.push(format!("FAILED (list tables) {} : {}", d, e)); continue; }
                 };
                 if tabs.is_empty() { log.push(format!("(no tables) {}", d)); }
-                for t in &tabs {
-                    if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { log.push("CANCELLED (remaining tables skipped)".into()); cancelled = true; break 'dbloop; }
+                let wanted: Vec<&String> = tabs.iter().filter(|t| {
                     let key = format!("{}.{}", d, t);
-                    if excl.contains(&key) { log.push(format!("(excluded) {}", key)); continue; }
-                    let file = mkfile(&key);
+                    if excl.contains(&key) { log.push(format!("(excluded) {}", key)); false } else { true }
+                }).collect();
+                if !wanted.is_empty() {
+                    if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { log.push("CANCELLED (remaining tables skipped)".into()); cancelled = true; break 'dbloop; }
+                    let whole = format!("{}/.{}{}.whole.sql.tmp", folder.trim_end_matches(['/', '\\']), safe_name(d), stamp);
                     let mut a = common.clone();
                     if flag("adddroptb") { a.push("--add-drop-table".into()); } else { a.push("--skip-add-drop-table".into()); }
-                    a.push(d.clone()); a.push(t.clone());
-                    a.push(format!("--result-file={}", file));
-                    match run(&dbin, &a, &file) {
-                        Ok((true, msg)) => log.push(msg),
-                        Ok((false, err)) => { if err == RUN_CANCELLED { log.push(format!("CANCELLED {}", key)); cancelled = true; } else { log.push(format!("FAILED {} : {}", key, err)); } }
-                        Err(e) => log.push(format!("FAILED {} : {}", key, e)),
+                    // The excluded tables are left out; when they are most of the database, the
+                    // wanted ones are named instead (see table_filter_args).
+                    match table_filter_args(d, &excl, &req["conn"]) {
+                        Ok((ignore, included)) => { a.extend(ignore); a.push(d.clone()); a.extend(included); }
+                        Err(e) => { log.push(format!("FAILED (list tables) {} : {}", d, e)); continue; }
                     }
+                    a.push(format!("--result-file={}", whole));
+                    let dumped = run(&dbin, &a, &whole);
+                    match dumped {
+                        Ok((true, _)) => {
+                            let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+                            let mut file_for = |name: &str| {
+                                // Names that differ only in characters a file name cannot hold
+                                // ("a b", "a_b") used to write the same file, the later one
+                                // replacing the earlier; each now gets its own.
+                                let base = format!("{}.{}", d, name);
+                                let mut p = mkfile(&base);
+                                let mut i = 2;
+                                while !used.insert(p.to_lowercase()) { p = mkfile(&format!("{}_{}", base, i)); i += 1; }
+                                p
+                            };
+                            match split_dump_by_table(std::path::Path::new(&whole), &mut file_for) {
+                                Ok(files) => {
+                                    for t in &wanted {
+                                        match files.iter().find(|(n, _)| n == *t) {
+                                            Some((_, p)) => {
+                                                let sz = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                                                log.push(format!("OK  {} ({:.2} MB)", p, sz as f64 / 1048576.0));
+                                            }
+                                            None => log.push(format!("FAILED {}.{} : not in the dump", d, t)),
+                                        }
+                                    }
+                                }
+                                Err(e) => log.push(format!("FAILED {} : could not split the dump into tables: {}", d, e)),
+                            }
+                        }
+                        Ok((false, err)) => { if err == RUN_CANCELLED { log.push(format!("CANCELLED {}", d)); cancelled = true; } else { log.push(format!("FAILED {} : {}", d, err)); } }
+                        Err(e) => log.push(format!("FAILED {} : {}", d, e)),
+                    }
+                    let _ = std::fs::remove_file(&whole);
                 }
                 if cancelled { break; }
+                if EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job) { log.push(format!("CANCELLED {} routines/events", d)); cancelled = true; break; }
                 if flag("routines") || flag("events") {
                     let file = mkfile(&format!("{}.routines_events", d));
                     let mut a = common.clone();
@@ -2383,6 +2528,11 @@ async fn export_run(req: Value, dbin: String) -> R {
                     }
                 }
             }
+        }
+        // A cancel that arrived after the last step had finished still answers the click.
+        if !cancelled && (EXPORT_CANCEL.load(Ordering::SeqCst) || job_is_cancelled(&job)) {
+            log.push("CANCELLED (after the last step had finished - the files listed above are complete)".into());
+            cancelled = true;
         }
         Ok(json!({"ok":true,"cancelled":cancelled,"log":log}))
     }).await.map_err(|e| e.to_string())?
@@ -4865,15 +5015,26 @@ mod export_cancel_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
+        // 300 procedures make the routines/events step take a moment, and it starts once the table
+        // files are written - so a cancel sent when they appear lands while mysqldump is running.
+        {
+            let mut c = build_conn(&conn).unwrap();
+            c.query_drop("DROP DATABASE IF EXISTS nobs_cancel_rt").unwrap();
+            c.query_drop("CREATE DATABASE nobs_cancel_rt").unwrap();
+            c.query_drop("CREATE TABLE nobs_cancel_rt.t (id INT PRIMARY KEY)").unwrap();
+            for i in 0..300 { c.query_drop(format!("CREATE PROCEDURE nobs_cancel_rt.p{i}() SELECT {i}")).unwrap(); }
+        }
         let jid = "export-cancel-test";
         let req = json!({
-            "dbs": ["nobs_test"], "folder": dir.to_string_lossy(), "mode": "table",
+            "dbs": ["nobs_cancel_rt"], "folder": dir.to_string_lossy(), "mode": "table",
             "conn": conn, "jobId": jid, "excludes": [],
             "options": {"charset":"utf8mb4","routines":true,"events":true,"quick":true,"extinsert":true}
         });
         let handle = tokio::spawn(export_run(req, std::env::var("MYSQLDUMP_BIN").unwrap_or_else(|_| "mysqldump".into())));
-        // let it get into the dump of the 100k-row tables, then stop it
-        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        for _ in 0..600 {
+            if dir.join("nobs_cancel_rt.t.sql").exists() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         let c = cancel_job(json!({"jobId": jid})).unwrap();
         println!("  cancel_job -> {}", c);
         let r = handle.await.unwrap().unwrap();
@@ -4889,6 +5050,7 @@ mod export_cancel_tests {
         assert!(lines.iter().any(|l| l.contains("CANCELLED")), "nothing reported the cancellation: {:?}", lines);
         assert_eq!(r["cancelled"], true, "the run should report itself cancelled");
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = build_conn(&conn).map(|mut c| c.query_drop("DROP DATABASE IF EXISTS nobs_cancel_rt"));
     }
 }
 
@@ -4923,6 +5085,73 @@ mod import_tests {
     // A MySQL server gets MySQL's own tools when there are any, because MariaDB's mysqldump writes
     // values into a MySQL generated column and the dump does not restore. The tools are chosen as
     // export and import choose them (choose_tool), and the table has to come back whole.
+    // The per-table export ran mysqldump once per table, so with writes going on its files came
+    // from different moments. A writer adds an order and its line in one transaction the whole
+    // time; restored, every order must still have its line and no line may lack its order.
+    #[tokio::test]
+    #[ignore]
+    async fn a_per_table_export_is_one_snapshot() {
+        let Some(dsn) = std::env::var("NOBS_TEST_DSN").ok() else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let p: Vec<&str> = dsn.split(':').collect();
+        let conn = json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"});
+        let maria = server_is_mariadb(&conn);
+        let env_or = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.into());
+        let dbin = choose_tool(maria, || mysql_flavor_tool("mysqldump").map(|x| x.0), || Ok(env_or("MYSQLDUMP_BIN", "mysqldump"))).unwrap();
+        let mbin = choose_tool(maria, || mysql_flavor_tool("mysql").map(|x| x.0), || Ok(env_or("MYSQL_BIN", "mysql"))).unwrap();
+        let sql = |s: &str| { let mut c = build_conn(&conn).unwrap(); c.query_drop(s).unwrap(); };
+        for s in ["DROP DATABASE IF EXISTS snap_src", "DROP DATABASE IF EXISTS snap_tgt", "CREATE DATABASE snap_src", "CREATE DATABASE snap_tgt",
+                  "CREATE TABLE snap_src.a_orders (id INT PRIMARY KEY, pad TEXT)",
+                  "CREATE TABLE snap_src.b_filler (id INT PRIMARY KEY, pad TEXT)",
+                  "CREATE TABLE snap_src.c_lines (id INT PRIMARY KEY, order_id INT, pad TEXT)",
+                  "CREATE TABLE snap_src.`x y` (id INT PRIMARY KEY)", "CREATE TABLE snap_src.x_y (id INT PRIMARY KEY)",
+                  "INSERT INTO snap_src.`x y` VALUES (1)", "INSERT INTO snap_src.x_y VALUES (2)",
+                  "CREATE VIEW snap_src.v_orders AS SELECT id FROM snap_src.a_orders"] { sql(s); }
+        // A table between the two that takes a moment to dump.
+        sql("INSERT INTO snap_src.b_filler SELECT id, REPEAT('x', 300) FROM nobs_test.bulk_rows WHERE id <= 60000");
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let writer = {
+            let (stop, conn) = (stop.clone(), conn.clone());
+            std::thread::spawn(move || {
+                let mut c = build_conn(&conn).unwrap();
+                let mut i = 0;
+                while !stop.load(Ordering::SeqCst) {
+                    i += 1;
+                    c.query_drop(format!("START TRANSACTION; INSERT INTO snap_src.a_orders VALUES ({i}, 'o'); INSERT INTO snap_src.c_lines VALUES ({i}, {i}, 'l'); COMMIT")).unwrap();
+                }
+                i
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let dir = tempfile::tempdir().unwrap();
+        let ex = export_run(json!({"conn":conn,"dbs":["snap_src"],"folder":dir.path().to_string_lossy(),"mode":"table",
+            "options":{"charset":"utf8mb4","singletx":true,"quick":true,"triggers":true,"extinsert":true}}), dbin).await.unwrap();
+        stop.store(true, Ordering::SeqCst);
+        let written = writer.join().unwrap();
+        let log = ex["log"].to_string();
+        assert!(!log.contains("FAILED"), "{ex}");
+        let mut files: Vec<String> = std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        files.sort();
+        assert_eq!(files, ["snap_src.a_orders.sql", "snap_src.b_filler.sql", "snap_src.c_lines.sql", "snap_src.v_orders.sql", "snap_src.x_y.sql", "snap_src.x_y_2.sql"],
+            "one file per table and view, and two names that make the same file name get two files");
+        // Tables first, then the view, as a restore would.
+        let order = ["snap_src.a_orders.sql", "snap_src.b_filler.sql", "snap_src.c_lines.sql", "snap_src.x_y.sql", "snap_src.x_y_2.sql", "snap_src.v_orders.sql"];
+        let paths: Vec<String> = order.iter().map(|f| dir.path().join(f).to_string_lossy().into_owned()).collect();
+        let im = import_run(json!({"conn":conn,"files":paths,"targetDb":"snap_tgt"}), mbin).await.unwrap();
+        assert!(!im.to_string().contains("FAILED"), "import: {im}");
+        let mut c = build_conn(&conn).unwrap();
+        let counts: (Option<i64>, Option<i64>, Option<i64>) = c.query_first(
+            "SELECT (SELECT COUNT(*) FROM snap_tgt.a_orders), (SELECT COUNT(*) FROM snap_tgt.c_lines), \
+                    (SELECT COUNT(*) FROM snap_tgt.a_orders o LEFT JOIN snap_tgt.c_lines l ON l.order_id = o.id WHERE l.id IS NULL) \
+                  + (SELECT COUNT(*) FROM snap_tgt.c_lines l LEFT JOIN snap_tgt.a_orders o ON o.id = l.order_id WHERE o.id IS NULL)").unwrap().unwrap();
+        println!("  orders written during the export: {written}, restored orders/lines: {:?}", counts);
+        assert!(written > 0 && counts.0.unwrap_or(0) > 0);
+        assert_eq!(counts.0, counts.1, "orders and lines come from the same moment");
+        assert_eq!(counts.2, Some(0), "no order without its line, no line without its order");
+        let both: Option<String> = c.query_first("SELECT CONCAT((SELECT COUNT(*) FROM snap_tgt.`x y`), (SELECT COUNT(*) FROM snap_tgt.x_y), (SELECT COUNT(*) FROM snap_tgt.v_orders) > 0)").unwrap();
+        assert_eq!(both.as_deref(), Some("111"), "both look-alike tables and the view are restored");
+        sql("DROP DATABASE snap_src"); sql("DROP DATABASE snap_tgt");
+    }
+
     #[tokio::test]
     #[ignore]
     async fn generated_columns_survive_export_and_import_with_the_chosen_tools() {
@@ -5741,6 +5970,58 @@ mod compare_tests {
         let again = compare_schemas(json!({"sourceConnName":P_RW,"sourceDb":"cmp_sd_src","targetConnName":P_RW,"targetDb":"cmp_sd_tgt"})).await.unwrap();
         assert!(again["tables"].as_array().unwrap().iter().all(|t| t["status"] == "same"), "nothing left to sync: {again}");
         raw("DROP DATABASE cmp_sd_src"); raw("DROP DATABASE cmp_sd_tgt");
+    }
+}
+
+#[cfg(test)]
+mod dump_split_tests {
+    use super::*;
+    // Real dumps of one database (a table named a`b, a table with a trigger and a row whose text
+    // reads like a section heading, and a view), by MariaDB's and MySQL's mysqldump.
+    #[test]
+    fn a_whole_database_dump_splits_into_files_that_each_restore_alone() {
+        for fixture in ["dump-mariadb-12.sql", "dump-mysql-8.sql"] {
+            let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/fixtures").join(fixture);
+            let text = std::fs::read_to_string(&src).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let mut seen = Vec::new();
+            let files = split_dump_by_table(&src, &mut |name: &str| {
+                seen.push(name.to_string());
+                dir.path().join(format!("{}.sql", name.replace('`', "_"))).to_string_lossy().into_owned()
+            }).unwrap();
+            let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+            assert_eq!(names, ["a`b", "t2", "v"], "{fixture}");
+            assert_eq!(seen.len(), 3, "one file per name, the view's two sections included: {fixture}");
+            let head_end = text.find("--\n-- Table structure").or_else(|| text.find("--\r\n-- Table structure")).unwrap();
+            let foot_start = text.rfind("/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;").unwrap();
+            let body = |i: usize| std::fs::read_to_string(&files[i].1).unwrap();
+            for (name, path) in &files {
+                let b = std::fs::read_to_string(path).unwrap();
+                assert!(b.starts_with(&text[..head_end]), "{fixture} {name}: the dump's opening lines");
+                assert!(b.ends_with(&text[foot_start..]), "{fixture} {name}: the dump's closing lines");
+            }
+            let (ab, t2, v) = (body(0), body(1), body(2));
+            assert!(ab.contains("INSERT INTO `a``b` VALUES (1)") && !ab.contains("`t2`"), "{fixture}: a`b alone");
+            assert!(t2.contains("-- Table structure for table `fake`') ") || t2.contains("-- Table structure for table `fake`');"),
+                "{fixture}: a value that reads like a heading stays in its row");
+            assert!(t2.contains("BEFORE INSERT ON") && !t2.contains("VIEW `v`"), "{fixture}: the trigger goes with its table");
+            assert!(v.contains("structure for view `v`") && v.contains("Final view structure for view `v`") && v.contains("VIEW `v` AS select"),
+                "{fixture}: both parts of the view");
+            assert!(!v.contains("CREATE TABLE"), "{fixture}");
+            // Every line of the dump's body is in exactly one file.
+            let body_lines = text[head_end..foot_start].lines().filter(|l| !l.is_empty()).count();
+            let split_lines: usize = (0..3).map(|i| { let b = body(i); b[head_end..b.len() - (text.len() - foot_start)].lines().filter(|l| !l.is_empty()).count() }).sum();
+            assert_eq!(split_lines, body_lines, "{fixture}");
+        }
+    }
+
+    #[test]
+    fn a_dump_without_tables_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("empty.sql");
+        std::fs::write(&src, "-- MySQL dump\n/*!40101 SET NAMES utf8mb4 */;\n/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;\n-- Dump completed\n").unwrap();
+        let files = split_dump_by_table(&src, &mut |_n: &str| panic!("no file should be made")).unwrap();
+        assert!(files.is_empty());
     }
 }
 

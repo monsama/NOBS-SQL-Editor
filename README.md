@@ -49,6 +49,9 @@ Run anyway** to continue. See [CODE_SIGNING.md](CODE_SIGNING.md) for the plan.
 - **The CSV import is strict.** Header names match the table's columns ignoring case. A column
   the table does not have, or a row with more or fewer fields than the header, imports nothing.
   Foreign key and unique checks stay on, and the whole file is one transaction.
+- **A per-table export is one snapshot.** The whole database is dumped once and then split into
+  one file per table or view, so the files are consistent with each other even while the database
+  is being written to. Two tables whose names give the same file name get two files.
 - **Schema sync writes each column as the source server defines it**, including its character
   set, collation, comment and generated expression.
 
