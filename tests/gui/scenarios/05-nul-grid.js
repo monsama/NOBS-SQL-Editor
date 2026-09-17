@@ -34,6 +34,44 @@ INSERT INTO ${DB2}.t VALUES ('only2', 'two');`);
     t = await G.runIn(`USE ${DB2};\nSELECT * FROM t`, DB);
     G.eq('after USE, the grid saves to that database', [t.db, t.table, G.rowsOf(t)], [DB2, 't', ['only2|two']]);
 
+    // What the grid and the cell editor do with values that have no visible form of their own. The
+    // functions behind this are unit-tested; what is only reachable here is the wiring - that the
+    // note exists in the page, is filled when the editor opens, and goes away in Hex mode.
+    await G.run(`CREATE TABLE ${DB}.viewer (id INT PRIMARY KEY, txt TEXT, bin VARBINARY(10), nothing VARBINARY(10));
+INSERT INTO ${DB}.viewer VALUES (1, CONCAT('x',CHAR(0),'y'), CONCAT('a',CHAR(0)), X'');`);
+    const tv = await G.openTable(DB, 'viewer');
+    const col = n => tv.cols.indexOf(n);
+    const cellOf = n => gridCellEl(tv.id, 0, col(n));
+    G.check('a binary column with no bytes reads (0 bytes), not the 0x it arrives as',
+      /\(0 bytes\)/.test(cellOf('nothing').innerHTML), cellOf('nothing').innerHTML.slice(0, 80));
+
+    // A TEXT column: there is no Hex tab on this path, so the note is the only mention anywhere of
+    // the NUL sitting in the value.
+    await editCell(cellOf('txt'), tv.id, 0, col('txt'));
+    G.check('the editor says a control character is in a text value',
+      $('vNote').style.display !== 'none' && /1 control character \(NUL\)/.test($('vNote').textContent), $('vNote').textContent);
+    G.check('and does not point at a Hex tab this cell has not got', !/Hex/.test($('vNote').textContent), $('vNote').textContent);
+    G.check('while the box still holds the value exactly', $('vText').value === 'x' + N + 'y', JSON.stringify($('vText').value));
+    hide('mView');
+
+    // A binary column: the same note, pointing at Hex - where the bytes are in plain view and the
+    // note has nothing left to say.
+    await editCell(cellOf('bin'), tv.id, 0, col('bin'));
+    G.check('a binary value says it too, and points at Hex',
+      $('vNote').style.display !== 'none' && /switch to Hex/.test($('vNote').textContent), $('vNote').textContent);
+    switchHexTab('hex');
+    G.check('nothing to say in Hex mode, where the bytes are shown',
+      $('vNote').style.display === 'none' && /^0x6100$/i.test($('vText').value), { note: $('vNote').textContent, box: $('vText').value });
+    switchHexTab('text');
+    G.check('and it is said again on the way back to Text',
+      $('vNote').style.display !== 'none' && $('vText').value === 'a' + N, { note: $('vNote').textContent, box: JSON.stringify($('vText').value) });
+    hide('mView');
+
+    // An ordinary value has nothing to report, and the note from the cell before must not linger.
+    await editCell(cellOf('id'), tv.id, 0, col('id'));
+    G.check('an ordinary value is opened without a note', $('vNote').style.display === 'none', $('vNote').textContent);
+    hide('mView');
+
     if (!G.desktop) {
       G.take();
       const text = await G.captureDownload(() => exportFull(DB, 't', 'csv'));
