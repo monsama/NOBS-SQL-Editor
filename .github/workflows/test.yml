@@ -96,6 +96,15 @@ jobs:
         working-directory: src-tauri
         run: cargo build
 
+      # The app renders in WebView2. Its Evergreen installer does nothing when the runtime is there.
+      - name: Install the WebView2 runtime
+        shell: pwsh
+        run: |
+          $setup = Join-Path $env:RUNNER_TEMP 'MicrosoftEdgeWebview2Setup.exe'
+          Invoke-WebRequest 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $setup
+          Start-Process $setup -ArgumentList '/silent', '/install' -Wait
+          Get-ItemProperty 'HKLM:SOFTWAREWOW6432NodeMicrosoftEdgeUpdateClients{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}' -ErrorAction SilentlyContinue | Select-Object pv
+
       - name: Live tests against MariaDB
         working-directory: src-tauri
         shell: pwsh
@@ -128,6 +137,25 @@ jobs:
         run: |
           $env:NOBS_TEST_DSN = $env:NOBS_CI_MYSQL_DSN
           node tests/gui/run.mjs --app desktop --target src-tauri/target/debug/nobs-sql-editor.exe
+
+      - name: GUI diagnostics
+        if: ${{ failure() }}
+        shell: pwsh
+        run: |
+          Get-Process | Where-Object { $_.Name -match 'nobs|webview|msedge' } | Format-Table Name, Id, SessionId -AutoSize | Out-String | Write-Host
+          "Session of this step: $((Get-Process -Id $PID).SessionId)"
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+          $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+          [System.Drawing.Graphics]::FromImage($bmp).CopyFromScreen($b.Location, [System.Drawing.Point]::Empty, $b.Size)
+          $bmp.Save("$env:RUNNER_TEMPscreen.png")
+
+      - name: Screen at failure
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gui-screen
+          path: ${{ runner.temp }}/screen.png
 
       - name: Server logs
         if: ${{ failure() }}
