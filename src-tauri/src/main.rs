@@ -3770,6 +3770,111 @@ async fn download_tools(_app: tauri::AppHandle) -> R {
     }).await.map_err(|e| e.to_string())?
 }
 
+// ---------- MySQL's own client tools ----------
+// For machines without a MySQL installation: a MySQL server otherwise gets MariaDB's tools (see
+// resolve_tool_for). MySQL has no release API like MariaDB's, but its download page names the
+// current Windows ZIP and prints its MD5 beside it. Both addresses can be overridden in
+// config.json (mysql_download_page, mysql_download_url_template) if MySQL moves them.
+const DEFAULT_MYSQL_DOWNLOAD_PAGE: &str = "https://dev.mysql.com/downloads/mysql/8.4.html";
+const DEFAULT_MYSQL_DOWNLOAD_TEMPLATE: &str = "https://cdn.mysql.com/Downloads/MySQL-{series}/{file_name}";
+// Where a release goes once a newer one replaces it on the CDN.
+const MYSQL_ARCHIVE_TEMPLATE: &str = "https://downloads.mysql.com/archives/get/p/23/file/{file_name}";
+
+// The ZIP archive named on MySQL's download page, its version, and the MD5 printed after it.
+fn parse_mysql_download_page(html: &str) -> Option<(String, String, Option<String>)> {
+    let c = regex::Regex::new(r"\((mysql-(\d+\.\d+\.\d+)-winx64\.zip)\)").unwrap().captures(html)?;
+    let rest = &html[c.get(0)?.end()..];
+    let window = &rest[..rest.char_indices().nth(2000).map(|x| x.0).unwrap_or(rest.len())];
+    let md5 = regex::Regex::new(r#"class="md5">\s*([0-9a-fA-F]{32})\s*<"#).unwrap()
+        .captures(window).map(|m| m[1].to_lowercase());
+    Some((c[1].to_string(), c[2].to_string(), md5))
+}
+// Only the two binaries the app runs. Both are self-contained - OpenSSL and MySQL 8's default
+// authentication are built in, which was checked by running them from an otherwise empty folder.
+fn mysql_zip_member(name: &str) -> Option<&'static str> {
+    let n = name.replace('\\', "/");
+    let mut parts = n.split('/');
+    let (_root, bin, file) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() || bin != "bin" { return None; }
+    match file { "mysql.exe" => Some("mysql.exe"), "mysqldump.exe" => Some("mysqldump.exe"), _ => None }
+}
+fn mysql_tools_dir() -> std::path::PathBuf { tools_dir().join("mysql") }
+
+#[tauri::command]
+async fn download_mysql_tools() -> R {
+    tokio::task::spawn_blocking(|| -> R {
+        use md5::Digest;
+        use std::io::{Read, Seek, Write};
+        let client = reqwest::blocking::Client::builder()
+            // dev.mysql.com answers a browser-like User-Agent with 403 (it expects the JavaScript a
+            // browser would run first) and serves the page to one that says it is curl. Measured.
+            .user_agent("curl/8.0 NOBSSQL-Desktop")
+            .timeout(std::time::Duration::from_secs(1800))
+            .build().map_err(|e| e.to_string())?;
+        let cfg = load_cfg();
+        let setting = |k: &str, d: &str| cfg.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).unwrap_or(d).to_string();
+        let page = setting("mysql_download_page", DEFAULT_MYSQL_DOWNLOAD_PAGE);
+        let html = client.get(&page).send().and_then(|r| r.error_for_status()).and_then(|r| r.text())
+            .map_err(|e| format!("Could not read MySQL's download page {page}: {e}"))?;
+        let (file_name, version, md5) = parse_mysql_download_page(&html)
+            .ok_or_else(|| format!("MySQL's download page {page} did not name a Windows ZIP archive."))?;
+        // A download that cannot be checked is not installed.
+        let md5 = md5.ok_or_else(|| format!("MySQL's download page did not show a checksum for {file_name}, so the download was not attempted."))?;
+        let series = version.split('.').take(2).collect::<Vec<_>>().join(".");
+        let fill = |t: &str| t.replace("{series}", &series).replace("{version}", &version).replace("{file_name}", &file_name);
+        let sources = [("download URL", fill(&setting("mysql_download_url_template", DEFAULT_MYSQL_DOWNLOAD_TEMPLATE))),
+                       ("MySQL archive", fill(MYSQL_ARCHIVE_TEMPLATE))];
+        let mut tmp = tempfile::tempfile().map_err(|e| e.to_string())?;
+        let mut ok = false;
+        let mut errs: Vec<String> = Vec::new();
+        for (label, url) in &sources {
+            let attempt = (|| -> Result<(), String> {
+                tmp.set_len(0).map_err(|e| e.to_string())?;
+                tmp.rewind().map_err(|e| e.to_string())?;
+                let mut resp = client.get(url).send().and_then(|r| r.error_for_status()).map_err(|e| e.to_string())?;
+                let mut hasher = md5::Md5::new();
+                let mut buf = vec![0u8; 1 << 16];
+                loop {
+                    let n = resp.read(&mut buf).map_err(|e| e.to_string())?;
+                    if n == 0 { break; }
+                    hasher.update(&buf[..n]);
+                    tmp.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+                }
+                let got = hex::encode(hasher.finalize());
+                if got != md5 { return Err(format!("checksum mismatch (got {got}, the page says {md5})")); }
+                Ok(())
+            })();
+            match attempt {
+                Ok(()) => { ok = true; break; }
+                Err(e) => errs.push(format!("{label} {url}: {e}")),
+            }
+        }
+        if !ok { return Ok(json!({"ok":false,"error":format!("Could not download {file_name}.\n{}", errs.join("\n"))})); }
+        tmp.rewind().map_err(|e| e.to_string())?;
+        let mut zipf = zip::ZipArchive::new(tmp).map_err(|e| e.to_string())?;
+        let dest = mysql_tools_dir();
+        std::fs::create_dir_all(&dest).map_err(|e| e.to_string())?;
+        let mut got: Vec<&str> = Vec::new();
+        for i in 0..zipf.len() {
+            let mut f = zipf.by_index(i).map_err(|e| e.to_string())?;
+            let Some(base) = mysql_zip_member(f.name()) else { continue };
+            let mut o = std::fs::File::create(dest.join(base)).map_err(|e| e.to_string())?;
+            std::io::copy(&mut f, &mut o).map_err(|e| e.to_string())?;
+            got.push(base);
+        }
+        if got.len() < 2 {
+            return Ok(json!({"ok":false,"error":format!("{file_name} was downloaded and checked, but mysql.exe and mysqldump.exe were not both inside.")}));
+        }
+        let mut cfg = load_cfg();
+        cfg["mysql_bin_mysql"] = json!(dest.join("mysql.exe").to_string_lossy());
+        cfg["mysqldump_bin_mysql"] = json!(dest.join("mysqldump.exe").to_string_lossy());
+        std::fs::write(config_file(), serde_json::to_string_pretty(&cfg).unwrap_or_default()).map_err(|e| e.to_string())?;
+        *tools_status_cache().lock().unwrap() = None;
+        log_line(&format!("download_mysql_tools: {file_name}"));
+        Ok(json!({"ok":true, "message": format!("Downloaded MySQL {version} client tools to {} (checksum verified)", dest.to_string_lossy()), "config": cfg}))
+    }).await.map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn app_info(app: tauri::AppHandle) -> R {
     let pi = app.package_info();
@@ -3838,7 +3943,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             connect, schemas, objects, ddl, pk, query, exec, rowop, script, fetch_cursor_batch, close_cursor,
-            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, tools_status, tools_for_conn, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd, open_support_link
+            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, download_mysql_tools, tools_status, tools_for_conn, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd, open_support_link
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -4166,6 +4271,43 @@ mod tests {
 
     // A MySQL server gets MySQL's own tools when an installation has them, newest version first.
     // Version folders are compared as numbers, so 8.10 comes before 8.4.
+    // Verbatim from https://dev.mysql.com/downloads/mysql/8.4.html (September 2026): the MSI row,
+    // then the ZIP row. The MD5 has to be the one printed for the ZIP, not the MSI's before it.
+    const MYSQL_PAGE: &str = r#"<td class="sub-text">(mysql-8.4.11-winx64.msi)</td>
+            <td class="sub-text" style="text-align:right;" colspan="4">
+                MD5: <code class="md5">b5c515a0f410cd6903cd41057ed5d662</code> |
+        </tr>
+                            <td class="col1"><b>Windows (x86, 64-bit), ZIP Archive</b></td>
+                        <td class="col3">8.4.11</td>
+            <td class="col4">268.2M</td>
+                                <div class="button03"><a href="/downloads/file/?id=556213">Download</a></div>
+            <td class="sub-text">(mysql-8.4.11-winx64.zip)</td>
+            <td class="sub-text" style="text-align:right;" colspan="4">
+                MD5: <code class="md5">2e833921898a9a030ea6bfe81bd811bc</code> |
+            <td class="sub-text">(mysql-8.4.11-winx64-debug-test.zip)</td>
+                MD5: <code class="md5">00000000000000000000000000000000</code> |"#;
+
+    #[test]
+    fn the_mysql_download_page_gives_the_zip_and_its_checksum() {
+        let (file, ver, md5) = parse_mysql_download_page(MYSQL_PAGE).unwrap();
+        assert_eq!(file, "mysql-8.4.11-winx64.zip");
+        assert_eq!(ver, "8.4.11");
+        assert_eq!(md5.as_deref(), Some("2e833921898a9a030ea6bfe81bd811bc"));
+        assert!(parse_mysql_download_page("<html>nothing here</html>").is_none());
+        let (_, _, none) = parse_mysql_download_page("(mysql-9.1.0-winx64.zip) no checksum").unwrap();
+        assert!(none.is_none(), "no checksum on the page must not produce one");
+    }
+
+    #[test]
+    fn only_the_two_client_binaries_are_taken_from_the_archive() {
+        assert_eq!(mysql_zip_member("mysql-8.4.11-winx64/bin/mysql.exe"), Some("mysql.exe"));
+        assert_eq!(mysql_zip_member(r"mysql-8.4.11-winx64\bin\mysqldump.exe"), Some("mysqldump.exe"));
+        for n in ["mysql-8.4.11-winx64/bin/mysqld.exe", "mysql-8.4.11-winx64/lib/plugin/mysql.exe",
+                  "mysql-8.4.11-winx64/mysql.exe", "mysql-8.4.11-winx64/bin/sub/mysql.exe", "mysql.exe"] {
+            assert_eq!(mysql_zip_member(n), None, "{n}");
+        }
+    }
+
     #[test]
     fn only_a_mysql_server_switches_to_mysql_tools() {
         let def = || Ok::<String, String>("default".into());
