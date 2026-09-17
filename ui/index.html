@@ -2187,7 +2187,7 @@ function showResultSet(id,i){
  t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();t._total=null;
  renderResultSetTabs(id);
  const ra=$('resultActions_'+id);if(ra)ra.style.display=t.cols.length?'inline-flex':'none';
- if(!t.cols.length){$('res_'+id).innerHTML='<div class="muted" style="padding:8px">No rows. (Column names are only known when there are rows.)</div>';}
+ if(!t.cols.length){$('res_'+id).innerHTML='<div class="muted" style="padding:8px">No rows. (The column names of this result are not available: it came from a procedure, or after a USE.)</div>';}
  else renderGrid(id);
  updatePager(id);
 }

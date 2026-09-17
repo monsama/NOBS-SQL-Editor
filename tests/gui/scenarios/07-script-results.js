@@ -27,7 +27,7 @@ DELIMITER ;`, DB);
     G.eq('and the second', G.rowsOf(t), ['x|<NULL>|0x41']);
 
     t = await G.runIn('SELECT id FROM t WHERE 0;\nSELECT id FROM nobs_test.bulk_rows ORDER BY id;', DB);
-    G.eq('an empty result has no rows', t.rows, []);
+    G.eq('an empty result has no rows, and its column names', [t.rows, t.cols], [[], ['id']]);
     showResultSet(t.id, 1);
     G.check('a big result keeps its first 1000 rows and says so', t.rows.length === 1000 && /Showing the first 1.000 of 100.000 rows/.test(strip(t.id)), strip(t.id));
 
