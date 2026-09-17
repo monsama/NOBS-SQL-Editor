@@ -3875,6 +3875,62 @@ async fn download_mysql_tools() -> R {
     }).await.map_err(|e| e.to_string())?
 }
 
+// ---------- update notice ----------
+// The app says when a newer release exists and links to it. It never downloads or installs
+// anything itself. The UI asks once per start unless that is switched off in Settings.
+const RELEASES_REPO: &str = "monsama/NOBS-SQL-Editor";
+fn release_is_newer(latest: &str, current: &str) -> bool {
+    let key = |v: &str| -> Vec<u64> {
+        v.trim().trim_start_matches(['v', 'V']).split('.')
+            .map(|p| p.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0)).collect()
+    };
+    let (mut a, mut b) = (key(latest), key(current));
+    let n = a.len().max(b.len());
+    a.resize(n, 0); b.resize(n, 0);
+    !latest.trim().is_empty() && a > b
+}
+// Opened through the shell, so only this app's own release pages - never whatever URL arrives.
+fn release_page_ok(url: &str) -> bool {
+    regex::Regex::new(&format!(r"^https://github\.com/{}/releases/tag/v\d+(\.\d+){{1,3}}$", regex::escape(RELEASES_REPO)))
+        .unwrap().is_match(url)
+}
+
+#[tauri::command]
+async fn update_check(app: tauri::AppHandle) -> R {
+    let current = app.package_info().version.to_string();
+    tokio::task::spawn_blocking(move || {
+        let client = reqwest::blocking::Client::builder()
+            .user_agent("NOBSSQL-Desktop")
+            .timeout(std::time::Duration::from_secs(10))
+            .build().map_err(|e| e.to_string())?;
+        let got = client.get(format!("https://api.github.com/repos/{}/releases/latest", RELEASES_REPO))
+            .header("Accept", "application/vnd.github+json")
+            .send().and_then(|r| r.error_for_status()).and_then(|r| r.json::<Value>());
+        Ok(match got {
+            Ok(j) => {
+                let tag = j["tag_name"].as_str().unwrap_or("").to_string();
+                let url = j["html_url"].as_str().unwrap_or("").to_string();
+                json!({"ok": true, "current": current, "latest": tag.trim_start_matches(['v', 'V']),
+                       "url": url, "newer": release_is_newer(&tag, &current)})
+            }
+            Err(e) => json!({"ok": false, "current": current, "error": e.to_string()}),
+        })
+    }).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+fn open_release_page(req: Value) -> R {
+    let url = req["url"].as_str().unwrap_or("");
+    if !release_page_ok(url) { return Ok(json!({"ok": false, "error": "Not a release page of this app."})); }
+    #[cfg(target_os = "windows")]
+    { std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn().map_err(|e| e.to_string())?; }
+    #[cfg(target_os = "macos")]
+    { std::process::Command::new("open").arg(url).spawn().map_err(|e| e.to_string())?; }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    { std::process::Command::new("xdg-open").arg(url).spawn().map_err(|e| e.to_string())?; }
+    Ok(json!({"ok": true}))
+}
+
 #[tauri::command]
 fn app_info(app: tauri::AppHandle) -> R {
     let pi = app.package_info();
@@ -3943,7 +3999,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             connect, schemas, objects, ddl, pk, query, exec, rowop, script, fetch_cursor_batch, close_cursor,
-            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, download_mysql_tools, tools_status, tools_for_conn, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd, open_support_link
+            import, export, importcsv, browse, quit_app, save_text, save_binary, export_table, cancel_export, cancel_job, app_info, get_config, save_config, download_tools, download_mysql_tools, tools_status, tools_for_conn, update_check, open_release_page, conn_list, conn_get, conn_save, conn_delete, conn_primary, conn_clear, quit, lib_list, lib_save, lib_delete, lib_clear, lib_replace, search_all_schemas, cancel_query, compare_dbs, compare_schemas, compare_apply, compare_tables, compare_rows, compare_rows_apply, compare_rows_diff, compare_rows_apply_diff, compare_cancel, fk, compare_rows_insert_all, compare_rows_fetch_by_pk, gen_user_transfer, process_list, kill_process, schema_erd, open_support_link
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -4331,6 +4387,30 @@ mod tests {
             .map(|d| d.parent().unwrap().file_name().unwrap().to_string_lossy().to_string()).collect();
         assert_eq!(names, vec!["MySQL Server 8.10", "MySQL Server 8.4", "MySQL Server 8.0", "MySQL Server 5.7"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_release_is_newer_only_when_its_version_is_higher() {
+        assert!(release_is_newer("v1.3.0", "1.2.0"));
+        assert!(release_is_newer("v1.10.0", "1.9.3"), "compared as numbers, not text");
+        assert!(release_is_newer("2.0.0", "1.99.99"));
+        assert!(!release_is_newer("v1.2.0", "1.2.0"));
+        assert!(!release_is_newer("v1.1.0", "1.2.0"), "an older release is not an update");
+        assert!(!release_is_newer("v1.2", "1.2.0"), "1.2 and 1.2.0 are the same version");
+        assert!(!release_is_newer("", "1.2.0"));
+    }
+
+    // The page is opened through the shell, so nothing but this app's own release pages.
+    #[test]
+    fn only_this_apps_release_pages_are_opened() {
+        assert!(release_page_ok("https://github.com/monsama/NOBS-SQL-Editor/releases/tag/v1.3.0"));
+        for bad in ["https://github.com/monsama/NOBS-SQL-Editor/releases/tag/v1.3.0&calc",
+                    "https://github.com/monsama/NOBS-SQL-Editor/releases/tag/v1.3.0\" & calc",
+                    "https://evil.example/monsama/NOBS-SQL-Editor/releases/tag/v1.3.0",
+                    "https://github.com/someone/else/releases/tag/v1.3.0",
+                    "file:///C:/Windows/System32/calc.exe", ""] {
+            assert!(!release_page_ok(bad), "{bad}");
+        }
     }
 
     #[test]

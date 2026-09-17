@@ -91,6 +91,17 @@ MySQL moves its page or files, `mysql_download_page` and
 `mysql_download_url_template` (with `{series}`, `{version}`, `{file_name}`) in
 the config file override the defaults.
 
+## Updates
+
+A few seconds after it starts, the app asks GitHub (`api.github.com`) for the latest release of
+[NOBS-SQL-Editor](https://github.com/monsama/NOBS-SQL-Editor/releases). If a newer version exists, a small
+notice with a link appears in the bottom-left corner. Nothing is downloaded or installed. The
+request carries nothing beyond what any web request does: your IP address and a user agent
+naming the app.
+
+Hide the notice with its **×** and it stays hidden until the next version. Switch the check off,
+or run it by hand, under **Settings → Updates**.
+
 ## Building from source
 
 Requirements: [Rust](https://rustup.rs) (with the MSVC toolchain on Windows),
