@@ -3576,6 +3576,20 @@ fn tools_status_cache() -> &'static Mutex<Option<Value>> {
     CACHE.get_or_init(|| Mutex::new(None))
 }
 
+// "MariaDB 12.3.3" or "MySQL 8.4.9" out of a client tool's --version text, so Settings can show what
+// a download (or an installation) actually is - downloaded tools never update themselves.
+fn tool_version_label(version_text: &str) -> Option<String> {
+    let maria = regex::Regex::new(r"(\d+\.\d+\.\d+)-MariaDB").unwrap();
+    if let Some(c) = maria.captures(version_text) { return Some(format!("MariaDB {}", &c[1])); }
+    let mysql = regex::Regex::new(r"Ver (\d+\.\d+\.\d+)\b.*MySQL").unwrap();
+    mysql.captures(version_text).map(|c| format!("MySQL {}", &c[1]))
+}
+fn tool_version(path: &str) -> Option<String> {
+    if path.is_empty() || path == "(not found)" { return None; }
+    let out = Command::new(path).arg("--version").output().ok()?;
+    tool_version_label(&String::from_utf8_lossy(&out.stdout))
+}
+
 #[tauri::command]
 fn tools_status(app: tauri::AppHandle) -> R {
     if let Some(cached) = tools_status_cache().lock().unwrap().clone() { return Ok(cached); }
@@ -3612,6 +3626,9 @@ fn tools_status(app: tauri::AppHandle) -> R {
         "mysql": m, "mysql_source": ms,
         "mysqldump": d, "mysqldump_source": ds,
         "mysqldump_is_mariadb": dump_is_mariadb,
+        "mysql_version": tool_version(&m), "mysqldump_version": tool_version(&d),
+        "mysql_for_mysql_version": my_m.as_ref().and_then(|x| tool_version(&x.0)),
+        "mysqldump_for_mysql_version": my_d.as_ref().and_then(|x| tool_version(&x.0)),
         "mysql_for_mysql": my_m.as_ref().map(|x| x.0.clone()), "mysql_for_mysql_source": my_m.as_ref().map(|x| x.1.clone()),
         "mysqldump_for_mysql": my_d.as_ref().map(|x| x.0.clone()), "mysqldump_for_mysql_source": my_d.as_ref().map(|x| x.1.clone()),
         "download_dir": tools_dir().to_string_lossy(),
@@ -4387,6 +4404,19 @@ mod tests {
             .map(|d| d.parent().unwrap().file_name().unwrap().to_string_lossy().to_string()).collect();
         assert_eq!(names, vec!["MySQL Server 8.10", "MySQL Server 8.4", "MySQL Server 8.0", "MySQL Server 5.7"]);
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // Verbatim --version output of the tools this app downloads or finds.
+    #[test]
+    fn the_tool_version_is_read_from_its_version_text() {
+        let cases = [
+            (r"C:\Users\x\NOBSSQL-Desktop\bin\mysql.exe from 12.3.3-MariaDB, client 15.2 for Win64 (AMD64), source revision 83e909fc", Some("MariaDB 12.3.3")),
+            (r"C:\x\mysqldump.exe from 12.3.3-MariaDB, client 10.20 for Win64 (AMD64)", Some("MariaDB 12.3.3")),
+            ("mysqldump  Ver 8.4.9 for Win64 on x86_64 (MySQL Community Server - GPL)", Some("MySQL 8.4.9")),
+            (r"C:\x\mysql.exe  Ver 8.0.46 for Win64 on x86_64 (MySQL Community Server - GPL)", Some("MySQL 8.0.46")),
+            ("something else", None),
+        ];
+        for (text, want) in cases { assert_eq!(tool_version_label(text).as_deref(), want, "{text}"); }
     }
 
     #[test]
