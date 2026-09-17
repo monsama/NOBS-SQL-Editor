@@ -1,5 +1,8 @@
 # Code signing policy
 
+Free code signing provided by [SignPath.io](https://signpath.io), certificate by
+[SignPath Foundation](https://signpath.org).
+
 ## Current status
 
 Releases are **not code-signed**. Windows SmartScreen warns that the publisher
@@ -21,8 +24,11 @@ describes the policy that will apply once signing is active.
   not store or have access to the private key.
 
 ## Roles
-- Author / maintainer: Viktor Ljuca (https://monsama.ch)
-- Release approval: the maintainer, who reviews and tags each release.
+- **Authors** (may change the code): [Viktor Ljuca](https://github.com/monsama)
+- **Reviewers** (review and approve changes from others): [Viktor Ljuca](https://github.com/monsama)
+- **Approvers** (approve each release for signing): [Viktor Ljuca](https://github.com/monsama)
+
+All team members use multi-factor authentication for GitHub and SignPath.
 
 ## Privacy
 This application does not transmit user data to the author, and has no

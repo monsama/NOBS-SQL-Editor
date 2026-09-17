@@ -12,6 +12,22 @@ They are **not code-signed yet**, so Windows SmartScreen shows a "Windows
 protected your PC" warning naming an unknown publisher. Choose **More info ->
 Run anyway** to continue. See [CODE_SIGNING.md](CODE_SIGNING.md) for the plan.
 
+### Uninstalling
+
+1. To remove saved connections and their passwords as well, first open **Settings -> Clear all
+   app data** in the app.
+2. Uninstall **NOBS SQL Editor** from Windows **Settings -> Apps -> Installed apps** (or
+   "Programs and Features").
+3. Optionally delete what the app keeps for your user account:
+   - `%APPDATA%\NOBSSQL-Desktop` - connections, settings, the query library, the log, and
+     downloaded client tools;
+   - `%LOCALAPPDATA%\ch.monsama.nobssqleditor` - the app window's browser data (open tabs,
+     layout);
+   - in Windows **Credential Manager** (Windows Credentials), any entries ending in
+     `.NOBSSQL-Desktop` - saved connection passwords, if step 1 was skipped.
+
+Export files are kept wherever you saved them.
+
 ## Features
 
 - Connect to MySQL / MariaDB with saved connection profiles (passwords stored in
