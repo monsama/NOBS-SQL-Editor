@@ -126,7 +126,13 @@ jobs:
                 src-tauri/target/release/bundle/nsis/*-setup.exe, src-tauri/target/release/bundle/msi/*.msi)
           }
           if (-not $files.Count) { throw 'no installers found to checksum' }
-          $lines = foreach ($f in $files) { '{0}  {1}' -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), $f.Name }
+          # The name as the release page will show it, not as it is on disk here: GitHub rewrites
+          # spaces in an asset name to dots, so "NOBS SQL Editor_1.3.5_x64-setup.exe" is downloaded
+          # as "NOBS.SQL.Editor_1.3.5_x64-setup.exe". Listing the on-disk name leaves someone
+          # checking a download unable to find their own file in the list.
+          $lines = foreach ($f in $files) {
+            '{0}  {1}' -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), ($f.Name -replace ' ', '.')
+          }
           $lines | Set-Content -Path SHA256SUMS.txt -Encoding ascii
           # Appended to the release notes, so the values are readable without downloading a file
           # to check a download with.
