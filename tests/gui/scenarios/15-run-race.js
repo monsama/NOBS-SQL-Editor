@@ -22,6 +22,11 @@ INSERT INTO ${DB}.t VALUES (1,'one');`);
 
     const tab = await G.openTable(DB, 't');
     const id = tab.id;
+    // The queries below name no table, so the tab stops being bound to one and its database falls
+    // back to whichever schema is selected - which, this far into the suite, is one an earlier
+    // scenario has dropped. Both runs then fail with "Unknown database", the grid correctly keeps
+    // what it had, and the check reads as the race being unfixed. Pin the schema instead.
+    curSchema = DB;
 
     // Started without awaiting, which is what every caller in the app does.
     runSql(id, `SELECT SLEEP(3) AS slept, 'slow' AS which`);
