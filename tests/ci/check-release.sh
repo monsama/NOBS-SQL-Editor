@@ -62,6 +62,9 @@ fi
 if [ -f "$dir/SHA256SUMS.txt" ]; then
   while read -r want name; do
     [ -z "${name:-}" ] && continue
+    # sha256sum marks binary mode with a leading asterisk on the name, which some platforms use by
+    # default - the file it means is the same one.
+    name=${name#\*}
     if [ ! -f "$dir/$name" ]; then
       bad "SHA256SUMS.txt lists $name, which is not an asset of this release"
     elif [ "$(sha256sum "$dir/$name" | cut -d' ' -f1)" != "$(printf '%s' "$want" | tr 'A-Z' 'a-z')" ]; then
