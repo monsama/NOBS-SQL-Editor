@@ -17,11 +17,12 @@ They are **not code-signed**, so Windows SmartScreen shows a "Windows protected
 your PC" warning naming an unknown publisher. Choose **More info -> Run anyway**
 to continue.
 
-Each release publishes `SHA256SUMS.txt` next to the installers, and prints the same
-values in its notes, so you can check that what you downloaded is what CI built:
+Releases from 1.3.5 onward publish `SHA256SUMS.txt` next to the installers, and print
+the same values in their notes, so you can check that what you downloaded is what CI
+built (1.3.4 and earlier predate this):
 
 ```powershell
-Get-FileHash .\NOBS.SQL.Editor_1.3.4_x64-setup.exe -Algorithm SHA256
+Get-FileHash .\NOBS.SQL.Editor_1.3.5_x64-setup.exe -Algorithm SHA256
 ```
 
 [CODE_SIGNING.md](CODE_SIGNING.md) says what that does and does not prove, and why
