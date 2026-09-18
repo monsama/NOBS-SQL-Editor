@@ -140,7 +140,9 @@ jobs:
                      'These installers are not code-signed. Compare what you downloaded against the SHA-256 below:',
                      '', '```') + $lines + @('```', '',
                      'PowerShell: ``Get-FileHash .\<file> -Algorithm SHA256``', '',
-                     'See [CODE_SIGNING.md](CODE_SIGNING.md) for what this does and does not prove.')
+                     # Absolute: a release page resolves a relative link against its own URL, so
+                     # CODE_SIGNING.md would land on /releases/tag/CODE_SIGNING.md and 404.
+                     'See [CODE_SIGNING.md](https://github.com/monsama/nobs-sql-editor/blob/main/CODE_SIGNING.md) for what this does and does not prove.')
           $notes | Set-Content -Path release-notes-append.md -Encoding utf8
           Get-Content SHA256SUMS.txt
 
