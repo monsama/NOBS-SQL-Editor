@@ -58,7 +58,15 @@ INSERT INTO ${DB}.mojibake VALUES (1, 0x636166C3A9);`);
     G.eq('asked again on the server default, the server sends the transcoded bytes',
       await G.q(`SELECT t FROM ${DB}.mojibake WHERE id=1`, DB), [['cafÃ©']]);
     await G.until(() => readsAs() === 'cafÃ©', 20000);
-    G.eq('back on the server default, the grid shows them too', readsAs(), 'cafÃ©');
+    // Reported with the tab's state rather than only the value: the server has just been shown to
+    // answer correctly on this very connection, so a grid still holding the old reading is a
+    // question about this tab - what it re-ran, whether it re-ran, and what it asked for.
+    const x = T(t.id), said = G.take();
+    G.check('back on the server default, the grid shows them too', readsAs() === 'cafÃ©', {
+      got: readsAs(), charset: window.browseCharset, curRun: x && x.curRun, exact: x && x.exact,
+      db: x && x.db, table: x && x.table, cols: x && x.cols, rows: x && x.rows,
+      running: !!(x && x.runningReqId), cursor: x && x.cursorId, log: said.l.slice(-6), toasts: said.t.slice(-4),
+    });
     G.check('and the connection is writable again', window.readOnly === false, window.readOnly);
 
     // Nothing of this touched the data - the point of a diagnostic.
