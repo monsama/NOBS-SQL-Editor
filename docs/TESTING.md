@@ -38,7 +38,7 @@ Windows runner:
 - Each server's CA certificate is saved to a file: MySQL's from its data directory, MariaDB's off
   the wire with `openssl`. That way the right-CA checks run too.
 - It writes `NOBS_CI_*` values and `MYSQL_BIN`/`MYSQLDUMP_BIN` for the later steps. The
-  NOBS-SQL-Editor-PowerShell repository runs its live suite with the same script.
+  nobs-sql-editor-powershell repository runs its live suite with the same script.
 
 It also runs locally, on spare ports and in a folder of your choosing, next to servers you
 already have:
@@ -187,7 +187,7 @@ notice and Settings. It runs both editions:
 ```powershell
 $env:NOBS_TEST_DSN = '127.0.0.1:3306:root:yourpassword'
 node tests/gui/run.mjs --app desktop --target src-tauri/target/debug/nobs-sql-editor.exe
-node tests/gui/run.mjs --app ps --target ..\NOBS-SQL-Editor-PowerShell\NOBSSQL.ps1     # headless Edge
+node tests/gui/run.mjs --app ps --target ..\nobs-sql-editor-powershell\NOBSSQL.ps1     # headless Edge
 ```
 
 - **What it needs:** Node 22 or later.
@@ -206,7 +206,7 @@ node tests/gui/run.mjs --app ps --target ..\NOBS-SQL-Editor-PowerShell\NOBSSQL.p
 - **Server time zone:** a check that needs the hour when the clocks go back is skipped on a
   server whose time zone has none (UTC, as in CI).
 - **CI:** the `live` job runs these after the live tests, against MariaDB and MySQL. The
-  NOBS-SQL-Editor-PowerShell repository runs the same scenarios from here against its own script.
+  nobs-sql-editor-powershell repository runs the same scenarios from here against its own script.
 
 ### Upgrading from the previous release
 
@@ -426,12 +426,12 @@ protect someone's data.
 ## Checking real data for corruption
 
 Both editions write binary columns the same way, so the same audit covers either. The script lives
-in the sibling [NOBS-SQL-Editor-PowerShell](https://github.com/monsama/NOBS-SQL-Editor-PowerShell) repo, at
+in the sibling [nobs-sql-editor-powershell](https://github.com/monsama/nobs-sql-editor-powershell) repo, at
 `tools/Check-BlobIntegrity.ps1`, and is read-only — it runs SELECTs against a live server and
 writes nothing:
 
 ```powershell
-pwsh -NoProfile -File ..\NOBS-SQL-Editor-PowerShell\tools\Check-BlobIntegrity.ps1 -Dsn '127.0.0.1:3306:root:yourpassword'
+pwsh -NoProfile -File ..\nobs-sql-editor-powershell\tools\Check-BlobIntegrity.ps1 -Dsn '127.0.0.1:3306:root:yourpassword'
 ```
 
 It looks for the signatures this app has actually produced: a value beginning with the two

@@ -3,7 +3,7 @@
 (async () => {
   const realApi = api;
   api = async (p, b) => p === '/api/update-check'
-    ? { ok: true, current: '1.0.0', latest: '9.9.9', newer: true, url: 'https://github.com/monsama/NOBS-SQL-Editor/releases/tag/v9.9.9' }
+    ? { ok: true, current: '1.0.0', latest: '9.9.9', newer: true, url: 'https://github.com/monsama/nobs-sql-editor/releases/tag/v9.9.9' }
     : realApi(p, b);
   try {
     try { localStorage.removeItem('updateDismissed'); } catch (e) { }
@@ -20,7 +20,7 @@
     G.check('Settings has the switch', !!$('cfgUpdateCheck'), 'no switch');
     hide('mSettings');
     if (G.desktop) {
-      const r = await realApi('/api/open-release-page', { url: 'https://github.com/monsama/NOBS-SQL-Editor/releases/tag/v1.2.0&calc' });
+      const r = await realApi('/api/open-release-page', { url: 'https://github.com/monsama/nobs-sql-editor/releases/tag/v1.2.0&calc' });
       G.check('the desktop app opens only its own release pages', !r.ok, r);
     }
   } finally {

@@ -1,7 +1,7 @@
 <#
 Starts a MariaDB and a MySQL server for the live test suites, loads the shared fixture into both,
 and puts the client tools where the apps look for them. Used by CI in this repo and in
-NOBS-SQL-Editor-PowerShell; runnable locally on spare ports:
+nobs-sql-editor-powershell; runnable locally on spare ports:
 
   pwsh -File tests/ci/start-test-servers.ps1 -Root C:\nobs-ci -MariaPort 3316 -MysqlPort 3318 `
        -MysqlHome C:\nobs-ci\mysql -AppData C:\nobs-ci\appdata

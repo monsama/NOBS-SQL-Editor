@@ -4324,7 +4324,7 @@ fn download_mysql_tools_blocking() -> R {
 // ---------- update notice ----------
 // The app says when a newer release exists and links to it. It never downloads or installs
 // anything itself. The UI asks once per start unless that is switched off in Settings.
-const RELEASES_REPO: &str = "monsama/NOBS-SQL-Editor";
+const RELEASES_REPO: &str = "monsama/nobs-sql-editor";
 fn release_is_newer(latest: &str, current: &str) -> bool {
     let key = |v: &str| -> Vec<u64> {
         v.trim().trim_start_matches(['v', 'V']).split('.')
@@ -4336,8 +4336,12 @@ fn release_is_newer(latest: &str, current: &str) -> bool {
     !latest.trim().is_empty() && a > b
 }
 // Opened through the shell, so only this app's own release pages - never whatever URL arrives.
+// Case-insensitive because a GitHub owner and repository name are: the API answers with whatever
+// case the repository currently carries, and a rename underneath an already-released build would
+// otherwise have it refuse to open the very page its own update check just found. Renaming this
+// repository is what turned that from a hypothetical into a measured one.
 fn release_page_ok(url: &str) -> bool {
-    regex::Regex::new(&format!(r"^https://github\.com/{}/releases/tag/v\d+(\.\d+){{1,3}}$", regex::escape(RELEASES_REPO)))
+    regex::Regex::new(&format!(r"(?i)^https://github\.com/{}/releases/tag/v\d+(\.\d+){{1,3}}$", regex::escape(RELEASES_REPO)))
         .unwrap().is_match(url)
 }
 
@@ -4985,10 +4989,14 @@ mod tests {
     // The page is opened through the shell, so nothing but this app's own release pages.
     #[test]
     fn only_this_apps_release_pages_are_opened() {
-        assert!(release_page_ok("https://github.com/monsama/NOBS-SQL-Editor/releases/tag/v1.3.0"));
-        for bad in ["https://github.com/monsama/NOBS-SQL-Editor/releases/tag/v1.3.0&calc",
-                    "https://github.com/monsama/NOBS-SQL-Editor/releases/tag/v1.3.0\" & calc",
-                    "https://evil.example/monsama/NOBS-SQL-Editor/releases/tag/v1.3.0",
+        assert!(release_page_ok("https://github.com/monsama/nobs-sql-editor/releases/tag/v1.3.0"));
+        // The same page, spelled the way the repository was named before it was renamed: GitHub
+        // resolves either, so the app has to accept either rather than refuse the page its own
+        // update check was just handed.
+        assert!(release_page_ok("https://github.com/Monsama/nobs-sql-editor/releases/tag/v1.3.0"));
+        for bad in ["https://github.com/monsama/nobs-sql-editor/releases/tag/v1.3.0&calc",
+                    "https://github.com/monsama/nobs-sql-editor/releases/tag/v1.3.0\" & calc",
+                    "https://evil.example/monsama/nobs-sql-editor/releases/tag/v1.3.0",
                     "https://github.com/someone/else/releases/tag/v1.3.0",
                     "file:///C:/Windows/System32/calc.exe", ""] {
             assert!(!release_page_ok(bad), "{bad}");

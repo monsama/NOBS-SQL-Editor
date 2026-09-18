@@ -9,7 +9,7 @@ portable and Tauri supports macOS and Linux, so it can be built from source ther
 for them, and CI does not test them, so treat that as unsupported rather than ready.
 
 **On a machine where you cannot install software**, there is a second edition:
-[NOBS SQL Editor, PowerShell edition](https://github.com/monsama/NOBS-SQL-Editor-PowerShell)
+[NOBS SQL Editor, PowerShell edition](https://github.com/monsama/nobs-sql-editor-powershell)
 is the same UI as a single `.ps1` script that starts a local server and opens your
 browser - nothing to install, no admin rights, and no installer for SmartScreen to
 object to. It shells out to `mysql.exe` for everything, so it needs the client tools
@@ -18,7 +18,7 @@ where this one can talk to the server directly.
 ## Download
 
 Windows installers are published on the
-[Releases](https://github.com/monsama/NOBS-SQL-Editor/releases) page.
+[Releases](https://github.com/monsama/nobs-sql-editor/releases) page.
 
 They are **not code-signed**, so Windows SmartScreen shows a "Windows protected
 your PC" warning naming an unknown publisher. Choose **More info -> Run anyway**
@@ -162,7 +162,7 @@ the config file override the defaults.
 ## Updates
 
 A few seconds after it starts, the app asks GitHub (`api.github.com`) for the latest release of
-[NOBS-SQL-Editor](https://github.com/monsama/NOBS-SQL-Editor/releases). If a newer version exists, a small
+[nobs-sql-editor](https://github.com/monsama/nobs-sql-editor/releases). If a newer version exists, a small
 notice with a link appears in the bottom-left corner. Nothing is downloaded or installed. The
 request carries nothing beyond what any web request does: your IP address and a user agent
 naming the app.

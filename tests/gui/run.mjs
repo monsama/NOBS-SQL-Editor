@@ -2,7 +2,7 @@
 // cannot reach: the grid, Compare, the export and import dialogs, a script's results.
 //
 //   node tests/gui/run.mjs --app desktop --target src-tauri/target/debug/nobs-sql-editor.exe
-//   node tests/gui/run.mjs --app ps --target ./NOBSSQL.ps1          (NOBS-SQL-Editor-PowerShell)
+//   node tests/gui/run.mjs --app ps --target ./NOBSSQL.ps1          (nobs-sql-editor-powershell)
 //
 // NOBS_TEST_DSN (host:port:user:password) names the server, as for the live tests; the scenarios
 // create and drop their own nobs_gui* databases and remove the connection profiles they save.
