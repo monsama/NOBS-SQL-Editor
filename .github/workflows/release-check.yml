@@ -35,4 +35,7 @@ jobs:
       - name: Check the release describes what it ships
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./tests/ci/check-release.sh "$GITHUB_REPOSITORY" "${{ github.event.release.tag_name || inputs.tag }}"
+        # Through bash on purpose: the executable bit does not survive a checkout made on
+        # Windows, and `./script.sh` then fails with a permission error that says nothing about
+        # what went wrong.
+        run: bash tests/ci/check-release.sh "$GITHUB_REPOSITORY" "${{ github.event.release.tag_name || inputs.tag }}"
