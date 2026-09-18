@@ -18,6 +18,17 @@
     const files = await G.A('/api/browse', { path: FOLDER, filter: '*.sql', dirsOnly: false });
     const paths = (files.files || []).map(f => f.path);
     G.eq('one file for the database', (files.files || []).map(f => f.name), ['nobs_gui.sql']);
+    // With no file there is nothing to import, and carrying on makes the run say that a table is
+    // missing from a database two scenarios later - which is the symptom, three steps removed from
+    // the cause. It has happened once in CI, and reading it took longer than it should have. Stop
+    // where it went wrong instead, carrying what the app itself said about the export.
+    if (!paths.length) {
+      const said = G.take();
+      G.check('the export left a file to import', false,
+        { folder: FOLDER, expLog: $('expLog').textContent.slice(-400), toasts: said.t.slice(-6), log: said.l.slice(-6) });
+      hide('mExport');
+      return G.report();
+    }
     hide('mExport');
 
     await openImport(); await G.wait(500);
