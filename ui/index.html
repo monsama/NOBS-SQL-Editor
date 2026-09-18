@@ -4972,7 +4972,26 @@ function listNav(box,e){const items=[...box.querySelectorAll('.item')];if(!items
  else if(e.key==='Enter'){e.preventDefault();if(i>=0)items[i].click();return;}
  else return;
  items.forEach(x=>x.classList.remove('kbsel'));if(i<0)i=0;items[i].classList.add('kbsel');items[i].scrollIntoView({block:'nearest'});}
-document.addEventListener('DOMContentLoaded',()=>{});
+// The browser remembers what was typed into a field and offers it back the next time that field is
+// clicked - its own form history, nothing to do with any extension, which is why it shows up in the
+// desktop edition's WebView2 as well. Here that list is a nuisance at best: it covers the value
+// being edited with a dropdown of old ones, and the values are hostnames, user names and cell
+// contents from whatever database was open at the time. autocomplete="off" is what turns it off,
+// and it has to be on every field rather than the two that were written with it by hand - so it is
+// set here for every input the page has, and by the observer below for every one made later (the
+// cell editor, the row form, the dialogs). Fields that already say something more specific keep it:
+// a password field asks for "new-password", which is a stronger statement than "off".
+function noFormHistory(root){
+ (root.querySelectorAll?root.querySelectorAll('input,textarea'):[]).forEach(el=>{
+  if(!el.hasAttribute('autocomplete'))el.setAttribute('autocomplete','off');
+ });
+ if(root.matches&&root.matches('input,textarea')&&!root.hasAttribute('autocomplete'))root.setAttribute('autocomplete','off');
+}
+document.addEventListener('DOMContentLoaded',()=>{
+ noFormHistory(document);
+ new MutationObserver(ms=>ms.forEach(m=>m.addedNodes.forEach(n=>{if(n.nodeType===1)noFormHistory(n);})))
+  .observe(document.body,{childList:true,subtree:true});
+});
 $('schemas').addEventListener('keydown',e=>listNav($('schemas'),e));
 $('objects').addEventListener('keydown',e=>listNav($('objects'),e));
 
