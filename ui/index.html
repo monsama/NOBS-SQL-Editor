@@ -686,7 +686,7 @@ function floatRenderTray(){
  // ones off the left edge of the tray (the tray itself wraps to a new row once it runs out of
  // room - see its max-width/flex-wrap above).
  tray.innerHTML=ids.map(id=>{const lbl=floatTrayLabel(id);return '<span class="chip" style="background:var(--panel);border-color:var(--bd2);color:var(--fg);gap:8px;cursor:default">'
-  +'<span onclick="floatRestore(\''+id+'\')" style="cursor:pointer;display:inline-block;max-width:160px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;vertical-align:middle" title="'+esc(lbl)+' — Restore">'+esc(lbl)+'</span>'
+  +'<span onclick="floatRestore(\''+id+'\')" style="cursor:pointer;display:inline-block;max-width:160px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;vertical-align:middle" title="'+esc(lbl)+' - Restore">'+esc(lbl)+'</span>'
   +'<span onclick="modalClose(\''+id+'\')" style="cursor:pointer;font-weight:700;padding:0 1px" title="Close">&times;</span>'
   +'</span>';}
  ).join('');
@@ -1474,7 +1474,7 @@ function progStart(prefix,totalLabel,jobId){
   if(box)box.style.display='block'; if(btn)btn.disabled=true; if(cbtn)cbtn.disabled=false;
   _progJobIds[prefix]=jobId;
   const t0=Date.now();
-  _progTimers[prefix]=setInterval(()=>{const secs=((Date.now()-t0)/1000).toFixed(0);if(lbl)lbl.textContent=(totalLabel?totalLabel+' \u2014 ':'')+'running for '+secs+'s...';},250);
+  _progTimers[prefix]=setInterval(()=>{const secs=((Date.now()-t0)/1000).toFixed(0);if(lbl)lbl.textContent=(totalLabel?totalLabel+' - ':'')+'running for '+secs+'s...';},250);
 }
 function progStop(prefix){
   const box=$(prefix+'Progress'),btn=$(prefix+'GoBtn'),cbtn=$(prefix+'CancelBtn');
@@ -2648,7 +2648,7 @@ function syncFilterRowTop(id){
 // in every rendering engine, which is what let header text and the select-all checkbox render
 // top-aligned instead of centered even after an earlier percentage-based attempt at this fix.
 // An explicit pixel height on both sides of the relationship sidesteps the question entirely.
-function sortHeader(id,ed){const t=T(id);const H=28;let h='<th style="width:22px;height:'+H+'px;padding:0"><span style="display:flex;align-items:center;justify-content:center;height:'+H+'px"><input type="checkbox" title="Select/clear all shown rows" onclick="selAll(\''+id+'\',this.checked)"></span></th>'+(ed?'<th></th>':'');t.cols.forEach((c,ci)=>{const ar=t.sortCol===ci?(t.sortDir>0?' \u25B2':' \u25BC'):'';const isPk=t.pk&&t.pk.indexOf(c)>=0;const isFk=t.fk&&t.fk.indexOf(c)>=0;const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');h+='<th style="cursor:pointer;height:'+H+'px;padding:0 8px" title="'+esc(c)+' — click to sort (drag edge to resize, double-click edge to auto-fit)" onclick="sortBy(\''+id+'\','+ci+')"><span style="display:flex;align-items:center;gap:4px;height:'+H+'px;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+esc(c)+'</span>'+kb+ar+'</span><span class="rz" data-ci="'+ci+'"></span></th>';});return h+'<th></th>';}
+function sortHeader(id,ed){const t=T(id);const H=28;let h='<th style="width:22px;height:'+H+'px;padding:0"><span style="display:flex;align-items:center;justify-content:center;height:'+H+'px"><input type="checkbox" title="Select/clear all shown rows" onclick="selAll(\''+id+'\',this.checked)"></span></th>'+(ed?'<th></th>':'');t.cols.forEach((c,ci)=>{const ar=t.sortCol===ci?(t.sortDir>0?' \u25B2':' \u25BC'):'';const isPk=t.pk&&t.pk.indexOf(c)>=0;const isFk=t.fk&&t.fk.indexOf(c)>=0;const kb=(isPk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-pk,#5dcaa5)" title="Primary key">PK</span>':'')+(isFk?' <span class="muted" style="font-size:9px;font-weight:700;line-height:1;vertical-align:middle;color:var(--erd-line,#7aa8d8)" title="Foreign key">FK</span>':'');h+='<th style="cursor:pointer;height:'+H+'px;padding:0 8px" title="'+esc(c)+' - click to sort (drag edge to resize, double-click edge to auto-fit)" onclick="sortBy(\''+id+'\','+ci+')"><span style="display:flex;align-items:center;gap:4px;height:'+H+'px;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+esc(c)+'</span>'+kb+ar+'</span><span class="rz" data-ci="'+ci+'"></span></th>';});return h+'<th></th>';}
 function setFilter(id,ci,v){const t=T(id);t.filters[ci]=v;renderBody(id);updatePager(id);updateStatusLine(id);}
 function sortBy(id,ci){const t=T(id);if(t.sortCol===ci){if(t.sortDir>0){t.sortDir=-1;}else{t.sortCol=-1;t.sortDir=1;}}else{t.sortCol=ci;t.sortDir=1;}$('sortrow_'+id).innerHTML=sortHeader(id,!!t.pk);renderBody(id);syncFilterRowTop(id);wireColResize(id);updatePager(id);updateStatusLine(id);}
 function viewIndices(id){const t=T(id);let view=t.rows.map((r,ri)=>ri);
@@ -4451,7 +4451,7 @@ function cmpBadge(status){const map={missing_target:['missing on target','#4a262
 // a table can be "structure identical" and still have missing or changed rows, which is exactly
 // what this column exists to surface instead of making you click "rows…" on every single one.
 function cmpRowBadge(t){const rs=t.rowStatus;
- if(!rs||rs==='pending')return '<span class="muted" style="font-size:11px">—</span>';
+ if(!rs||rs==='pending')return '<span class="muted" style="font-size:11px">-</span>';
  if(rs==='checking')return '<span class="muted" style="font-size:11px">checking…</span>';
  if(rs==='no_pk')return '<span class="muted" style="font-size:11px" title="No primary key - row comparison needs one to match rows up.">no primary key</span>';
  if(rs==='error')return '<span style="color:var(--del);font-size:11px" title="'+esc(t.rowError||'')+'">error</span>';
@@ -4485,7 +4485,7 @@ function cmpTally(){const tr=$('cmpTallyRow'),t=$('cmpTally');if(!tr||!t)return;
  if(c.diff)parts.push(c.diff+' differ'+(c.diff===1?'s':'')+' in structure');
  if(c.missing_target)parts.push(c.missing_target+' missing on target');
  if(c.missing_source)parts.push(c.missing_source+' missing on source');
- t.textContent=parts.join(' — ')+(differing?'':' (structure identical)');
+ t.textContent=parts.join(' - ')+(differing?'':' (structure identical)');
  tr.style.display='block';}
 function cmpRenderResults(){const box=$('cmpResults');const sr=$('cmpResultsSearchRow');const rsr=$('cmpRowScanRow');
  if(!_cmpTables||!_cmpTables.length){box.innerHTML='<div class="muted">No tables found on either side.</div>';if(sr)sr.style.display='none';if(rsr)rsr.style.display='none';cmpTally();return;}
@@ -4592,7 +4592,7 @@ let _cmpRowScanRunning=false;
 let _cmpRowScanCancelled=false;
 function cmpRowScanSetStatus(checked,total,differ,done){
  const el=$('cmpRowScanStatus');if(!el)return;
- if(done){el.textContent=(_cmpRowScanCancelled?'Stopped after ':'Checked ')+checked+' of '+total+' table(s) — '+differ+' have row differences.';return;}
+ if(done){el.textContent=(_cmpRowScanCancelled?'Stopped after ':'Checked ')+checked+' of '+total+' table(s) - '+differ+' have row differences.';return;}
  // On fast tables, the loop can finish the table currently in flight and re-render this same
  // status (for the NEXT table) within milliseconds of Stop being clicked - overwriting the
  // "Stopping…" message before it's even visible, so Stop looked like it silently did nothing
