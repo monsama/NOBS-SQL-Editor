@@ -39,17 +39,14 @@ INSERT INTO ${DB}.mojibake VALUES (1, 0x636166C3A9);`);
     G.check('a write through the app is refused while reading in another charset',
       wrote && wrote.ok === false && /read-only/i.test(String(wrote.error)), wrote);
 
-    // The bytes themselves, which is what "binary" is for. Both editions ask the server for the
-    // same thing - no transcoding - and show it differently, which is a property of their readers
-    // rather than a choice. The desktop backend sees the result marked charset 63 and renders every
-    // such value as hex; mysql.exe hexes only what its own metadata calls binary, and a VARCHAR
-    // read with --default-character-set=binary is not that, so the bytes arrive and are decoded.
+    // The bytes themselves, which is what "binary" is for: no transcoding, and a text column then
+    // arrives marked binary, which both editions show as hex - the desktop backend because the
+    // result says charset 63, mysql.exe because --binary-as-hex applies to exactly that.
     await setBrowseCharset('binary');
     await G.until(() => { const x = T(t.id); return x && !x.runningReqId && readsAs() !== null; }, 20000);
     await G.wait(300);
     const raw = String(readsAs());
-    G.check('read in binary, the row is the bytes that are stored',
-      G.desktop ? /^0x636166c3a9$/i.test(raw) : raw === 'café', raw);
+    G.check('read in binary, the row is the bytes that are stored', /^0x636166c3a9$/i.test(raw), raw);
 
     // And back, with nothing left behind. Asked of the backend first and of the grid second, on
     // purpose: one failing while the other holds says which of them did not come back - a grid that
