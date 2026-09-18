@@ -204,7 +204,7 @@ table.grid td input[type="checkbox"]{display:block;margin:0 auto;vertical-align:
   <span id="updNote" style="display:none;position:fixed;left:16px;bottom:16px;z-index:9400;background:var(--panel2);border:1px solid var(--bd);border-left:4px solid var(--accent);border-radius:6px;padding:8px 12px;font-size:13px;white-space:nowrap;box-shadow:0 4px 14px rgba(0,0,0,.3)"><a href="#" id="updLink" style="color:var(--accent)" onclick="openUpdatePage();return false"></a> <a href="#" title="Hide until the next version" style="color:var(--muted);text-decoration:none" onclick="dismissUpdate();return false">&times;</a></span>
 	<select id="connlist" onchange="pickConnGuarded();connTitle()" title="Saved connections" style="width:210px;max-width:210px"><option value="" disabled hidden selected>Connections</option></select>
   <button class="sm" title="Start a new connection (clear the form)" onclick="newConn()">New</button><button class="sm" title="Save these connection details" onclick="saveConn()">Save</button><button id="mgrBtn" class="sm" title="Edit, clone, delete or set primary for the selected connection" onclick="connMenu(event)">Manage &#9662;</button>
-  <span id="connStatusGroup" style="display:inline-flex;gap:6px;align-items:center;min-width:0;margin-left:4px"><span id="pwChip" title="This connection has a saved password" style="display:none;font-size:14px;cursor:default;flex:none">&#128274;</span><span id="connStatus" class="chip bad">Not connected</span><span id="envChip" class="chip bad" style="display:none"></span><span id="schemaBadge" class="chip ok" style="display:none"></span></span>
+  <span id="connStatusGroup" style="display:inline-flex;gap:6px;align-items:center;min-width:0;margin-left:4px"><span id="pwChip" title="This connection has a saved password" style="display:none;font-size:14px;cursor:default;flex:none">&#128274;</span><span id="connStatus" class="chip bad">Not connected</span><span id="envChip" class="chip bad" style="display:none"></span><span id="schemaBadge" class="chip ok" style="display:none"></span><select id="browseCs" class="needsconn" onchange="setBrowseCharset(this.value)" style="max-width:150px;font-size:12px;padding:0 4px" title="Read text in another character set. A value that looks mis-encoded reads correctly in the character set its bytes really are, which tells a storage problem from a display one; binary shows the bytes themselves. The connection is read-only while this is not the server default."></select></span>
   <span style="flex:1"></span><span id="topActions" class="needsconn" style="display:inline-flex;gap:9px;align-items:center"><button class="primary" onclick="newTab()" title="Open a new query tab">+ New Query</button><span class="tbsep"></span><button class="sm" title="View users and privileges" onclick="openUsers()">Users</button><button class="sm" title="View and kill server processes/queries (SHOW FULL PROCESSLIST)" onclick="openProcessList()">Processes</button><button class="sm" title="Browse and reopen previous queries" onclick="openHistory()">History</button><button class="sm" title="Save and browse reusable queries" onclick="openLibrary()">Library</button><span class="tbsep"></span><button class="sm" title="Export databases with mysqldump" onclick="openExport()">Export</button><button class="sm" title="Import SQL files or a whole folder" onclick="openImport()">Import</button><button class="sm" title="Compare table structure between two databases" onclick="openCompare()">Compare DB</button></span><button class="sm" title="Configure or download the mysql / mysqldump client tools" onclick="openSettings()">Settings</button><span class="tbsep" style="margin:2px 10px"></span><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" onclick="openSupportLink()" title="Buy me a coffee, if NOBS SQL Editor saved you some time" style="cursor:pointer;height:26px;vertical-align:middle;opacity:.85;border-radius:4px" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.85"><button class="sm warn" title="Stop the local server and exit (the clean way to close the app)" onclick="quit()" style="margin-left:10px">Quit</button>
  </div>
  <div class="barrow" id="connFormRow">
@@ -542,6 +542,50 @@ window.readOnly=false;window.curEnv='';
 // password lock icon already does. Only applyEnv() (below) touches the real enforcement state.
 function renderEnvChip(env,ro,acc){const el=$('envChip');if(!el)return;if(env||ro){el.style.display='inline-flex';el.textContent=(env||'')+(ro?(env?' - ':'')+'READ-ONLY':'');el.title=el.textContent;if(acc){el.className='chip';el.style.background=acc;el.style.color='#fff';el.style.borderColor='transparent';}else{el.className='chip '+(ro?'bad':'ok');el.style.background='';el.style.color='';el.style.borderColor='';}}else{el.style.display='none';}}
 function applyEnv(name){const m=connMeta()[name]||{};window.readOnly=!!m.readonly;window.curEnv=m.env||'';const acc=window.curAccent||accMap()[name]||'';renderEnvChip(window.curEnv,window.readOnly,acc);document.body.classList.toggle('ro',window.readOnly);}
+// ---- reading in another character set ----
+// A value that reads "cafÃ©" is either stored wrong or being read wrong, and nothing in a grid can
+// tell you which. The server transcodes every text column into the session's character set before
+// sending it, so asking for a different one answers the question: UTF-8 bytes sitting in a latin1
+// column read correctly in latin1 and as mojibake in utf8mb4, while data that is genuinely damaged
+// reads badly in both. "binary" asks for no transcoding at all and shows the bytes themselves.
+//
+// The list mirrors BROWSE_CHARSETS in main.rs, which is what the server is actually asked for -
+// anything not in that list is ignored there, so this list cannot widen what is accepted.
+const BROWSE_CHARSETS=['binary','ascii','latin1','latin2','latin5','latin7','utf8mb3','utf8mb4','ucs2',
+ 'cp1250','cp1251','cp1256','cp1257','cp850','cp852','cp866','cp932','koi8r','koi8u',
+ 'greek','hebrew','tis620','big5','gbk','gb2312','sjis','ujis','euckr','macroman'];
+window.browseCharset='';
+window._roBeforeBrowse=false;
+// Writing is off while this is on, and it is not a matter of taste: a value typed into a grid would
+// be interpreted in the session's charset, so the bytes stored would differ from the bytes shown.
+// The backend refuses such a connection's writes on its own (ro_mode, and the server is told
+// SET SESSION TRANSACTION READ ONLY); this is what makes the app stop offering.
+function setBrowseCharset(cs){
+ cs=(cs||'').trim();
+ if(cs===window.browseCharset)return;
+ if(!window.browseCharset)window._roBeforeBrowse=!!window.readOnly;
+ window.browseCharset=cs;
+ window.readOnly=cs?true:window._roBeforeBrowse;
+ document.body.classList.toggle('ro',!!window.readOnly);
+ renderEnvChip(window.curEnv,window.readOnly,window.curAccent||'');
+ renderBrowseCs();
+ if(cs)log('Reading text as '+cs+'. This is a diagnostic: the connection is read-only until it is set back to the server default.');
+ else log('Reading text as the server sends it again.');
+ const t=T(activeTab);
+ // A table tab reruns the same statement; a tab that has not run anything has nothing to show
+ // differently, and will use the new charset the next time it runs.
+ if(t&&t.curRun)runSql(t.id,t.curRun);
+}
+function renderBrowseCs(){
+ const el=$('browseCs');if(!el)return;
+ if(!el.options.length){
+  el.appendChild(new Option('charset: server','',true,true));
+  BROWSE_CHARSETS.forEach(c=>el.appendChild(new Option('charset: '+c,c)));
+ }
+ el.value=window.browseCharset||'';
+ el.style.borderColor=window.browseCharset?'var(--accent)':'';
+ el.style.fontWeight=window.browseCharset?'600':'';
+}
 function roBlock(){if(window.readOnly){toast('This connection is marked READ-ONLY (safe mode). Writes are disabled.\nUncheck "Read-only" in the saved connection to allow changes.',true);return true;}return false;}
 function accMap(){const m=window._connMeta||{};const o={};for(const k in m){if(m[k]&&m[k].accent)o[k]=m[k].accent;}return o;}
 function accSet(n,c){window._connMeta=window._connMeta||{};const cur=window._connMeta[n]||{};window._connMeta[n]={accent:c||'',env:cur.env||'',readonly:!!cur.readonly};}
@@ -593,6 +637,9 @@ async function apiCall(path,p,signal){p=p||{};p.token=TOKEN;
  if(path==='/api/connect'){p.conn=getConn();p.ro=!!window.readOnly;}
  else if(path==='/api/conn-save'&&p.conn){p.ro=false;}
  else{p.conn=window._activeConn||getConn();p.ro=(window._activeConn?!!window._activeReadOnly:!!window.readOnly);}
+ // Browsing in another character set rides along on the connection, and makes the request
+ // read-only whatever the profile says. The backend decides the same thing for itself.
+ if(window.browseCharset&&path!=='/api/conn-save'&&p.conn){p.conn=Object.assign({},p.conn,{charset:window.browseCharset});p.ro=true;}
  busyStart();const cmd=path.replace('/api/','').replace(/-/g,'_');try{const invoke=(window.__TAURI__&&window.__TAURI__.core&&window.__TAURI__.core.invoke);if(!invoke)return {ok:false,error:'Tauri bridge unavailable'};return await invoke(cmd,{req:p});}catch(e){return {ok:false,error:String(e)};}finally{busyStop();}}
 window._floatingPos = {};
 let _floatZCounter = 9001;

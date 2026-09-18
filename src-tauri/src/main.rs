@@ -244,6 +244,38 @@ async fn compare_cancel(req: Value) -> R {
 type R = Result<Value, String>;
 
 // ---------- connection ----------
+// Browsing in another character set, for when a value's encoding is in doubt. The server transcodes
+// every text column into the session's charset before it is sent, so what the app receives depends
+// on what the session asked for: a column of UTF-8 bytes stored in a latin1 column reads as mojibake
+// in utf8mb4 and as itself in latin1, which is how you tell a storage problem from a display one.
+// "binary" asks for no transcoding at all - every text column then arrives marked charset 63 and is
+// shown as hex bytes (see is_binaryish), which is the truth about what is stored.
+//
+// A list, not a pattern: this ends up in SET NAMES, which takes no placeholder, so the value is
+// interpolated into SQL. Everything here is a charset MySQL or MariaDB ships, and anything else -
+// including anything with a quote or a semicolon in it - is not a charset and is ignored.
+const BROWSE_CHARSETS: &[&str] = &[
+    "binary", "ascii", "latin1", "latin2", "latin5", "latin7", "utf8mb3", "utf8mb4", "ucs2",
+    "cp1250", "cp1251", "cp1256", "cp1257", "cp850", "cp852", "cp866", "cp932", "koi8r", "koi8u",
+    "greek", "hebrew", "tis620", "big5", "gbk", "gb2312", "sjis", "ujis", "euckr", "macroman",
+];
+
+// The charset a connection asks to browse in, if it asks for one this app will hand to the server.
+// None means the driver's default (utf8mb4), which is every ordinary connection.
+fn browse_charset(connj: &Value) -> Option<String> {
+    let want = connj["charset"].as_str()?.trim().to_ascii_lowercase();
+    if want.is_empty() || want == "default" { return None; }
+    BROWSE_CHARSETS.iter().find(|c| **c == want).map(|c| (*c).to_string())
+}
+
+// Read-only for this request. Either the connection is marked so by its owner, or it is browsing in
+// another character set - which is a diagnostic, and a write from it would be interpreted in that
+// session's charset and stored as different bytes than the ones on screen. The UI disables writing
+// in that mode as well; this is the half that does not depend on the UI being right.
+fn ro_mode(req: &Value) -> bool {
+    req["ro"].as_bool().unwrap_or(false) || browse_charset(&req["conn"]).is_some()
+}
+
 fn build_conn(connj: &Value) -> Result<Conn, String> {
     let host = connj["host"].as_str().unwrap_or("127.0.0.1").to_string();
     let port: u16 = connj["port"].as_str().and_then(|s| s.parse().ok())
@@ -257,7 +289,17 @@ fn build_conn(connj: &Value) -> Result<Conn, String> {
         .tcp_connect_timeout(Some(std::time::Duration::from_secs(10)));
     let ca = connj["sslCa"].as_str().filter(|s| !s.is_empty());
     ob = ob.ssl_opts(ssl_opts_for(ssl, ca));
-    if connj["utc"].as_bool().unwrap_or(false) { ob = ob.init(vec!["SET time_zone='+00:00'"]); }
+    let mut init: Vec<String> = Vec::new();
+    if connj["utc"].as_bool().unwrap_or(false) { init.push("SET time_zone='+00:00'".into()); }
+    if let Some(cs) = browse_charset(connj) {
+        init.push(format!("SET NAMES {}", cs));
+        // And the server refuses to write on this connection at all. The endpoints below block a
+        // write statement before it is sent, but they can only block the ones they are asked to
+        // run; this covers every path that builds a connection, including any added later without
+        // this in mind. Reads, temporary tables and the app's own session settings are unaffected.
+        init.push("SET SESSION TRANSACTION READ ONLY".into());
+    }
+    if !init.is_empty() { ob = ob.init(init); }
     Conn::new(Opts::from(ob)).map_err(|e| explain_conn_error(ssl, ca.is_some(), &e.to_string()))
 }
 
@@ -1247,7 +1289,7 @@ async fn query(req: Value) -> R {
     tokio::task::spawn_blocking(move || {
         let sql = req["sql"].as_str().unwrap_or("").to_string();
         if sql.trim().is_empty() { return Ok(json!({"ok":false,"error":"Empty query."})); }
-        if req["ro"].as_bool().unwrap_or(false) && !sql_is_readonly(&sql) {
+        if ro_mode(&req) && !sql_is_readonly(&sql) {
             return Ok(json!({"ok":false,"error":"Read-only mode: statement blocked."}));
         }
         let mut c = build_conn(&req["conn"])?;
@@ -1413,7 +1455,7 @@ async fn cancel_query(req: Value) -> R {
 async fn exec(req: Value) -> R {
     tokio::task::spawn_blocking(move || {
         let sql = req["sql"].as_str().unwrap_or("").to_string();
-        if req["ro"].as_bool().unwrap_or(false) && !sql_is_readonly(&sql) {
+        if ro_mode(&req) && !sql_is_readonly(&sql) {
             return Ok(json!({"ok":false,"error":"Read-only mode: statement blocked."}));
         }
         let mut c = build_conn(&req["conn"])?;
@@ -1748,7 +1790,7 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
 async fn script(req: Value) -> R {
     tokio::task::spawn_blocking(move || {
         let raw = req["sql"].as_str().unwrap_or("").to_string();
-        if req["ro"].as_bool().unwrap_or(false) && !sql_is_readonly(&raw) {
+        if ro_mode(&req) && !sql_is_readonly(&raw) {
             return Ok(json!({"ok":false,"error":"Read-only mode: statement blocked."}));
         }
         let mut c = build_conn(&req["conn"])?;
@@ -1816,7 +1858,7 @@ async fn script(req: Value) -> R {
 async fn script_results(req: Value) -> R {
     tokio::task::spawn_blocking(move || {
         let raw = req["sql"].as_str().unwrap_or("").to_string();
-        if req["ro"].as_bool().unwrap_or(false) && !sql_is_readonly(&raw) {
+        if ro_mode(&req) && !sql_is_readonly(&raw) {
             return Ok(json!({"ok":false,"error":"Read-only mode: statement blocked."}));
         }
         let max_rows = req["maxRows"].as_u64().unwrap_or(1000).max(1) as usize;
@@ -5436,6 +5478,108 @@ mod binary_col_tests {
         // unlike bit_col/bit8, where MySQL accepts a bare integer as the correct bit pattern.
         assert_eq!(bit, vec![false, false, false, false, true, true],
                    "only bit_col and bit8 are BIT columns; bin_col/blob_col are binary but not BIT");
+    }
+}
+
+#[cfg(test)]
+mod browse_charset_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_charset_the_server_has_is_accepted() {
+        let with = |v: Value| browse_charset(&json!({"charset": v}));
+        assert_eq!(with(json!("latin1")), Some("latin1".into()));
+        assert_eq!(with(json!("BINARY")), Some("binary".into()), "the name is not case-sensitive");
+        assert_eq!(with(json!("  utf8mb4 ")), Some("utf8mb4".into()));
+        // No charset asked for at all - every ordinary connection.
+        assert_eq!(with(json!("")), None);
+        assert_eq!(with(json!("default")), None);
+        assert_eq!(browse_charset(&json!({})), None);
+        // This value is interpolated into SET NAMES, which takes no placeholder. Nothing that is
+        // not a charset gets through, so there is nothing to escape.
+        for bad in ["latin1; DROP DATABASE nobs_test", "latin1'", "utf8mb4 --", "'binary'",
+                    "latin1 /*", "sjis`", "big5\\", "../latin1", "utf8mb4;SET autocommit=0"] {
+            assert_eq!(browse_charset(&json!({"charset": bad})), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn browsing_in_another_charset_is_read_only_whatever_the_request_says() {
+        let plain = json!({"host":"127.0.0.1","user":"root"});
+        let browsing = json!({"host":"127.0.0.1","user":"root","charset":"latin1"});
+        assert!(!ro_mode(&json!({"conn": plain, "ro": false})));
+        assert!(ro_mode(&json!({"conn": plain, "ro": true})), "a connection its owner marked read-only");
+        // The UI sets ro for these too. This is what holds if it ever does not.
+        assert!(ro_mode(&json!({"conn": browsing, "ro": false})));
+        assert!(ro_mode(&json!({"conn": browsing})));
+    }
+}
+
+#[cfg(test)]
+mod browse_charset_live_tests {
+    use super::*;
+
+    fn conn(charset: Option<&str>) -> Option<Value> {
+        let dsn = std::env::var("NOBS_TEST_DSN").ok()?;
+        let p: Vec<&str> = dsn.split(':').collect();
+        if p.len() != 4 { return None; }
+        let mut c = json!({"host":p[0],"port":p[1],"user":p[2],"password":p[3],"ssl":"default"});
+        if let Some(cs) = charset { c["charset"] = json!(cs); }
+        Some(c)
+    }
+
+    // The bug this answers: a value that renders as mojibake, where nothing in the app can say
+    // whether the data is wrong or only the reading of it. Here the bytes of "café" in UTF-8 are
+    // stored in a latin1 column - which is the common mistake - so the server transcodes them into
+    // the session charset and the default connection shows "cafÃ©". Reading the same row in latin1
+    // asks for no transcoding into utf8mb4, so the bytes arrive as stored and decode as "café":
+    // the storage is what it always was, and the difference is the diagnostic.
+    #[tokio::test]
+    #[ignore]
+    async fn the_same_row_reads_differently_in_another_charset() {
+        let Some(plain) = conn(None) else { eprintln!("NOBS_TEST_DSN not set - skipping"); return };
+        let latin1 = conn(Some("latin1")).unwrap();
+        let binary = conn(Some("binary")).unwrap();
+
+        script(json!({"conn":plain,"sql":
+            "DROP TABLE IF EXISTS nobs_test.charset_browse;\n\
+             CREATE TABLE nobs_test.charset_browse (id INT PRIMARY KEY, t VARCHAR(40) CHARACTER SET latin1);\n\
+             INSERT INTO nobs_test.charset_browse VALUES (1, 0x636166C3A9);"})).await.unwrap();
+
+        let read = |c: Value| async move {
+            let r = query(json!({"sql":"SELECT t FROM nobs_test.charset_browse WHERE id=1","conn":c,"db":"nobs_test"})).await.unwrap();
+            assert_eq!(r["ok"], json!(true), "{}", r["error"]);
+            (r["rows"][0][0].as_str().unwrap_or("").to_string(),
+             r["binaryCols"][0].as_bool().unwrap_or(false))
+        };
+
+        let (default_read, _) = read(plain.clone()).await;
+        let (latin1_read, latin1_bin) = read(latin1.clone()).await;
+        let (binary_read, binary_bin) = read(binary).await;
+        println!("  default {default_read:?}  latin1 {latin1_read:?}  binary {binary_read:?}");
+
+        assert_eq!(default_read, "cafÃ©", "the bytes transcoded from latin1 into utf8mb4");
+        assert_eq!(latin1_read, "café", "the bytes as stored, which are UTF-8");
+        assert!(!latin1_bin, "latin1 is a text charset - the column is not reported binary");
+        // SET NAMES binary asks for no transcoding, and every text column then arrives marked
+        // charset 63, which the app shows as the bytes themselves.
+        assert!(binary_bin, "in binary, a text column is reported binary");
+        assert_eq!(binary_read, "0x636166C3A9", "the bytes, as bytes");
+
+        // And nothing can be written from such a connection. Both halves are checked: the endpoint
+        // refuses to send the statement, and the server refuses the session even if it were sent.
+        let blocked = query(json!({"sql":"UPDATE nobs_test.charset_browse SET t='x' WHERE id=1","conn":latin1.clone(),"db":"nobs_test"})).await.unwrap();
+        assert_eq!(blocked["ok"], json!(false));
+        assert!(blocked["error"].as_str().unwrap().contains("Read-only"), "{}", blocked["error"]);
+
+        let mut c = build_conn(&latin1).unwrap();
+        let at_the_server = c.query_drop("UPDATE nobs_test.charset_browse SET t='x' WHERE id=1");
+        assert!(at_the_server.is_err(), "the server accepted a write on a browsing connection");
+        println!("  the server said: {}", at_the_server.unwrap_err());
+
+        let (still, _) = read(plain.clone()).await;
+        assert_eq!(still, "cafÃ©", "the row is as it was");
+        script(json!({"conn":plain,"sql":"DROP TABLE IF EXISTS nobs_test.charset_browse;"})).await.unwrap();
     }
 }
 
