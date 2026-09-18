@@ -49,13 +49,14 @@ jobs:
             **/target/release/bundle/msi/*.msi
           if-no-files-found: warn
 
-      # --- Everything below requires SignPath Foundation approval first (see CODE_SIGNING.md)
-      # and three values only you can provide once approved: the SIGNPATH_API_TOKEN secret and
-      # the SIGNPATH_ORGANIZATION_ID variable (both under repo Settings > Secrets and variables
-      # > Actions), plus the project-slug/signing-policy-slug below (from your SignPath
-      # dashboard, on your project's signing policy page). Until SIGNPATH_API_TOKEN is set,
-      # every step below is skipped automatically rather than failing the build - so pushing a
-      # tag before SignPath is set up still produces a normal, unsigned build, same as today.
+      # --- The signing steps, kept but inert. SignPath Foundation declined this project in
+      # September 2026 and no certificate is in place (CODE_SIGNING.md), so SIGNPATH_API_TOKEN is
+      # unset and every step below is skipped rather than failing the build: a tag produces a
+      # normal unsigned build. They are kept because the shape of the work is right for any
+      # service that signs a CI artifact, not only SignPath - wiring one up means the token and
+      # organization-id (repo Settings > Secrets and variables > Actions), the two slugs below,
+      # and nothing else. Releases carry SHA-256 checksums in the meantime; see the step further
+      # down, and note it runs after these so it hashes whatever is actually published.
 
       - name: Upload unsigned NSIS installer for signing
         id: upload-unsigned-nsis
@@ -107,6 +108,36 @@ jobs:
             signed/msi/**
           if-no-files-found: warn
 
+      # --- Checksums. The installers are not code-signed (SignPath Foundation declined in
+      # September 2026 - see CODE_SIGNING.md), so this is what a careful user has instead: the
+      # SHA-256 of each installer, generated in the same run that built it and published both as
+      # a file and in the release notes. It proves the download arrived intact and matches what CI
+      # produced; it is not a signature, and CODE_SIGNING.md says so plainly rather than implying
+      # otherwise.
+      #
+      # After the signing steps on purpose: signing rewrites the file, so a checksum taken before
+      # it would describe bytes nobody can download. Whichever set exists is the one hashed.
+      - name: Checksums for the installers
+        shell: pwsh
+        run: |
+          $signed = @(Get-ChildItem -Recurse -ErrorAction SilentlyContinue signed/nsis/*.exe, signed/msi/*.msi)
+          $files = if ($signed.Count) { $signed } else {
+            @(Get-ChildItem -ErrorAction SilentlyContinue `
+                src-tauri/target/release/bundle/nsis/*-setup.exe, src-tauri/target/release/bundle/msi/*.msi)
+          }
+          if (-not $files.Count) { throw 'no installers found to checksum' }
+          $lines = foreach ($f in $files) { '{0}  {1}' -f (Get-FileHash $f -Algorithm SHA256).Hash.ToLower(), $f.Name }
+          $lines | Set-Content -Path SHA256SUMS.txt -Encoding ascii
+          # Appended to the release notes, so the values are readable without downloading a file
+          # to check a download with.
+          $notes = @('', '### Verify your download', '',
+                     'These installers are not code-signed. Compare what you downloaded against the SHA-256 below:',
+                     '', '```') + $lines + @('```', '',
+                     'PowerShell: ``Get-FileHash .\<file> -Algorithm SHA256``', '',
+                     'See [CODE_SIGNING.md](CODE_SIGNING.md) for what this does and does not prove.')
+          $notes | Set-Content -Path release-notes-append.md -Encoding utf8
+          Get-Content SHA256SUMS.txt
+
       # --- Publish the installers as a GitHub Release so they are publicly
       # downloadable. The Actions artifacts above expire and require a GitHub
       # login; Release assets do neither. Exactly one of the two steps below
@@ -120,8 +151,11 @@ jobs:
           files: |
             signed/nsis/**/*.exe
             signed/msi/**/*.msi
+            SHA256SUMS.txt
           draft: true
           generate_release_notes: true
+          append_body: true
+          body_path: release-notes-append.md
           fail_on_unmatched_files: true
 
       - name: Publish GitHub Release (unsigned)
@@ -131,6 +165,9 @@ jobs:
           files: |
             src-tauri/target/release/bundle/nsis/*-setup.exe
             src-tauri/target/release/bundle/msi/*.msi
+            SHA256SUMS.txt
           draft: true
           generate_release_notes: true
+          append_body: true
+          body_path: release-notes-append.md
           fail_on_unmatched_files: true
