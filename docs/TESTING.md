@@ -6,8 +6,8 @@ you.
 
 ## Running the automated tests first
 
-`cargo test` from `src-tauri/` runs the offline helpers — statement splitting,
-read-only enforcement, literal escaping, CSV edge cases — and needs nothing set
+`cargo test` from `src-tauri/` runs the offline helpers - statement splitting,
+read-only enforcement, literal escaping, CSV edge cases - and needs nothing set
 up. CI also runs `cargo clippy --all-targets -- -D warnings`, so a new clippy
 warning fails the build.
 
@@ -54,7 +54,7 @@ instead made them inherit the script's output handles, and a CI step waits for t
 
 The live tests are `#[ignore]`d so a plain `cargo test` stays offline. A test
 whose environment is missing prints one line to stderr and then **passes**, so
-`cargo test` reporting `ok` does *not* by itself mean the test ran — check the
+`cargo test` reporting `ok` does *not* by itself mean the test ran - check the
 count and the timing (`finished in 0.00s` means nothing happened), or run with
 `--nocapture` and watch for `... not set - skipping`.
 
@@ -65,7 +65,7 @@ count and the timing (`finished in 0.00s` means nothing happened), or run with
 | `NOBS_TEST_SERVER_CA` | the 2 CA tests that need the server's **own** CA | skipped, with a message |
 
 `NOBS_TEST_SERVER_CA` exists because a CA test without it proves very little. `verify` refuses a
-self-signed server with no CA, with the wrong CA, and with a CA that is being silently ignored —
+self-signed server with no CA, with the wrong CA, and with a CA that is being silently ignored -
 all three look identical. Only the right CA succeeding where the wrong one fails, with nothing
 else changed, shows the CA is doing anything. The server hands its chain out during the
 handshake, so it can be taken from there without access to the server's files:
@@ -77,18 +77,18 @@ echo | openssl s_client -starttls mysql -connect 127.0.0.1:3308 -showcerts \
 ```
 
 That keeps the last certificate printed: MySQL's own CA, or MariaDB's single self-signed
-certificate. Point the variable at a path with forward slashes or a quoted one — an unexpanded
+certificate. Point the variable at a path with forward slashes or a quoted one - an unexpanded
 `$` in a hand-built Windows path makes the tests quietly skip, which is how an earlier run here
 looked green without having run them.
 
 `NOBS_TEST_DSN` is `host:port:user:password`. The two `*_BIN` variables are full
 paths to the client tools; they fall back to bare `mysql` / `mysqldump`, which
-only works if those are on `PATH` — normally they are not.
+only works if those are on `PATH` - normally they are not.
 
 Point them at a real copy of the tools. Do not assume the path in the app's own
 `config.json` is valid: it records where the app *expects* them
 (`%APPDATA%\NOBSSQL-Desktop\bin`), which is an empty directory until the in-app
-download has actually run. The app itself copes — it falls back to searching the
+download has actually run. The app itself copes - it falls back to searching the
 system (`tools-status` reports `"found on system"` and picks up e.g. a
 `C:\Program Files\MariaDB *\bin` install), so Export and Import still work. The
 **tests** do not: they read these two variables and otherwise fall back to a
@@ -104,7 +104,7 @@ cd src-tauri; cargo test -- --ignored --test-threads=1
 
 `--test-threads=1` matters: the live tests share `nobs_test` and will interfere
 with each other in parallel. (The `compare_tests` pair additionally serialises
-itself, because it replaces and restores the one global `connections.json` — run
+itself, because it replaces and restores the one global `connections.json` - run
 in parallel, whichever finished first put the real file back under the other and
 it failed with `Connection not found.` on a perfectly healthy setup.)
 
@@ -122,7 +122,7 @@ this list was found by pointing the suite at a MySQL 8 server, not by reading:
   is why `tests/fixtures/seed.sql` builds `bulk_rows` from a plain table.
 - `SLEEP()` interrupted by `KILL QUERY` **returns 1** on MySQL and the statement
   succeeds; MariaDB raises `ER_QUERY_INTERRUPTED`. Anything testing cancellation
-  needs a real query, not a sleep — a cancel test built on `SLEEP` reports a
+  needs a real query, not a sleep - a cancel test built on `SLEEP` reports a
   failure on MySQL when nothing is wrong.
 
 ```powershell
@@ -137,7 +137,7 @@ it has been run green against MariaDB 12.2, MariaDB 12.3 and MySQL 8.0.46.
 
 The two `compare_tests` drive `compare_*`, which resolves its servers by saved
 connection *name*, not by inline credentials. So they must write profiles into
-`%APPDATA%\NOBSSQL-Desktop\connections.json` — the real file the app uses — and
+`%APPDATA%\NOBSSQL-Desktop\connections.json` - the real file the app uses - and
 matching entries into the **OS keyring**. Both are snapshotted and restored when
 the test ends, including on a failed assert, so a run leaves no trace. If you
 ever see `nobs_cmp_test_rw` or `nobs_cmp_test_ro` survive in your connection
@@ -151,7 +151,7 @@ touches no other schema:
 mysql -u root -p < tests/fixtures/seed.sql
 ```
 
-You can also paste the whole file into the app's editor and run it — that path
+You can also paste the whole file into the app's editor and run it - that path
 is tested and reports `OK. 31 statement(s) executed.`
 
 Select `nobs_test` in the sidebar, then confirm the load:
@@ -172,7 +172,7 @@ Remove it all afterwards with `DROP DATABASE nobs_test;`.
 > would fail with *No database selected*. Worth knowing when writing your own
 > scripts, not just this one.
 
-Work through the scenarios in order — they are sorted by what a failure costs.
+Work through the scenarios in order - they are sorted by what a failure costs.
 
 ---
 
@@ -241,7 +241,7 @@ GRANT ALL ON nobs_test.* TO 'x'@'%';
 CALL p_touch_canary('modified via procedure');
 ```
 
-Then the two that used to get through — a pasted dump can contain the first
+Then the two that used to get through - a pasted dump can contain the first
 quite innocently, since `mysqldump` emits this syntax routinely:
 
 ```sql
@@ -288,7 +288,7 @@ one of them illegal, and apply:
 | `code` of row `DDD` → `AAA` | `ERROR 1062` duplicate key |
 | `code` of row `EEE` → **NULL** (the grid's set-NULL action, not an empty cell) | `ERROR 1048` column cannot be null |
 
-Note that clearing `code` to an **empty string** succeeds — `''` is a perfectly valid
+Note that clearing `code` to an **empty string** succeeds - `''` is a perfectly valid
 value for a `NOT NULL VARCHAR`. Only a real NULL is rejected.
 
 Suggested run: change `descr` on `AAA`, `qty` on `CCC`, **and** `qty` on `BBB`
@@ -301,12 +301,12 @@ SELECT descr FROM txn_child WHERE code = 'AAA';   -- must be the ORIGINAL 'first
 ```
 
 If `descr` changed while the batch failed, the transaction is not covering the
-whole apply — stop and report it.
+whole apply - stop and report it.
 
 Repeat on **`txn_composite`**, which has a two-column primary key, to exercise
 the multi-column `WHERE` the grid builds. Edit `amount` on the row where
 `tenant_id = 1 AND item_code = 'X-1'` and confirm the *other* three rows are
-untouched — particularly `(2, 'X-1')`, which shares an item code:
+untouched - particularly `(2, 'X-1')`, which shares an item code:
 
 ```sql
 SELECT tenant_id, item_code, amount FROM txn_composite ORDER BY tenant_id, item_code;
@@ -314,7 +314,7 @@ SELECT tenant_id, item_code, amount FROM txn_composite ORDER BY tenant_id, item_
 
 Also delete a row there and confirm exactly one disappears.
 
-A trigger guards inserts too — adding a row with `qty = -5` must fail with
+A trigger guards inserts too - adding a row with `qty = -5` must fail with
 `ERROR 1644  qty must not be negative`.
 
 ---
@@ -345,7 +345,7 @@ SELECT SUM(amount) FROM bulk_rows;   -- must match the source
 
 `charset_binary` holds an emoji, a ZWJ family sequence, CJK, RTL, accents,
 embedded quotes and comment markers, `VARBINARY`, `BLOB`, `BIT(1)`, `BIT(8)`,
-and — deliberately — a NULL column beside an empty-string column.
+and - deliberately - a NULL column beside an empty-string column.
 
 Baseline, straight from the server:
 
@@ -369,7 +369,7 @@ Now check the app against that:
   one most likely to be wrong, and silently.
 - Edit `accents` on row 1, save, re-read. Did the characters survive?
 - Edit `bit_col` on row 2 from `0` to `1`, save, and confirm with
-  `SELECT bit_col + 0 FROM charset_binary WHERE id = 2;` — this is the
+  `SELECT bit_col + 0 FROM charset_binary WHERE id = 2;` - this is the
   unquoted `0x…` literal path, which is subtle.
 - Export the table to **CSV** and open it: are the quotes in
   `O'Brien said "hi"; then left -- and # too` escaped correctly, and is NULL
@@ -384,15 +384,15 @@ Now check the app against that:
 The one unverified link between CI and a working app. On a Windows VM with
 **no** Rust, Node, Visual Studio or MySQL tooling:
 
-1. Download the `.exe` from the GitHub release — not a locally built one.
+1. Download the `.exe` from the GitHub release - not a locally built one.
 2. Install. Expect SmartScreen's *"Windows protected your PC"*; **More info →
    Run anyway**. Confirm that matches what the README tells users.
 3. Launch, connect to a database, run `SELECT 1`.
-4. Open Settings — with no client tools present, does it say so clearly, and
+4. Open Settings - with no client tools present, does it say so clearly, and
    does the **Download MariaDB client tools** button work end to end?
 5. Try Export before configuring anything: the error must name Settings and
    offer the **Open Settings…** button.
-6. Uninstall, and check `%APPDATA%\NOBSSQL` — saved passwords should be gone
+6. Uninstall, and check `%APPDATA%\NOBSSQL` - saved passwords should be gone
    from the credential store, or the uninstaller should say they remain.
 
 ---
@@ -407,11 +407,11 @@ SELECT * FROM bulk_rows a JOIN bulk_rows_2 b ON a.id = b.id;   -- slow, cancel t
 
 Watch for: memory in Task Manager, whether the window stays responsive, whether
 **Cancel** actually stops the third query, and how long the grid takes to
-appear. Then exercise the grid itself — sort by `amount`, filter `category` to
+appear. Then exercise the grid itself - sort by `amount`, filter `category` to
 `alpha`, hide a column, and open the row-detail view on a wide row.
 
 Finally, export those 100k rows to CSV and confirm the file has 100,001 lines
-(header included) and that rows with a NULL `note` — every 7th — are written
+(header included) and that rows with a NULL `note` - every 7th - are written
 consistently.
 
 ---
@@ -420,14 +420,14 @@ consistently.
 
 For anything that fails, the useful details are: which scenario, the exact SQL,
 what you expected, what happened, and whether the data survived. A failure in
-**1** or **2** is a stop-everything bug — those are the two guarantees that
+**1** or **2** is a stop-everything bug - those are the two guarantees that
 protect someone's data.
 
 ## Checking real data for corruption
 
 Both editions write binary columns the same way, so the same audit covers either. The script lives
 in the sibling [nobs-sql-editor-powershell](https://github.com/monsama/nobs-sql-editor-powershell) repo, at
-`tools/Check-BlobIntegrity.ps1`, and is read-only — it runs SELECTs against a live server and
+`tools/Check-BlobIntegrity.ps1`, and is read-only - it runs SELECTs against a live server and
 writes nothing:
 
 ```powershell

@@ -109,14 +109,14 @@ verifying modes check the server against.
 
 Without a CA, the verifying modes check against the Windows trust store.
 
-**If the server uses the certificate MariaDB or MySQL generated for itself** — which is what you
-get when nobody configured one — use **`verify-ca` with the server's CA**. That certificate is
+**If the server uses the certificate MariaDB or MySQL generated for itself** - which is what you
+get when nobody configured one - use **`verify-ca` with the server's CA**. That certificate is
 self-signed, so no trust store accepts it, and it never names a real host (MySQL's is issued to
 `MySQL_Server_<version>_Auto_Generated_Server_Certificate`), so `verify` refuses it even with the
 right CA. The connection error says which of the two happened.
 
 Where to get the CA: for MySQL it is `ca.pem` in the server's data directory. MariaDB's generated
-certificate has no separate CA — use the certificate itself. Either can also be read off the
+certificate has no separate CA - use the certificate itself. Either can also be read off the
 connection, which needs no access to the server's files:
 
 ```sh
@@ -128,7 +128,7 @@ The CA is the last certificate printed (for MariaDB, the only one).
 Export and Import run the command-line client (below) with the same settings. The MariaDB client
 has no way to check a CA without also checking the host name, except on connections to the local
 machine, so there `verify-ca` is carried out as full `verify`. It never checks less than you asked
-for — at worst a remote export fails where a query on the same connection works.
+for - at worst a remote export fails where a query on the same connection works.
 
 ## Client tools (mysql / mysqldump)
 
@@ -137,7 +137,7 @@ Export and Import use the official MySQL/MariaDB command-line tools. These are
 at an existing install (Settings) or let it download the official MariaDB client
 tools from mariadb.org on demand. The archive is checked against the SHA-256 that
 MariaDB's own release API publishes for it before anything is unpacked, and a
-mismatch installs nothing — the checksum comes from the API, not from the mirror
+mismatch installs nothing - the checksum comes from the API, not from the mirror
 the bytes came from, so a redirected or altered download fails the check. If the
 API lists no checksum, nothing is downloaded at all.
 
@@ -186,7 +186,7 @@ npm run tauri build   # produce installers (NSIS .exe / MSI on Windows)
 This program is free software, licensed under the **GNU General Public License
 version 2** (or, at your option, any later version). See [LICENSE](LICENSE).
 
-Copyright (C) 2026 Viktor Ljuca — https://monsama.ch
+Copyright (C) 2026 Viktor Ljuca - https://monsama.ch
 
 ## Third-party components
 
