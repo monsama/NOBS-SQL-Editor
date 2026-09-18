@@ -34,7 +34,7 @@ function extractConst(src, name) {
 }
 
 const NAMES = ['sqlHead', 'useTarget', 'scriptShowsResults', 'parseSingleEditableTable', 'refreshRunTableBinding',
-  'esc', 'clip', 'ctrlBadge', 'textCellHtml', 'decodeCtrlCharCell', 'hexToBitNumber', 'cellHtml', 'ctrlCharNote', 'binaryEditMode'];
+  'esc', 'clip', 'ctrlBadge', 'textCellHtml', 'decodeCtrlCharCell', 'hexToBitNumber', 'cellHtml', 'ctrlCharNote', 'binaryEditMode', 'clipboardCutMsg'];
 const bundle = [extractConst(html, 'CTRL_NAMES'), extractConst(html, 'CTRL_RE'),
   ...NAMES.map(n => extractFunction(html, n))].join('\n');
 
@@ -140,6 +140,23 @@ test('the byte editor is offered for binary columns and nothing else', () => {
   assert.equal(f.binaryEditMode(false, null), null, 'nor is NULL');
   assert.equal(f.binaryEditMode(undefined, '0x41'), 'hexShownAsText',
     'a grid with no column types at all must not offer to write bytes');
+});
+
+// The Windows clipboard's text format ends at the first NUL, so a copied value stops there and the
+// Clipboard API reports success anyway - measured: "x<NUL>y" arrived on the clipboard as "x". The
+// copy cannot be fixed; claiming it worked can be.
+test('a copy that the clipboard will cut short says so, and by how much', () => {
+  const f = load({}, 'a');
+  const N = String.fromCharCode(0);
+  assert.equal(f.clipboardCutMsg('ordinary text'), '', 'nothing to say about a value that copies whole');
+  assert.equal(f.clipboardCutMsg(''), '');
+  assert.equal(f.clipboardCutMsg(null), '', 'a NULL cell copies as nothing, which is not a loss');
+  assert.equal(f.clipboardCutMsg('x' + String.fromCharCode(27) + 'y'), '', 'other control characters travel fine');
+  const cut = f.clipboardCutMsg('x' + N + 'y');
+  assert.match(cut, /cannot carry a NUL/);
+  assert.match(cut, /2 characters not copied/, 'the NUL and everything after it are lost, not just the NUL');
+  assert.match(f.clipboardCutMsg('ab' + N), /1 character not copied/, 'singular reads as singular');
+  assert.match(f.clipboardCutMsg(N + 'abc'), /4 characters not copied/, 'a leading NUL loses the lot');
 });
 
 // A procedure's results, and every SELECT but the last in a script, were run and thrown away. Such a

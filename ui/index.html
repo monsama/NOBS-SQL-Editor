@@ -3004,7 +3004,7 @@ function viewText(title,text,opts){opts=opts||{};$('vTitle').textContent=title;c
   return opts.options?sel.value:ta.value;
  };
  if(!opts.options&&!opts.multiOptions&&!opts.dateType){
-  add('Copy','',()=>{navigator.clipboard.writeText(ta.value);log('Copied to clipboard.');});
+  add('Copy','',()=>{copyText(ta.value,'Copied to clipboard.',opts.hexText?'Copy it from the Hex tab instead to keep the whole value.':'');});
   // Offer to pretty-print, but only when the content genuinely parses as a JSON object/array -
   // a bare number or quoted string technically "parses" too, but reformatting those does nothing
   // useful, so they're excluded. Not offered for binary/BIT cells - decoded/hex/numeric content
@@ -3230,7 +3230,7 @@ function inlineEditIns(td,id,ii,col){const t=T(id);const cur=t.pending.ins[ii][c
  nb.addEventListener('mousedown',e=>{e.preventDefault();set(null);});
  inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&(!isMulti||e.ctrlKey||e.metaKey)){e.preventDefault();if(dirty)set(inp.value);else{done=true;insCellRevert(td,id,ii,col);}}else if(e.key==='Escape'){done=true;insCellRevert(td,id,ii,col);}});
  inp.addEventListener('blur',()=>setTimeout(()=>{if(!done){if(dirty)set(inp.value);else insCellRevert(td,id,ii,col);}},120));}
-function cellMenu(e,id,ri,ci){e.preventDefault();const t=T(id);const key=ri+':'+ci;const cur=(t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];const items=[['Copy value',()=>{navigator.clipboard.writeText(cellCopyValue(cur));log('Copied cell value.');}],['Copy value as hex',()=>{navigator.clipboard.writeText(cur===null?'':String(cur));log('Copied cell value as hex.');}],['Copy row',()=>copyRow(id,ri)],['Copy rows (selected)',()=>copySelRows(id)],['Paste row here (overwrite)',()=>pasteRowInto(id,ri)],['Paste rows as new',()=>pasteRowsAsNew(id)],['Copy column: '+t.cols[ci],()=>copyColumn(id,ci)],['Edit full row (form)...',()=>rowForm(id,ri)],'-'];if(t.table){const col=t.cols[ci];items.push(['Quick filter',qfSub(id,col,cur)]);if(t.filterClauses&&t.filterClauses.length)items.push(['Clear filter ('+t.filterClauses.length+')',()=>clearFilters(id)]);
+function cellMenu(e,id,ri,ci){e.preventDefault();const t=T(id);const key=ri+':'+ci;const cur=(t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];const items=[['Copy value',()=>{copyText(cellCopyValue(cur),'Copied cell value.','Use "Copy value as hex" to keep the whole value.');}],['Copy value as hex',()=>{clipWrite(cur===null?'':String(cur));log('Copied cell value as hex.');}],['Copy row',()=>copyRow(id,ri)],['Copy rows (selected)',()=>copySelRows(id)],['Paste row here (overwrite)',()=>pasteRowInto(id,ri)],['Paste rows as new',()=>pasteRowsAsNew(id)],['Copy column: '+t.cols[ci],()=>copyColumn(id,ci)],['Edit full row (form)...',()=>rowForm(id,ri)],'-'];if(t.table){const col=t.cols[ci];items.push(['Quick filter',qfSub(id,col,cur)]);if(t.filterClauses&&t.filterClauses.length)items.push(['Clear filter ('+t.filterClauses.length+')',()=>clearFilters(id)]);
   const fkd=(t.fkDetails||[]).find(f=>f[0]===col);
   if(fkd&&cur!=null){items.push(['Go to referenced row ('+fkd[1]+'.'+fkd[2]+')',()=>goToFkRow(t.db,fkd[1],fkd[2],cur)]);}
   items.push('-');}items.push(['Export to CSV (all rows)...',()=>csvGrid(id)],['Export to CSV (selected rows)...',()=>csvSel(id)],['Export to INSERTs (all rows)...',()=>insGrid(id)],['Export to INSERTs (selected rows)...',()=>insSel(id)],'-',['Set NULL',()=>setUpd(id,ri,ci,null)],['Set empty',()=>setUpd(id,ri,ci,'')]);menu(e.clientX,e.clientY,items);}
@@ -3245,8 +3245,43 @@ async function goToFkRow(db,refTable,refCol,val){
  T(_i).filterClauses=[cond];
  await openRun(_i);
 }
-function copyRow(id,ri){const t=T(id);const vals=t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];});window._rowClipboard=vals;navigator.clipboard.writeText(vals.map(v=>v===null?'':v).join('\t')).then(()=>log('Copied 1 row (TSV, '+t.cols.length+' column(s)).'));}
-function copySelRows(id){const t=T(id);const idxs=viewIndices(id).filter(ri=>t.selected&&t.selected.has(ri));if(!idxs.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const rowsData=idxs.map(ri=>t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];}));window._rowsClipboard=rowsData;const lines=rowsData.map(vals=>vals.map(v=>v===null?'':v).join('\t'));navigator.clipboard.writeText(lines.join('\n')).then(()=>log('Copied '+idxs.length+' row(s) (TSV, '+t.cols.length+' column(s)).'));}
+// The Windows clipboard's text format ends at the first NUL. Copying "a<NUL>b" puts "a" on it and
+// drops the rest, and the Clipboard API still reports success - measured: a three-character value
+// arrived as one. Nothing here can carry a NUL through it, so what this does is stop calling that
+// "Copied" when most of the value was left behind. Only NUL truncates; other control characters
+// travel fine.
+function clipboardCutMsg(s){
+ const str=(s==null?'':String(s));const i=str.indexOf(String.fromCharCode(0));
+ if(i<0)return '';
+ const lost=str.length-i;
+ return 'The clipboard cannot carry a NUL, so it stops at the first one: '+lost+' character'+(lost>1?'s':'')+' not copied.';
+}
+// Every clipboard write in the app goes through this, so none of them can quietly hand over a
+// truncated value. A toast rather than a log line when something was lost: a log line is easy to
+// miss, and the difference between what is in the cell and what is now on the clipboard is not.
+function clipWrite(text,alsoTry){
+ const s=(text==null?'':String(text));
+ return navigator.clipboard.writeText(s).then(()=>{
+  const cut=clipboardCutMsg(s);
+  if(!cut)return 'ok';
+  const full=cut+(alsoTry?' '+alsoTry:'');
+  toast(full,true);log(full);
+  return 'cut';
+ },err=>{
+  // A refused write (no focus, no permission) used to be reported as a successful copy, because
+  // nothing was watching the promise. Whatever else happens, the clipboard does not now hold what
+  // the user was told it holds.
+  toast('Could not copy to the clipboard: '+err,true);log('Copy failed: '+err);
+  return 'failed';
+ });
+}
+// For the copies that have something useful to suggest instead. Their own "Copied ..." line is
+// skipped when the value was cut, because it would be describing something that did not happen.
+function copyText(text,okMsg,alsoTry){
+ return clipWrite(text,alsoTry).then(st=>{ if(st==='ok')log(okMsg); });
+}
+function copyRow(id,ri){const t=T(id);const vals=t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];});window._rowClipboard=vals;copyText(vals.map(v=>v===null?'':v).join('\t'),'Copied 1 row (TSV, '+t.cols.length+' column(s)).','Pasting it back into this app is unaffected - the row is kept as it is.');}
+function copySelRows(id){const t=T(id);const idxs=viewIndices(id).filter(ri=>t.selected&&t.selected.has(ri));if(!idxs.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const rowsData=idxs.map(ri=>t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];}));window._rowsClipboard=rowsData;const lines=rowsData.map(vals=>vals.map(v=>v===null?'':v).join('\t'));copyText(lines.join('\n'),'Copied '+idxs.length+' row(s) (TSV, '+t.cols.length+' column(s)).','Pasting them back into this app is unaffected - the rows are kept as they are.');}
 // "Copy row" and "Copy rows (selected)" write to two separate clipboards (single row vs a
 // list), since pasting several rows only makes sense as new rows, never as an overwrite of one
 // target row - but a single-row paste shouldn't care which command put that one row there.
@@ -3264,7 +3299,7 @@ function pasteRowInto(id,ri){const t=T(id);if(!t.pk){toast('This result is not e
 // fallback the single-row overwrite paste already got, or it wrongly says nothing was copied.
 function rowsClipboard(){if(window._rowsClipboard&&window._rowsClipboard.length)return window._rowsClipboard;if(window._rowClipboard&&window._rowClipboard.length)return [window._rowClipboard];return null;}
 function pasteRowsAsNew(id){const t=T(id);if(!t.pending){toast('This result is not editable (no primary key detected).',true);return;}const rowsData=rowsClipboard();if(!rowsData||!rowsData.length){toast('Copy some rows first (Copy rows (selected)), then paste them as new rows.',true);return;}const bad=rowsData.find(vals=>vals.length!==t.cols.length);if(bad){toast('Copied row(s) have a different number of columns than this table. Cannot paste.',true);return;}rowsData.forEach(vals=>{const obj={};t.cols.forEach((c,ci)=>{obj[c]=vals[ci];});t.pending.ins.push(obj);});renderGrid(id);log('Pasted '+rowsData.length+' row(s) as new rows. Review and click Apply to commit.');}
-function copyColumn(id,ci){const t=T(id);const vals=t.rows.map((row,ri)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:row[ci];});navigator.clipboard.writeText(vals.map(v=>v===null?'':v).join('\n')).then(()=>log('Copied '+vals.length+' value(s) from column "'+t.cols[ci]+'".'));}
+function copyColumn(id,ci){const t=T(id);const vals=t.rows.map((row,ri)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:row[ci];});copyText(vals.map(v=>v===null?'':v).join('\n'),'Copied '+vals.length+' value(s) from column "'+t.cols[ci]+'".');}
 // The comparisons are built when picked, with the value written for the column's type (see litAs):
 // lit() alone turned an empty binary value into the text '0x' and a text value like 0x41 into a
 // byte, so the filter found nothing, or the wrong rows.
@@ -3304,7 +3339,7 @@ async function editIns(td,id,ii,col){clearTimeout(clickTimer);const t=T(id);cons
  const ew=await editWidgetFor(id,col,cur);
  viewText('New row - '+col,(cur==null?'':cur),{onSave:v=>{t.pending.ins[ii][col]=v;renderGrid(id);},onNull:()=>{t.pending.ins[ii][col]=null;renderGrid(id);},...ew});}
 function insCellMenu(e,id,ii,col){e.preventDefault();const t=T(id);const cur=t.pending.ins[ii][col];
- const items=[['Copy value',()=>{navigator.clipboard.writeText(cellCopyValue(cur));log('Copied value.');}],
+ const items=[['Copy value',()=>{clipWrite(cellCopyValue(cur));log('Copied value.');}],
   ['Paste row into this new row',()=>pasteRowIntoIns(id,ii)],
   ['Edit value...',()=>editIns(null,id,ii,col)],'-',
   ['Set NULL',()=>{t.pending.ins[ii][col]=null;renderGrid(id);}],
@@ -3471,7 +3506,7 @@ function bMD(cols,rows){
   return h;
 }
 function selRows(id){const t=T(id);return viewIndices(id).filter(ri=>t.selected&&t.selected.has(ri)).map(ri=>t.rows[ri]);}
-function copyGrid(id){const t=T(id);if(!t.cols)return;navigator.clipboard.writeText(bTSV(t.cols,t.rows)).then(()=>log('Copied '+t.rows.length+' rows (TSV).'));}
+function copyGrid(id){const t=T(id);if(!t.cols)return;clipWrite(bTSV(t.cols,t.rows)).then(()=>log('Copied '+t.rows.length+' rows (TSV).'));}
 function tsvGrid(id){const t=T(id);if(!t.cols)return;dl(bTSV(t.cols,t.rows),'result.tsv');}
 function openUserTransfer(){$('utResult').value='';$('utStatus').textContent='';show('mUserTransfer');}
 async function genUserTransfer(){
@@ -3481,16 +3516,16 @@ async function genUserTransfer(){
  $('utResult').value=r.sql;
  $('utStatus').textContent=r.userCount+' account(s)'+(r.errorCount?(' - '+r.errorCount+' could not be read, see the notes at the bottom of the script'):'')+'.';
 }
-function copyUserTransfer(){const v=$('utResult').value;if(!v){toast('Nothing to copy yet - click Generate first.',true);return;}navigator.clipboard.writeText(v).then(()=>log('Copied user transfer script.'));}
+function copyUserTransfer(){const v=$('utResult').value;if(!v){toast('Nothing to copy yet - click Generate first.',true);return;}clipWrite(v).then(()=>log('Copied user transfer script.'));}
 function saveUserTransferFile(){const v=$('utResult').value;if(!v){toast('Nothing to save yet - click Generate first.',true);return;}dl(v,'user_transfer.sql');}
 async function copyCsv(id){const t=T(id);if(!t.cols)return;let cols=t.cols,rows=t.rows;
- navigator.clipboard.writeText(bCSV(cols,rows)).then(()=>{csvNullHint(rows);log('Copied '+rows.length+' rows (CSV).');});}
-function copyMd(id){const t=T(id);if(!t.cols)return;navigator.clipboard.writeText(bMD(t.cols,t.rows)).then(()=>log('Copied '+t.rows.length+' rows (Markdown).'));}
-function copyMdSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bMD(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (Markdown).'));}
+ clipWrite(bCSV(cols,rows)).then(()=>{csvNullHint(rows);log('Copied '+rows.length+' rows (CSV).');});}
+function copyMd(id){const t=T(id);if(!t.cols)return;clipWrite(bMD(t.cols,t.rows)).then(()=>log('Copied '+t.rows.length+' rows (Markdown).'));}
+function copyMdSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}clipWrite(bMD(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (Markdown).'));}
 function toggleSel(id,ri,ch){const t=T(id);if(!t.selected)t.selected=new Set();if(ch)t.selected.add(ri);else t.selected.delete(ri);updateEditBar(id);}
 function selAll(id,ch){const t=T(id);if(!t.selected)t.selected=new Set();const view=viewIndices(id);view.forEach(ri=>{if(ch)t.selected.add(ri);else t.selected.delete(ri);});renderBody(id);updateEditBar(id);}
-function copySel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bTSV(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (TSV).'));}
-function copySelCsv(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}navigator.clipboard.writeText(bCSV(t.cols,rows)).then(()=>{csvNullHint(rows);}).then(()=>log('Copied '+rows.length+' selected row(s) (CSV).'));}
+function copySel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}clipWrite(bTSV(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (TSV).'));}
+function copySelCsv(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}clipWrite(bCSV(t.cols,rows)).then(()=>{csvNullHint(rows);}).then(()=>log('Copied '+rows.length+' selected row(s) (CSV).'));}
 function csvGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'csv');return;}dl(bCSV(t.cols,t.rows),'result.csv');}
 async function insGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'inserts');return;}const bc=await gridBinCols(id);const s=t.rows.map(r=>insertSkipExisting('`table`',t.cols,'('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+')')).join('\n');dl(s,'result_inserts.sql');log('Exported '+t.rows.length+' row(s) as INSERTs.');}
 function csvSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}dl(bCSV(t.cols,rows),(t.table||'result')+'_selected.csv');log('Exported '+rows.length+' selected row(s) to CSV.');}
