@@ -84,7 +84,7 @@
  .c-str{color:var(--str)} .c-kw{color:var(--kw);font-weight:600} .c-com{color:var(--com);font-style:italic} .c-num{color:var(--num)}
  .toolbar{padding:4px 8px;background:var(--panel);border-bottom:1px solid var(--bd2);display:flex;gap:9px;align-items:center;flex-wrap:wrap}
  .tbsep{width:1px;align-self:stretch;background:var(--bd);margin:2px 8px}
- .result{flex:1;overflow:auto} table.grid{border-collapse:collapse;width:100%;table-layout:fixed} .grid th .rz{position:absolute;right:-4px;top:0;width:9px;height:100%;cursor:col-resize;z-index:3} .grid th .rz:hover,.grid th .rz.drag{background:var(--accent);opacity:.55}
+ .result{flex:1;overflow:auto} table.grid{border-collapse:collapse;width:100%;table-layout:fixed} .grid th .rz{position:absolute;right:-5px;top:0;width:9px;height:100%;cursor:col-resize;z-index:3} .grid th .rz:hover,.grid th .rz.drag{background:var(--accent);opacity:.55}
  table.grid th{position:sticky;top:0;background:var(--gridh);border:none;border-right:1px solid var(--bd);box-shadow:inset 0 -2px 0 var(--bd);padding:3px 8px;text-align:left;white-space:nowrap;z-index:1;transform:translateZ(0);will-change:transform}
 table.grid td{border:none;border-right:1px solid var(--bd2);border-bottom:1px solid var(--bd2);padding:2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.grid td:first-child{text-align:center;vertical-align:middle;padding:0}
@@ -2613,34 +2613,48 @@ function closeCopyMenu(){const p=$('copyMenu');if(p)p.style.display='none';}
 // a control character is a badge.
 const FIT_SAMPLE=200;
 function autofitCol(id,ci){const t=T(id);const off=(!!t.pk)?2:1;const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const col=cg.children[ci+off];if(!col)return;let max=0;
- const th=table.querySelectorAll('thead tr:first-child th')[ci+off];if(th)max=Math.max(max,th.scrollWidth);
+ const th=table.querySelectorAll('thead tr:first-child th')[ci+off];
+ // The header, measured the same way as the values and for the same reason it cannot be read off
+ // the page: scrollWidth never reports less than the element's own width, so a column that has
+ // been fitted once reports the width it was given, and fitting it again adds the slack on top of
+ // that. It grew by 16px a go, which is how the scenario found this.
+ const head=th&&th.querySelector('span');
+ if(th&&head)max=Math.max(max,fitMeasure(th,head.innerHTML,true));
  const vals=[];const name=t.cols[ci];
  viewIndices(id).forEach(ri=>{const key=ri+':'+ci;vals.push(t.pending&&t.pending.upd&&(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci]);});
  ((t.pending&&t.pending.ins)||[]).forEach(row=>{const v=row[name];vals.push(v===undefined?null:v);});
- const mel=fitMeasureEl(table);
- if(mel){const isBit=!!(t.bitCols&&t.bitCols[ci]),isBin=!!(t.binCols&&t.binCols[ci]);
-  widestCandidates(vals,FIT_SAMPLE).forEach(i=>{mel.innerHTML=cellHtml(vals[i],isBit,isBin);max=Math.max(max,mel.offsetWidth);});}
- else table.querySelectorAll('tbody td:nth-child('+(ci+off+1)+')').forEach(td=>{max=Math.max(max,td.scrollWidth);});
+ // A real cell of this column lends its font and padding - tr[data-r] because the first row of the
+ // body is a spacer standing in for everything scrolled past, and it has neither.
+ const cell=table.querySelector('tbody tr[data-r] td:nth-child('+(ci+off+1)+')');
+ if(cell){const isBit=!!(t.bitCols&&t.bitCols[ci]),isBin=!!(t.binCols&&t.binCols[ci]);
+  widestCandidates(vals,FIT_SAMPLE).forEach(i=>{max=Math.max(max,fitMeasure(cell,cellHtml(vals[i],isBit,isBin),false));});}
+ // Nothing could be measured - no rows drawn, or no document to measure in. Read the page, which
+ // is what this did before, and accept that it answers for the rows it can see.
+ if(!max){if(th)max=th.scrollWidth;table.querySelectorAll('tbody td:nth-child('+(ci+off+1)+')').forEach(td=>{max=Math.max(max,td.scrollWidth);});}
  // As wide as the pane, and no wider. A double-click asks for this column to be readable, which a
  // fixed 600 was not for a long value - but a column wider than the window it sits in trades
  // reading the value for finding it. The narrow columns beside it (the tick box, the row marker)
  // are not part of what there is room for.
  const cap=Math.max(160,wrap.clientWidth-(30+(off===2?34:0))-2);
  col.style.width=Math.min(Math.max(60,max+16),cap)+'px';}
-// The hidden cell a fit measures in. A real one cannot be used: the table lays its columns out
-// from the widths being calculated (table-layout:fixed), so every cell in it is already as wide as
-// the answer. The font and padding are taken from a real cell all the same, or the answer would be
-// about some other cell. null when there is nothing to measure in, and the caller falls back to
-// the rendered rows, which is what it had before.
-function fitMeasureEl(table){
+// How wide a piece of the grid would be. It is measured in a hidden element rather than in the
+// table, because the table lays its columns out from the widths being calculated
+// (table-layout:fixed), so every cell in it is already as wide as the answer. Font and padding come
+// from the real th or td it stands in for, or the answer would be about some other cell; flex is
+// for the header, whose label, key badges and sort arrow sit in a flex row with a gap. 0 when
+// there is nothing to measure in, and the caller then falls back to reading the page.
+function fitMeasure(from,html,flex){
  try{
+  if(!from||typeof document==='undefined'||!document.body)return 0;
   let el=document.getElementById('fitmeasure');
   if(!el){el=document.createElement('div');el.id='fitmeasure';el.style.cssText='position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap';document.body.appendChild(el);}
-  const cell=table.querySelector('tbody td')||table.querySelector('thead th');
-  if(cell){const cs=getComputedStyle(cell);el.style.fontFamily=cs.fontFamily;el.style.fontSize=cs.fontSize;el.style.fontWeight=cs.fontWeight;el.style.fontStyle=cs.fontStyle;el.style.letterSpacing=cs.letterSpacing;
-   el.style.padding=cs.paddingTop+' '+cs.paddingRight+' '+cs.paddingBottom+' '+cs.paddingLeft;}
-  return el;
- }catch(e){return null;}
+  const cs=getComputedStyle(from);
+  el.style.fontFamily=cs.fontFamily;el.style.fontSize=cs.fontSize;el.style.fontWeight=cs.fontWeight;el.style.fontStyle=cs.fontStyle;el.style.letterSpacing=cs.letterSpacing;
+  el.style.padding=cs.paddingTop+' '+cs.paddingRight+' '+cs.paddingBottom+' '+cs.paddingLeft;
+  el.style.display=flex?'inline-flex':'block';el.style.gap=flex?'4px':'0';el.style.alignItems='center';
+  el.innerHTML=html;
+  return el.offsetWidth;
+ }catch(e){return 0;}
 }
 // Which values a fit measures. Measuring every row of a large grid costs more than the gesture is
 // worth, and measuring only the visible ones is the bug this replaced, so it takes the longest
