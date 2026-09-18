@@ -41,11 +41,16 @@ INSERT INTO ${DB}.t VALUES (1,'one');`);
     // The same in the other order: the slow one arriving second must not be discarded, since then
     // it is the newest. A guard that simply ignored late answers would pass the check above and
     // fail this one.
+    G.take();
     runSql(id, `SELECT 'first' AS which`);
     await G.wait(300);
     runSql(id, `SELECT SLEEP(2) AS slept, 'second' AS which`);
     await G.until(() => { const x = T(id); return x && !x.runningReqId && x.cols && x.cols.length === 2; }, 20000);
-    G.eq('a newer run that takes longer still wins', T(id).cols, ['slept', 'which']);
+    const y = T(id), told = G.take();
+    G.check('a newer run that takes longer still wins',
+      JSON.stringify(y.cols) === JSON.stringify(['slept', 'which']),
+      { cols: y.cols, rows: y.rows, curRun: y.curRun, running: !!y.runningReqId, seq: y.runSeq,
+        status: ($('st_' + id) || {}).textContent, log: told.l.slice(-6), toasts: told.t.slice(-4) });
   } finally {
     await G.A('/api/script', { sql: `DROP DATABASE IF EXISTS ${DB}` });
   }
