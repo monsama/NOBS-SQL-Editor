@@ -1,0 +1,38 @@
+name: release-check
+
+# Checks a release against what its own notes say about it - that every asset's SHA-256 is named if
+# the notes promise one, that a shipped SHA256SUMS.txt describes the files as published, and that no
+# link in the body is relative (a release page resolves those against its own URL and 404s).
+#
+# It exists because 1.3.6 through 1.3.9 each told people the checksums were "published below" and
+# none of them carried the values: the build appends that block to the draft, and writing the notes
+# over the draft body threw it away. Four releases, several weeks, nobody noticed - and the notes
+# are the only assurance an unsigned installer has.
+#
+# This runs after the fact, because Actions cannot stand between a person and the Publish button.
+# That is enough here: a wrong body is a minute's fix, and the point is that it stops being silent.
+on:
+  release:
+    types: [published, edited]
+  # So an older release can be checked by hand, which is how the four bad ones were found.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag of the release to check'
+        required: true
+
+# Reading releases and downloading their assets is all it does.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    # Nothing here needs Windows: it hashes files and reads text.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the release describes what it ships
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./tests/ci/check-release.sh "$GITHUB_REPOSITORY" "${{ github.event.release.tag_name || inputs.tag }}"
