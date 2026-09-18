@@ -71,6 +71,12 @@ jobs:
       - name: Run UI tests
         run: npm test
 
+      # Layout, measured in a browser: where the column resize handle sits against the line it
+      # grabs, and that fitting a column twice does not widen it. Both of those were wrong once and
+      # neither is visible to a test that cannot lay the grid out. windows-latest ships Edge.
+      - name: Run browser tests
+        run: npm run test:browser
+
   # The #[ignore]d tests need real servers, and they are the ones that have caught real bugs. The
   # setup script downloads MariaDB and MySQL, starts both on this runner (MySQL where a real
   # installation lives, so the app finds MySQL's own client tools there), loads the fixture and
