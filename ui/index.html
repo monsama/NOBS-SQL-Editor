@@ -84,7 +84,7 @@
  .c-str{color:var(--str)} .c-kw{color:var(--kw);font-weight:600} .c-com{color:var(--com);font-style:italic} .c-num{color:var(--num)}
  .toolbar{padding:4px 8px;background:var(--panel);border-bottom:1px solid var(--bd2);display:flex;gap:9px;align-items:center;flex-wrap:wrap}
  .tbsep{width:1px;align-self:stretch;background:var(--bd);margin:2px 8px}
- .result{flex:1;overflow:auto} table.grid{border-collapse:collapse;width:100%;table-layout:fixed} .grid th .rz{position:absolute;right:-3px;top:0;width:7px;height:100%;cursor:col-resize;z-index:3} .grid th .rz:hover,.grid th .rz.drag{background:var(--accent);opacity:.55}
+ .result{flex:1;overflow:auto} table.grid{border-collapse:collapse;width:100%;table-layout:fixed} .grid th .rz{position:absolute;right:-4px;top:0;width:9px;height:100%;cursor:col-resize;z-index:3} .grid th .rz:hover,.grid th .rz.drag{background:var(--accent);opacity:.55}
  table.grid th{position:sticky;top:0;background:var(--gridh);border:none;border-right:1px solid var(--bd);box-shadow:inset 0 -2px 0 var(--bd);padding:3px 8px;text-align:left;white-space:nowrap;z-index:1;transform:translateZ(0);will-change:transform}
 table.grid td{border:none;border-right:1px solid var(--bd2);border-bottom:1px solid var(--bd2);padding:2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 table.grid td:first-child{text-align:center;vertical-align:middle;padding:0}
@@ -2602,10 +2602,62 @@ function openCopyMenu(id,btn){
  let ny=r.bottom+2;if(ny+hgt>innerHeight-6)ny=Math.max(6,r.top-hgt-2);
  p.style.left=nx+'px';p.style.top=ny+'px';p.style.visibility='visible';}
 function closeCopyMenu(){const p=$('copyMenu');if(p)p.style.display='none';}
-function autofitCol(id,ci){const t=T(id);const off=(!!t.pk)?2:1;const wrap=$('res_'+id);const table=wrap.querySelector('table.grid');const cg=table.querySelector('colgroup');const col=cg.children[ci+off];if(!col)return;let max=0;
+// Double-click on a column's edge: make it as wide as the widest value in the column.
+//
+// It used to measure the cells in the DOM, which above 300 rows is whatever screenful renderBody
+// has built (see VIRT_THRESHOLD) - so the same column fitted to a different width depending on
+// where the reader happened to be scrolled, and a long value further down was never seen at all.
+// Every value is in memory, so they are measured from there instead. What is measured is what the
+// grid draws - cellHtml, badges and all, in a hidden element wearing a real cell's font and
+// padding - because a value's length is not its width: "(NULL)" is six characters of nothing, and
+// a control character is a badge.
+const FIT_SAMPLE=200;
+function autofitCol(id,ci){const t=T(id);const off=(!!t.pk)?2:1;const wrap=$('res_'+id);if(!wrap)return;const table=wrap.querySelector('table.grid');if(!table)return;const cg=table.querySelector('colgroup');if(!cg)return;const col=cg.children[ci+off];if(!col)return;let max=0;
  const th=table.querySelectorAll('thead tr:first-child th')[ci+off];if(th)max=Math.max(max,th.scrollWidth);
- table.querySelectorAll('tbody td:nth-child('+(ci+off+1)+')').forEach(td=>{max=Math.max(max,td.scrollWidth);});
- const w=Math.min(Math.max(60,max+16),600);col.style.width=w+'px';}
+ const vals=[];const name=t.cols[ci];
+ viewIndices(id).forEach(ri=>{const key=ri+':'+ci;vals.push(t.pending&&t.pending.upd&&(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci]);});
+ ((t.pending&&t.pending.ins)||[]).forEach(row=>{const v=row[name];vals.push(v===undefined?null:v);});
+ const mel=fitMeasureEl(table);
+ if(mel){const isBit=!!(t.bitCols&&t.bitCols[ci]),isBin=!!(t.binCols&&t.binCols[ci]);
+  widestCandidates(vals,FIT_SAMPLE).forEach(i=>{mel.innerHTML=cellHtml(vals[i],isBit,isBin);max=Math.max(max,mel.offsetWidth);});}
+ else table.querySelectorAll('tbody td:nth-child('+(ci+off+1)+')').forEach(td=>{max=Math.max(max,td.scrollWidth);});
+ // As wide as the pane, and no wider. A double-click asks for this column to be readable, which a
+ // fixed 600 was not for a long value - but a column wider than the window it sits in trades
+ // reading the value for finding it. The narrow columns beside it (the tick box, the row marker)
+ // are not part of what there is room for.
+ const cap=Math.max(160,wrap.clientWidth-(30+(off===2?34:0))-2);
+ col.style.width=Math.min(Math.max(60,max+16),cap)+'px';}
+// The hidden cell a fit measures in. A real one cannot be used: the table lays its columns out
+// from the widths being calculated (table-layout:fixed), so every cell in it is already as wide as
+// the answer. The font and padding are taken from a real cell all the same, or the answer would be
+// about some other cell. null when there is nothing to measure in, and the caller falls back to
+// the rendered rows, which is what it had before.
+function fitMeasureEl(table){
+ try{
+  let el=document.getElementById('fitmeasure');
+  if(!el){el=document.createElement('div');el.id='fitmeasure';el.style.cssText='position:absolute;left:-9999px;top:0;visibility:hidden;white-space:nowrap';document.body.appendChild(el);}
+  const cell=table.querySelector('tbody td')||table.querySelector('thead th');
+  if(cell){const cs=getComputedStyle(cell);el.style.fontFamily=cs.fontFamily;el.style.fontSize=cs.fontSize;el.style.fontWeight=cs.fontWeight;el.style.fontStyle=cs.fontStyle;el.style.letterSpacing=cs.letterSpacing;
+   el.style.padding=cs.paddingTop+' '+cs.paddingRight+' '+cs.paddingBottom+' '+cs.paddingLeft;}
+  return el;
+ }catch(e){return null;}
+}
+// Which values a fit measures. Measuring every row of a large grid costs more than the gesture is
+// worth, and measuring only the visible ones is the bug this replaced, so it takes the longest
+// few. Length in characters picks the candidates rather than deciding between them - the grid's
+// font is proportional, so WWW is wider than iiiiiii - which is why everything within a quarter of
+// the longest counts, and why the longest itself is always measured, whatever the limit.
+function widestCandidates(vals,limit){
+ if(!vals||!vals.length)return [];
+ // The two values nobody typed are drawn as words, and the words are what gets measured.
+ const len=v=>v===null?6:(v===''?7:String(v).length);
+ let max=-1,at=0;
+ for(let i=0;i<vals.length;i++){const n=len(vals[i]);if(n>max){max=n;at=i;}}
+ const floor=Math.max(1,Math.ceil(max*0.75));
+ const out=[at];
+ for(let i=0;i<vals.length&&out.length<limit;i++){if(i!==at&&len(vals[i])>=floor)out.push(i);}
+ return out;
+}
 // renderGrid(): build the results table (header, filters, colgroup) then fill the body.
 function renderGrid(id){const t=T(id);const ed=!!t.pk;if(!t.filters)t.filters={};if(t.sortCol===undefined){t.sortCol=-1;t.sortDir=1;}
  let h='<table class="grid">'+colgroupHtml(id)+'<thead><tr id="sortrow_'+id+'">'+sortHeader(id,ed)+'</tr><tr id="filterrow_'+id+'">';
