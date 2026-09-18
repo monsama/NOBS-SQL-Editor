@@ -1295,12 +1295,26 @@ async fn query(req: Value) -> R {
             return Ok(json!({"ok":false,"error":"Read-only mode: statement blocked."}));
         }
         let mut c = build_conn(&req["conn"])?;
-        if let Some(db) = req["db"].as_str() { if !db.is_empty() { let _ = c.query_drop(format!("USE {}", sql_id(db))); } }
+        // A failed USE is the answer, not something to step over. Dropping the schema the app is
+        // pointed at made every query after it run with no database at all, so the server replied
+        // "No database selected" - a puzzle about the statement instead of the plain truth, which
+        // is that the database is gone. The UI reads exactly that wording to notice and refresh.
+        if let Some(db) = req["db"].as_str() {
+            if !db.is_empty() {
+                if let Err(e) = c.query_drop(format!("USE {}", sql_id(db))) {
+                    return Ok(json!({"ok":false,"error":e.to_string()}));
+                }
+            }
+        }
         // A USE explicitly written in the query text itself takes priority over the ambient db
         // parameter above - the user may be deliberately switching schemas mid-query - and only
         // the statement AFTER it actually needs to run through run_select.
         let (explicit_db, sql) = strip_leading_use_statements(&sql);
-        if let Some(db) = explicit_db { let _ = c.query_drop(format!("USE {}", sql_id(&db))); }
+        if let Some(db) = explicit_db {
+            if let Err(e) = c.query_drop(format!("USE {}", sql_id(&db))) {
+                return Ok(json!({"ok":false,"error":e.to_string()}));
+            }
+        }
         // If the frontend gave us a requestId, register this connection's own MySQL
         // CONNECTION_ID() so a Cancel click can look it up and KILL QUERY it from elsewhere.
         let request_id = req["requestId"].as_str().filter(|s| !s.is_empty()).map(String::from);

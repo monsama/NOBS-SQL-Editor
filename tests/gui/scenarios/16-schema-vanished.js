@@ -37,15 +37,22 @@ INSERT INTO ${DB}.t VALUES (1);`);
       window.allSchemas);
     G.check('and nothing is left selected', curSchema === null, curSchema);
 
-    // The other half: a database named in the user's own SQL is not the app's business. The tab is
-    // pointed at a schema that does exist, and the statement names one that does not.
+    // The other half: a database named in the user's own SQL is not the app's business. It needs a
+    // tab that is NOT pointed at the missing one - the query above bound this one to a table in it,
+    // so dbOf() still answers with it and the app would be right to chase that. A fresh tab, and a
+    // schema that exists.
+    const other = await G.runIn('SELECT 1 AS ok', OTHER);
     curSchema = OTHER;
     G.take();
-    await runSql(t.id, `SELECT 1 FROM ${DB}.t`);
+    await runSql(other.id, `SELECT 1 FROM ${DB}.t`);
     await G.wait(1500);
     const told = G.take();
     const all = told.t.concat(told.l).join(' | ');
-    G.check('a database named in the query is reported, not chased', /Unknown database/i.test(all) && !/no longer exists/i.test(all), all.slice(0, 200));
+    // The wording is the server's and differs - MySQL says the table does not exist for a
+    // qualified name, the client says the database does not for one it was handed - so the check is
+    // that an error was reported and that the app did not go reloading the tree behind it.
+    G.check('a database named in the query is reported, not chased',
+      /ERROR \d{3,4}/.test(all) && !/no longer exists/i.test(all), all.slice(0, 200));
     G.check('and the selected schema is left alone', curSchema === OTHER, curSchema);
   } finally {
     curSchema = null;
