@@ -77,6 +77,13 @@ Export files are kept wherever you saved them.
   one row. Otherwise nothing is saved. This catches a row changed or deleted since it was loaded,
   and a TIMESTAMP key in the hour the clocks go back (it shows the same as its neighbour). FLOAT
   keys are shown rounded, so they are matched by their text.
+- **Reading in another character set (read-only).** A value that reads `cafÃ©` is either stored
+  wrong or being read wrong, and a grid cannot tell you which. The server transcodes text into
+  the session's character set before sending it, so the box beside the connection lets you read
+  the same rows in another one: UTF-8 bytes stored in a latin1 column read as mojibake in utf8mb4
+  and as themselves in latin1, while data that is genuinely damaged reads badly in both. Nothing
+  can be written while this is on - what is shown is not what a write would store - and the
+  connection itself is opened read-only at the server, not only in the app.
 - **Grid edits go to the database the query ran in**, including after a leading `USE`.
 - **Compare runs both connections in UTC.** TIMESTAMP values therefore copy correctly between
   servers in different time zones, and Compare shows them in UTC.
