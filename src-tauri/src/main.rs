@@ -5564,7 +5564,7 @@ mod browse_charset_live_tests {
         // SET NAMES binary asks for no transcoding, and every text column then arrives marked
         // charset 63, which the app shows as the bytes themselves.
         assert!(binary_bin, "in binary, a text column is reported binary");
-        assert_eq!(binary_read, "0x636166C3A9", "the bytes, as bytes");
+        assert_eq!(binary_read, "0x636166c3a9", "the bytes, as bytes - this app writes hex in lower case");
 
         // And nothing can be written from such a connection. Both halves are checked: the endpoint
         // refuses to send the statement, and the server refuses the session even if it were sent.

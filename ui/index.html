@@ -5172,6 +5172,9 @@ function noFormHistory(root){
  if(root.matches&&root.matches('input,textarea')&&!root.hasAttribute('autocomplete'))root.setAttribute('autocomplete','off');
 }
 document.addEventListener('DOMContentLoaded',()=>{
+ // The character-set control is empty until this fills it, and it is the only way to ask for
+ // another one - so lazily filling it when it is first used left it unusable.
+ renderBrowseCs();
  noFormHistory(document);
  new MutationObserver(ms=>ms.forEach(m=>m.addedNodes.forEach(n=>{if(n.nodeType===1)noFormHistory(n);})))
   .observe(document.body,{childList:true,subtree:true});
