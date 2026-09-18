@@ -3278,7 +3278,7 @@ function clipWrite(text,alsoTry){
 // For the copies that have something useful to suggest instead. Their own "Copied ..." line is
 // skipped when the value was cut, because it would be describing something that did not happen.
 function copyText(text,okMsg,alsoTry){
- return clipWrite(text,alsoTry).then(st=>{ if(st==='ok')log(okMsg); });
+ return clipWrite(text,alsoTry).then(st=>{ if(st==='ok')log(okMsg); return st; });
 }
 function copyRow(id,ri){const t=T(id);const vals=t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];});window._rowClipboard=vals;copyText(vals.map(v=>v===null?'':v).join('\t'),'Copied 1 row (TSV, '+t.cols.length+' column(s)).','Pasting it back into this app is unaffected - the row is kept as it is.');}
 function copySelRows(id){const t=T(id);const idxs=viewIndices(id).filter(ri=>t.selected&&t.selected.has(ri));if(!idxs.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const rowsData=idxs.map(ri=>t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];}));window._rowsClipboard=rowsData;const lines=rowsData.map(vals=>vals.map(v=>v===null?'':v).join('\t'));copyText(lines.join('\n'),'Copied '+idxs.length+' row(s) (TSV, '+t.cols.length+' column(s)).','Pasting them back into this app is unaffected - the rows are kept as they are.');}
@@ -3506,7 +3506,7 @@ function bMD(cols,rows){
   return h;
 }
 function selRows(id){const t=T(id);return viewIndices(id).filter(ri=>t.selected&&t.selected.has(ri)).map(ri=>t.rows[ri]);}
-function copyGrid(id){const t=T(id);if(!t.cols)return;clipWrite(bTSV(t.cols,t.rows)).then(()=>log('Copied '+t.rows.length+' rows (TSV).'));}
+function copyGrid(id){const t=T(id);if(!t.cols)return;copyText(bTSV(t.cols,t.rows),'Copied '+t.rows.length+' rows (TSV).');}
 function tsvGrid(id){const t=T(id);if(!t.cols)return;dl(bTSV(t.cols,t.rows),'result.tsv');}
 function openUserTransfer(){$('utResult').value='';$('utStatus').textContent='';show('mUserTransfer');}
 async function genUserTransfer(){
@@ -3516,16 +3516,16 @@ async function genUserTransfer(){
  $('utResult').value=r.sql;
  $('utStatus').textContent=r.userCount+' account(s)'+(r.errorCount?(' - '+r.errorCount+' could not be read, see the notes at the bottom of the script'):'')+'.';
 }
-function copyUserTransfer(){const v=$('utResult').value;if(!v){toast('Nothing to copy yet - click Generate first.',true);return;}clipWrite(v).then(()=>log('Copied user transfer script.'));}
+function copyUserTransfer(){const v=$('utResult').value;if(!v){toast('Nothing to copy yet - click Generate first.',true);return;}copyText(v,'Copied user transfer script.');}
 function saveUserTransferFile(){const v=$('utResult').value;if(!v){toast('Nothing to save yet - click Generate first.',true);return;}dl(v,'user_transfer.sql');}
 async function copyCsv(id){const t=T(id);if(!t.cols)return;let cols=t.cols,rows=t.rows;
- clipWrite(bCSV(cols,rows)).then(()=>{csvNullHint(rows);log('Copied '+rows.length+' rows (CSV).');});}
-function copyMd(id){const t=T(id);if(!t.cols)return;clipWrite(bMD(t.cols,t.rows)).then(()=>log('Copied '+t.rows.length+' rows (Markdown).'));}
-function copyMdSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}clipWrite(bMD(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (Markdown).'));}
+ copyText(bCSV(cols,rows),'Copied '+rows.length+' rows (CSV).').then(st=>{if(st!=='failed')csvNullHint(rows);});}
+function copyMd(id){const t=T(id);if(!t.cols)return;copyText(bMD(t.cols,t.rows),'Copied '+t.rows.length+' rows (Markdown).');}
+function copyMdSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}copyText(bMD(t.cols,rows),'Copied '+rows.length+' selected row(s) (Markdown).');}
 function toggleSel(id,ri,ch){const t=T(id);if(!t.selected)t.selected=new Set();if(ch)t.selected.add(ri);else t.selected.delete(ri);updateEditBar(id);}
 function selAll(id,ch){const t=T(id);if(!t.selected)t.selected=new Set();const view=viewIndices(id);view.forEach(ri=>{if(ch)t.selected.add(ri);else t.selected.delete(ri);});renderBody(id);updateEditBar(id);}
-function copySel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}clipWrite(bTSV(t.cols,rows)).then(()=>log('Copied '+rows.length+' selected row(s) (TSV).'));}
-function copySelCsv(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}clipWrite(bCSV(t.cols,rows)).then(()=>{csvNullHint(rows);}).then(()=>log('Copied '+rows.length+' selected row(s) (CSV).'));}
+function copySel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}copyText(bTSV(t.cols,rows),'Copied '+rows.length+' selected row(s) (TSV).');}
+function copySelCsv(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}copyText(bCSV(t.cols,rows),'Copied '+rows.length+' selected row(s) (CSV).').then(st=>{if(st!=='failed')csvNullHint(rows);});}
 function csvGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'csv');return;}dl(bCSV(t.cols,t.rows),'result.csv');}
 async function insGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'inserts');return;}const bc=await gridBinCols(id);const s=t.rows.map(r=>insertSkipExisting('`table`',t.cols,'('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+')')).join('\n');dl(s,'result_inserts.sql');log('Exported '+t.rows.length+' row(s) as INSERTs.');}
 function csvSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}dl(bCSV(t.cols,rows),(t.table||'result')+'_selected.csv');log('Exported '+rows.length+' selected row(s) to CSV.');}
