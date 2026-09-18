@@ -3275,6 +3275,22 @@ function clipWrite(text,alsoTry){
   return 'failed';
  });
 }
+// Ctrl+C inside a box is the browser's own copy and never reaches clipWrite, so none of the above
+// sees it - which is exactly the copy someone makes after opening a cell to look at it. The copy
+// cannot be fixed (the clipboard ends at the first NUL whoever asks for it) but it can be said out
+// loud, and the difference matters: what lands on the clipboard looks like the whole value, and
+// pasting it into another row and saving stores a different one.
+['copy','cut'].forEach(type=>document.addEventListener(type,e=>{
+ const t=e.target;
+ const inBox=t&&(t.tagName==='TEXTAREA'||t.tagName==='INPUT')&&typeof t.selectionStart==='number';
+ const text=inBox?String(t.value==null?'':t.value).slice(t.selectionStart,t.selectionEnd)
+                 :String((document.getSelection&&document.getSelection())||'');
+ const cut=clipboardCutMsg(text);
+ if(!cut)return;
+ const hexTabOpen=t&&t.id==='vText'&&$('vHexTabs')&&$('vHexTabs').style.display!=='none';
+ const full=cut+(hexTabOpen?' Copy it from the Hex tab instead to keep the whole value.':'');
+ toast(full,true);log(full);
+}));
 // For the copies that have something useful to suggest instead. Their own "Copied ..." line is
 // skipped when the value was cut, because it would be describing something that did not happen.
 function copyText(text,okMsg,alsoTry){
