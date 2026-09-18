@@ -109,9 +109,19 @@ INSERT INTO ${DB}.viewer VALUES (2, CONCAT('a',CHAR(9),'b'), NULL, NULL);`);
     // And a whole row, where the format rather than the clipboard is what cannot carry it: row 2
     // holds a tab inside a value and two absent ones, and no NUL, so this is the only thing that
     // should be reported about it.
+    //
+    // The write itself is stubbed out for the length of this check. Writing to the clipboard needs
+    // a window the user is working in, which this one is not - headless, driven over a debugging
+    // port - so the real call neither succeeds nor fails here, and the report that follows a
+    // successful copy would never run. Everything else is the real path: copyRow, copyText and
+    // clipWrite, up to the hint at the end of it.
     G.take();
-    copyRow(tv.id, tv.rows.findIndex(r => r[col('id')] == 2));
-    await G.wait(400);
+    const realWrite = navigator.clipboard.writeText.bind(navigator.clipboard);
+    navigator.clipboard.writeText = async () => {};
+    try {
+      copyRow(tv.id, tv.rows.findIndex(r => String(r[col('id')]) === '2'));
+      await G.wait(400);
+    } finally { navigator.clipboard.writeText = realWrite; }
     const rowSaid = G.take().t;
     G.check('copying a row says what tab-separated text cannot carry',
       rowSaid.some(m => /holds a tab or a line break/.test(m)) && rowSaid.some(m => /empty value/.test(m)), rowSaid);
