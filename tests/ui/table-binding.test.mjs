@@ -34,15 +34,23 @@ function extractConst(src, name) {
 }
 
 const NAMES = ['sqlHead', 'useTarget', 'scriptShowsResults', 'parseSingleEditableTable', 'refreshRunTableBinding',
-  'esc', 'clip', 'ctrlBadge', 'textCellHtml', 'decodeCtrlCharCell', 'hexToBitNumber', 'cellHtml', 'ctrlCharNote', 'binaryEditMode', 'clipboardCutMsg'];
+  'esc', 'clip', 'ctrlBadge', 'textCellHtml', 'decodeCtrlCharCell', 'hexToBitNumber', 'cellHtml', 'ctrlCharNote', 'binaryEditMode', 'clipboardCutMsg', 'tsvShapeHint'];
 const bundle = [extractConst(html, 'CTRL_NAMES'), extractConst(html, 'CTRL_RE'),
   ...NAMES.map(n => extractFunction(html, n))].join('\n');
 
 function load(tab, schema) {
   const tabs = { t1: tab };
-  const env = { T: id => tabs[id], $: () => null, selBtnHtml: () => '', curSchema: schema };
+  // What the app would tell the user, collected instead of shown, so a function that reports
+  // something can be tested on what it says rather than only on what it returns.
+  const said = [];
+  const env = {
+    T: id => tabs[id], $: () => null, selBtnHtml: () => '', curSchema: schema,
+    toast: m => said.push(String(m)), log: m => said.push(String(m)),
+  };
   const keys = Object.keys(env);
-  return new Function(...keys, `${bundle}\nreturn {${NAMES.join(',')}};`)(...keys.map(k => env[k]));
+  const f = new Function(...keys, `${bundle}\nreturn {${NAMES.join(',')}};`)(...keys.map(k => env[k]));
+  f.said = said;
+  return f;
 }
 
 test('the last leading USE is where a bare table name points', () => {
@@ -157,6 +165,26 @@ test('a copy that the clipboard will cut short says so, and by how much', () => 
   assert.match(cut, /2 characters not copied/, 'the NUL and everything after it are lost, not just the NUL');
   assert.match(f.clipboardCutMsg('ab' + N), /1 character not copied/, 'singular reads as singular');
   assert.match(f.clipboardCutMsg(N + 'abc'), /4 characters not copied/, 'a leading NUL loses the lot');
+});
+
+// Tab-separated text cannot quote anything, so a value holding a tab or a line break moves every
+// column after it when the text is pasted somewhere, and an absent value is written as something a
+// paste cannot tell from a value that reads the same. The copy stands; what it cost is counted here.
+test('a tab-separated copy counts what the format cannot carry', () => {
+  const f = load({}, 'a');
+  f.tsvShapeHint([['a', 'b'], ['c', 'd']], 'an empty field');
+  assert.deepEqual(f.said, [], 'ordinary values cost nothing');
+  f.tsvShapeHint([['a\tb', 'c'], [null, 'd\ne']], 'the text NULL');
+  assert.match(f.said[0], /2 values hold a tab or a line break/);
+  assert.match(f.said[0], /1 empty value went out as the text NULL/);
+  assert.match(f.said[0], /Copy as CSV/);
+  f.said.length = 0;
+  f.tsvShapeHint([['one\ttab']], 'an empty field');
+  assert.match(f.said[0], /1 value holds a tab/, 'singular reads as singular');
+  f.said.length = 0;
+  f.tsvShapeHint([[null]], 'an empty field');
+  assert.match(f.said[0], /1 empty value went out as an empty field/);
+  assert.doesNotMatch(f.said[0], /tab or a line break/, 'nothing said about a problem that is not there');
 });
 
 // A procedure's results, and every SELECT but the last in a script, were run and thrown away. Such a

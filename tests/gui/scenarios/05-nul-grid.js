@@ -38,7 +38,8 @@ INSERT INTO ${DB2}.t VALUES ('only2', 'two');`);
     // functions behind this are unit-tested; what is only reachable here is the wiring - that the
     // note exists in the page, is filled when the editor opens, and goes away in Hex mode.
     await G.run(`CREATE TABLE ${DB}.viewer (id INT PRIMARY KEY, txt TEXT, bin VARBINARY(10), nothing VARBINARY(10));
-INSERT INTO ${DB}.viewer VALUES (1, CONCAT('x',CHAR(0),'y'), CONCAT('a',CHAR(0)), X'');`);
+INSERT INTO ${DB}.viewer VALUES (1, CONCAT('x',CHAR(0),'y'), CONCAT('a',CHAR(0)), X'');
+INSERT INTO ${DB}.viewer VALUES (2, CONCAT('a',CHAR(9),'b'), NULL, NULL);`);
     const tv = await G.openTable(DB, 'viewer');
     const col = n => tv.cols.indexOf(n);
     const cellOf = n => gridCellEl(tv.id, 0, col(n));
@@ -80,6 +81,40 @@ INSERT INTO ${DB}.viewer VALUES (1, CONCAT('x',CHAR(0),'y'), CONCAT('a',CHAR(0))
     await editCell(cellOf('id'), tv.id, 0, col('id'));
     G.check('an ordinary value is opened without a note', $('vNote').style.display === 'none', $('vNote').textContent);
     hide('mView');
+
+    // What the clipboard is told, and what it is told about. None of this can be checked by
+    // reading the clipboard - the app is not allowed to - so what is checked is what the app says,
+    // which is the part that was missing in the first place.
+    G.take();
+    const gridCell = cellOf('txt');
+    const range = document.createRange(); range.selectNodeContents(gridCell);
+    const sel = getSelection(); sel.removeAllRanges(); sel.addRange(range);
+    gridCell.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true }));
+    await G.wait(200);
+    sel.removeAllRanges();
+    G.check('copying a drawn cell says it is the drawing, not the value',
+      G.take().t.some(m => /how the grid shows the value/.test(m)), 'no warning');
+
+    // The same selection made inside the cell editor, where the value really is in the box and
+    // the clipboard is what cuts it short.
+    G.take();
+    await editCell(cellOf('txt'), tv.id, 0, col('txt'));
+    const box = $('vText'); box.focus(); box.setSelectionRange(0, box.value.length);
+    box.dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true }));
+    await G.wait(200);
+    G.check('copying a value with a NUL out of the editor says what was left behind',
+      G.take().t.some(m => /cannot carry a NUL/.test(m)), 'no warning');
+    hide('mView');
+
+    // And a whole row, where the format rather than the clipboard is what cannot carry it: row 2
+    // holds a tab inside a value and two absent ones, and no NUL, so this is the only thing that
+    // should be reported about it.
+    G.take();
+    copyRow(tv.id, tv.rows.findIndex(r => r[col('id')] == 2));
+    await G.wait(400);
+    const rowSaid = G.take().t;
+    G.check('copying a row says what tab-separated text cannot carry',
+      rowSaid.some(m => /holds a tab or a line break/.test(m)) && rowSaid.some(m => /empty value/.test(m)), rowSaid);
 
     if (!G.desktop) {
       G.take();

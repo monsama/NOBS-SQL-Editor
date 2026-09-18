@@ -3311,8 +3311,8 @@ function clipWrite(text,alsoTry){
 function copyText(text,okMsg,alsoTry){
  return clipWrite(text,alsoTry).then(st=>{ if(st==='ok')log(okMsg); return st; });
 }
-function copyRow(id,ri){const t=T(id);const vals=t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];});window._rowClipboard=vals;copyText(vals.map(v=>v===null?'':v).join('\t'),'Copied 1 row (TSV, '+t.cols.length+' column(s)).','Pasting it back into this app is unaffected - the row is kept as it is.');}
-function copySelRows(id){const t=T(id);const idxs=viewIndices(id).filter(ri=>t.selected&&t.selected.has(ri));if(!idxs.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const rowsData=idxs.map(ri=>t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];}));window._rowsClipboard=rowsData;const lines=rowsData.map(vals=>vals.map(v=>v===null?'':v).join('\t'));copyText(lines.join('\n'),'Copied '+idxs.length+' row(s) (TSV, '+t.cols.length+' column(s)).','Pasting them back into this app is unaffected - the rows are kept as they are.');}
+function copyRow(id,ri){const t=T(id);const vals=t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];});window._rowClipboard=vals;copyText(vals.map(v=>v===null?'':v).join('\t'),'Copied 1 row (TSV, '+t.cols.length+' column(s)).','Pasting it back into this app is unaffected - the row is kept as it is.').then(st=>{if(st!=='failed')tsvShapeHint([vals],'an empty field');});}
+function copySelRows(id){const t=T(id);const idxs=viewIndices(id).filter(ri=>t.selected&&t.selected.has(ri));if(!idxs.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}const rowsData=idxs.map(ri=>t.cols.map((c,ci)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:t.rows[ri][ci];}));window._rowsClipboard=rowsData;const lines=rowsData.map(vals=>vals.map(v=>v===null?'':v).join('\t'));copyText(lines.join('\n'),'Copied '+idxs.length+' row(s) (TSV, '+t.cols.length+' column(s)).','Pasting them back into this app is unaffected - the rows are kept as they are.').then(st=>{if(st!=='failed')tsvShapeHint(rowsData,'an empty field');});}
 // "Copy row" and "Copy rows (selected)" write to two separate clipboards (single row vs a
 // list), since pasting several rows only makes sense as new rows, never as an overwrite of one
 // target row - but a single-row paste shouldn't care which command put that one row there.
@@ -3330,7 +3330,7 @@ function pasteRowInto(id,ri){const t=T(id);if(!t.pk){toast('This result is not e
 // fallback the single-row overwrite paste already got, or it wrongly says nothing was copied.
 function rowsClipboard(){if(window._rowsClipboard&&window._rowsClipboard.length)return window._rowsClipboard;if(window._rowClipboard&&window._rowClipboard.length)return [window._rowClipboard];return null;}
 function pasteRowsAsNew(id){const t=T(id);if(!t.pending){toast('This result is not editable (no primary key detected).',true);return;}const rowsData=rowsClipboard();if(!rowsData||!rowsData.length){toast('Copy some rows first (Copy rows (selected)), then paste them as new rows.',true);return;}const bad=rowsData.find(vals=>vals.length!==t.cols.length);if(bad){toast('Copied row(s) have a different number of columns than this table. Cannot paste.',true);return;}rowsData.forEach(vals=>{const obj={};t.cols.forEach((c,ci)=>{obj[c]=vals[ci];});t.pending.ins.push(obj);});renderGrid(id);log('Pasted '+rowsData.length+' row(s) as new rows. Review and click Apply to commit.');}
-function copyColumn(id,ci){const t=T(id);const vals=t.rows.map((row,ri)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:row[ci];});copyText(vals.map(v=>v===null?'':v).join('\n'),'Copied '+vals.length+' value(s) from column "'+t.cols[ci]+'".');}
+function copyColumn(id,ci){const t=T(id);const vals=t.rows.map((row,ri)=>{const key=ri+':'+ci;return (t.pending&&(key in t.pending.upd))?t.pending.upd[key]:row[ci];});copyText(vals.map(v=>v===null?'':v).join('\n'),'Copied '+vals.length+' value(s) from column "'+t.cols[ci]+'".').then(st=>{if(st!=='failed')tsvShapeHint(vals.map(v=>[v]),'an empty line');});}
 // The comparisons are built when picked, with the value written for the column's type (see litAs):
 // lit() alone turned an empty binary value into the text '0x' and a text value like 0x41 into a
 // byte, so the filter found nothing, or the wrong rows.
@@ -3518,6 +3518,24 @@ function bTSV(cols,rows){return cols.join('\t')+'\n'+rows.map(r=>r.map(v=>v===nu
 // Copying a grid as CSV writes NULLs as the marker, same as a file export, which is
 // consistent but surprising when the clipboard is on its way to a spreadsheet. Say so once,
 // and only when the copied rows actually contain a NULL - a hint nobody needs is just noise.
+// The same service for the tab-separated copies, which csvNullHint's format gets and this one
+// never did. TSV has no quoting: a value holding a tab or a line break moves every column after it
+// when the text is pasted into a spreadsheet, and an absent value is written as a word that a paste
+// cannot tell from a value that says the same. Neither is worth silently rewriting the copy over -
+// the CSV copies next door do both properly - so the copy stands and what it cost is said.
+function tsvShapeHint(rows,nullText){
+ let shape=0,nulls=0;
+ (rows||[]).forEach(r=>(r||[]).forEach(v=>{
+  if(v===null||v===undefined){nulls++;return;}
+  if(typeof v==='string'&&/[\t\r\n]/.test(v))shape++;
+ }));
+ const parts=[];
+ if(shape)parts.push(shape+' value'+(shape>1?'s':'')+(shape>1?' hold':' holds')+' a tab or a line break, which this format cannot quote - pasted into a spreadsheet, the columns after them move');
+ if(nulls)parts.push(nulls+' empty value'+(nulls>1?'s':'')+' went out as '+nullText+', which a paste cannot tell from a value that reads that way');
+ if(!parts.length)return;
+ const m='Copied, but '+parts.join(', and ')+'. Copy as CSV instead to keep both exact.';
+ toast(m,true);log(m);
+}
 function csvNullHint(rows){
  const nm=csvNullMarker();
  if(!nm)return;
@@ -3537,7 +3555,7 @@ function bMD(cols,rows){
   return h;
 }
 function selRows(id){const t=T(id);return viewIndices(id).filter(ri=>t.selected&&t.selected.has(ri)).map(ri=>t.rows[ri]);}
-function copyGrid(id){const t=T(id);if(!t.cols)return;copyText(bTSV(t.cols,t.rows),'Copied '+t.rows.length+' rows (TSV).');}
+function copyGrid(id){const t=T(id);if(!t.cols)return;copyText(bTSV(t.cols,t.rows),'Copied '+t.rows.length+' rows (TSV).').then(st=>{if(st!=='failed')tsvShapeHint(t.rows,'the text NULL');});}
 function tsvGrid(id){const t=T(id);if(!t.cols)return;dl(bTSV(t.cols,t.rows),'result.tsv');}
 function openUserTransfer(){$('utResult').value='';$('utStatus').textContent='';show('mUserTransfer');}
 async function genUserTransfer(){
@@ -3555,7 +3573,7 @@ function copyMd(id){const t=T(id);if(!t.cols)return;copyText(bMD(t.cols,t.rows),
 function copyMdSel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}copyText(bMD(t.cols,rows),'Copied '+rows.length+' selected row(s) (Markdown).');}
 function toggleSel(id,ri,ch){const t=T(id);if(!t.selected)t.selected=new Set();if(ch)t.selected.add(ri);else t.selected.delete(ri);updateEditBar(id);}
 function selAll(id,ch){const t=T(id);if(!t.selected)t.selected=new Set();const view=viewIndices(id);view.forEach(ri=>{if(ch)t.selected.add(ri);else t.selected.delete(ri);});renderBody(id);updateEditBar(id);}
-function copySel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}copyText(bTSV(t.cols,rows),'Copied '+rows.length+' selected row(s) (TSV).');}
+function copySel(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}copyText(bTSV(t.cols,rows),'Copied '+rows.length+' selected row(s) (TSV).').then(st=>{if(st!=='failed')tsvShapeHint(rows,'the text NULL');});}
 function copySelCsv(id){const t=T(id);if(!t.cols)return;const rows=selRows(id);if(!rows.length){toast('No rows selected. Tick the checkboxes on the rows you want.',true);return;}copyText(bCSV(t.cols,rows),'Copied '+rows.length+' selected row(s) (CSV).').then(st=>{if(st!=='failed')csvNullHint(rows);});}
 function csvGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'csv');return;}dl(bCSV(t.cols,t.rows),'result.csv');}
 async function insGrid(id){const t=T(id);if(!t.cols)return;if(t.table){exportFull(t.db,t.table,'inserts');return;}const bc=await gridBinCols(id);const s=t.rows.map(r=>insertSkipExisting('`table`',t.cols,'('+r.map((v,i)=>litAs(v,bc?bc[i]:null)).join(',')+')')).join('\n');dl(s,'result_inserts.sql');log('Exported '+t.rows.length+' row(s) as INSERTs.');}
