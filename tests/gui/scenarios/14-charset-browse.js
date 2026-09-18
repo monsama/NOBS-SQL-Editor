@@ -51,10 +51,14 @@ INSERT INTO ${DB}.mojibake VALUES (1, 0x636166C3A9);`);
     G.check('read in binary, the row is the bytes that are stored',
       G.desktop ? /^0x636166c3a9$/i.test(raw) : raw === 'café', raw);
 
-    // And back, with nothing left behind: the value reads as it did, and writing is offered again.
+    // And back, with nothing left behind. Asked of the backend first and of the grid second, on
+    // purpose: one failing while the other holds says which of them did not come back - a grid that
+    // never re-ran, or a connection still being opened in the charset it was told to forget.
     setBrowseCharset('');
+    G.eq('asked again on the server default, the server sends the transcoded bytes',
+      await G.q(`SELECT t FROM ${DB}.mojibake WHERE id=1`, DB), [['cafÃ©']]);
     await G.until(() => readsAs() === 'cafÃ©', 20000);
-    G.eq('back on the server default, the row reads as it did', readsAs(), 'cafÃ©');
+    G.eq('back on the server default, the grid shows them too', readsAs(), 'cafÃ©');
     G.check('and the connection is writable again', window.readOnly === false, window.readOnly);
 
     // Nothing of this touched the data - the point of a diagnostic.
