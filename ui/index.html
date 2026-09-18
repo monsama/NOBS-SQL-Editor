@@ -2263,6 +2263,31 @@ function markEdited(id){
  const edited=(ta.value!==(t.genSql||''));
  if(edited!==!!t.sqlEdited){ t.sqlEdited=edited; if(activeTab===id) updateSchemaBadge(id); }
 }
+// The name in an "Unknown database" error, or null. Both servers word it the same way.
+function missingDatabase(err){const m=/Unknown database '([^']+)'/i.exec(String(err==null?'':err));return m?m[1]:null;}
+// A schema can vanish while the app is pointed at it - dropped from another client, or by a script
+// in another tab - and every query then fails with that error while the tree still lists it, which
+// reads as the app being broken rather than the database being gone. The list is reloaded and the
+// selection let go, once, saying so.
+//
+// Only for the database the APP chose to run in. A name inside the user's own SQL is theirs to fix,
+// and reloading the tree under them for a typo would be noise. A tab bound to a table in the vanished
+// database is left alone as well: re-pointing it at some other schema would be a silent lie about
+// what it is showing.
+async function schemaGoneNote(id,err){
+ const gone=missingDatabase(err);
+ if(!gone)return false;
+ const t=T(id);
+ if(!t||gone!==dbOf(t))return false;
+ await loadSchemas();
+ // Still listed: it exists and something else was wrong - a permission, a race with its creation.
+ if((window.allSchemas||[]).indexOf(gone)>=0)return false;
+ if(curSchema===gone){curSchema=null;updateSchemaBadge(id);}
+ if($('objdb')&&$('objdb').textContent===gone)clearObjectsPanel();
+ toast('The database '+gone+' no longer exists. The schema list has been refreshed and no schema is selected.',true);
+ log('The database '+gone+' no longer exists - the schema list has been refreshed.');
+ return true;
+}
 function dbOf(t){ if(t&&(t.table||t.ddl)&&!t.sqlEdited)return t.db||curSchema||null; /* table-view + DDL tabs keep their own schema, until their SQL is edited - see markEdited() */ return curSchema||(t&&t.db)||null; /* plain query tabs follow the selected sidebar schema */ }
 // Whether a script's results are all worth showing: it calls a procedure, or has more than one
 // statement that returns rows. Both used to show nothing but the last SELECT - a procedure's results
@@ -2390,7 +2415,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
     const r=await api('/api/query',{sql:_q,db:runDb,requestId:reqId,pageSize:PAGE_BATCH,browse:true},t.abortCtrl.signal);
     if(r.aborted){if(!stale()){st.className='status';st.textContent='Query cancelled.';}return;}
     if(stale())return;
-    if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));return;}
+    if(!r.ok){st.className='status err';st.textContent=r.error;$('res_'+id).innerHTML='';log(logErr(r.error));await schemaGoneNote(id,r.error);return;}
     t.cols=r.columns;t.binCols=r.binaryCols||[];t.bitCols=r.bitCols||[];t.rows=r.rows;t.pk=null;t.pending=null;t.filters={};t.sortCol=-1;t.sortDir=1;t.selected=new Set();
     // Direct clear (not updateEditBar) since a fresh query's table-ness isn't known yet - gives
     // instant feedback instead of showing stale buttons from whatever was loaded before while
@@ -2451,7 +2476,7 @@ async function runSql(id,sql,paging){const t=T(id);if(!t)return;if(sql!=null&&sq
       }
       if(t.db)loadObjects(t.db);
     } else if(r.ok){st.textContent='OK. '+stmts.length+' statement(s) executed.';log('SCRIPT OK ('+stmts.length+' statements)');if(t.db)loadObjects(t.db);}
-    else{st.className='status err';st.textContent=r.error;log('SCRIPT ERROR: '+r.error);}
+    else{st.className='status err';st.textContent=r.error;log('SCRIPT ERROR: '+r.error);await schemaGoneNote(id,r.error);}
   }
  } finally {
   if(!stale()){t.runningReqId=null;t.abortCtrl=null;setRunning(id,false);}
