@@ -27,6 +27,13 @@ zip = "8"
 md-5 = "0.11"
 sha2 = "0.11"   # verifies the MariaDB client-tools archive against the release API's SHA-256
 
+# Windows only: the WebView2 settings the app turns off at the source (autofill, password
+# autosave). Pinned to the versions tauri itself resolves, so the interfaces reached through
+# with_webview are the same ones its own controller hands back.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation"] }
+
 [profile.release]
 strip = true
 lto = true

@@ -4458,6 +4458,28 @@ fn main() {
                 if !dir.is_empty() { builder = builder.data_directory(std::path::PathBuf::from(dir)); }
             }
             let w = builder.build()?;
+            // WebView2 fills fields in and offers to save passwords on its own, the same as the
+            // browser it is built from. The page asks it not to (autocomplete="off" on every
+            // field), but Chromium treats that as advice rather than instruction for its own
+            // autofill, and the "save password?" bubble answers to neither. These two settings are
+            // where it is actually decided, so it is decided here: this window shows one local page
+            // whose fields hold database credentials and database values, and there is nothing in
+            // it worth remembering between sessions.
+            #[cfg(windows)]
+            {
+                use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4;
+                use windows::core::Interface;
+                let _ = w.with_webview(|webview| unsafe {
+                    if let Ok(core) = webview.controller().CoreWebView2() {
+                        if let Ok(settings) = core.Settings() {
+                            if let Ok(s4) = settings.cast::<ICoreWebView2Settings4>() {
+                                let _ = s4.SetIsGeneralAutofillEnabled(false);
+                                let _ = s4.SetIsPasswordAutosaveEnabled(false);
+                            }
+                        }
+                    }
+                });
+            }
             let _ = w.maximize();
             Ok(())
         })
