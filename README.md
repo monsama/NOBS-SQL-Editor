@@ -8,6 +8,13 @@ portable and Tauri supports macOS and Linux, so it can be built from source ther
 (see [Building from source](#building-from-source)) - but no installers are published
 for them, and CI does not test them, so treat that as unsupported rather than ready.
 
+**On a machine where you cannot install software**, there is a second edition:
+[NOBS SQL Editor, PowerShell edition](https://github.com/monsama/NOBS-SQL-Editor-PowerShell)
+is the same UI as a single `.ps1` script that starts a local server and opens your
+browser - nothing to install, no admin rights, and no installer for SmartScreen to
+object to. It shells out to `mysql.exe` for everything, so it needs the client tools
+where this one can talk to the server directly.
+
 ## Download
 
 Windows installers are published on the
