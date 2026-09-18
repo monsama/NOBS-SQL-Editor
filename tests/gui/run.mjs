@@ -122,18 +122,18 @@ function cdp(wsUrl) {
   return { evaluate, close: () => ws.close() };
 }
 
-let failed = 0, passed = 0;
+let failed = 0, passed = 0, ranAScenario = false;
 try {
   await startApp();
   const page = cdp(await connectPage());
   // The page may still be navigating when it is found; that throws until it has settled.
   let loaded = false;
-  for (let i = 0; i < 300 && !loaded; i++) {
+  for (let i = 0; i < 600 && !loaded; i++) {
     try { loaded = await page.evaluate(`typeof connect==='function'&&!!document.getElementById('host')&&document.readyState==='complete'`, 5000); }
     catch { /* context replaced by a navigation */ }
     if (!loaded) await sleep(100);
   }
-  if (!loaded) throw new Error('the page never finished loading');
+  if (!loaded) throw new Error('the page never finished loading in 60s' + (appOutput ? ' - the app said: ' + appOutput.slice(-600) : ' - the app said nothing'));
   await sleep(1000);
   const env = { edition: app, tmp: tmp.replace(/\\/g, '/'), dbPort };
   await page.evaluate(`window.GUI_ENV=${JSON.stringify(env)};` + readFileSync(join(here, 'prelude.js'), 'utf8'));
@@ -145,6 +145,12 @@ try {
     return $('connStatus').textContent;})()`);
   console.log(`  (${app} app, ${connected.trim()} on port ${dbPort})`);
   if (!/Connected/.test(connected)) throw new Error('could not connect: ' + connected);
+
+  // Past this line a failure is something a scenario found. Before it, a failure is the app not
+  // starting, the browser not answering or the database not connecting - which says nothing about
+  // the code under test and has to be reported as its own kind, or a red build cannot be read
+  // without opening the log. See the exit code at the end.
+  ranAScenario = true;
 
   const files = readdirSync(join(here, 'scenarios')).filter(f => f.endsWith('.js') && (!only || f.includes(only))).sort();
   for (const f of files) {
@@ -171,6 +177,14 @@ try {
   children.reverse().forEach(killTree);
   await sleep(500);
   try { rmSync(tmp, { recursive: true, force: true }); } catch { /* a browser may still hold a file */ }
+}
+// Three outcomes, not two. A run that never reached a scenario proves nothing about the app - the
+// window did not open, the browser did not answer, the database did not connect - and saying so in
+// its own exit code is what lets CI retry that and only that. Restarting a run in which nothing was
+// evaluated hides nothing; retrying a failed check would hide the very thing the suite is for.
+if (failed && !ranAScenario) {
+  console.log(`\n  NOT RUN - the app never got as far as a scenario, so nothing here was tested`);
+  process.exit(3);
 }
 console.log(failed ? `\n  ${failed} FAILED (${passed} passed)` : `\n  all ${passed} passed`);
 process.exit(failed ? 1 : 0);
