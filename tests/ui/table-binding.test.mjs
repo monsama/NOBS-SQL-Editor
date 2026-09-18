@@ -34,7 +34,7 @@ function extractConst(src, name) {
 }
 
 const NAMES = ['sqlHead', 'useTarget', 'scriptShowsResults', 'parseSingleEditableTable', 'refreshRunTableBinding',
-  'esc', 'clip', 'ctrlBadge', 'textCellHtml', 'decodeCtrlCharCell', 'hexToBitNumber', 'cellHtml', 'ctrlCharNote'];
+  'esc', 'clip', 'ctrlBadge', 'textCellHtml', 'decodeCtrlCharCell', 'hexToBitNumber', 'cellHtml', 'ctrlCharNote', 'binaryEditMode'];
 const bundle = [extractConst(html, 'CTRL_NAMES'), extractConst(html, 'CTRL_RE'),
   ...NAMES.map(n => extractFunction(html, n))].join('\n');
 
@@ -121,6 +121,25 @@ test('the cell editor is told about control characters it cannot show', () => {
   assert.match(many, /3 control characters \(NUL ×2, ESC\), which take no space/);
   assert.doesNotMatch(f.ctrlCharNote('a' + N, false), /Hex/, 'an ordinary text column has no Hex tab to point at');
   assert.equal(f.ctrlCharNote(null, false), '', 'a NULL cell has no text to describe');
+});
+
+// Which editor a value gets, and the rule it has to agree with: litAs() writes a hex literal only
+// for a column the server calls binary, and quotes everything else. So the byte editor - whose Save
+// writes a hex literal - may only be offered for those same columns. A value that merely arrives as
+// hex, because its bytes would not decode as text, is a text column's value still: it gets a text
+// box, which is what a save will store.
+test('the byte editor is offered for binary columns and nothing else', () => {
+  const f = load({}, 'a');
+  assert.equal(f.binaryEditMode(true, '0x6100'), 'hex', 'a declared binary column edits as bytes');
+  assert.equal(f.binaryEditMode(true, ''), 'hex', 'whatever it happens to hold');
+  assert.equal(f.binaryEditMode(false, '0xdeadbeef'), 'hexShownAsText',
+    'a value shown as hex from a column that is not binary is text, and says so');
+  assert.equal(f.binaryEditMode(false, 'plain text'), null);
+  assert.equal(f.binaryEditMode(false, '0x'), null, 'the bare marker is not a hex value');
+  assert.equal(f.binaryEditMode(false, '0xzz'), null, 'nor is something that only starts like one');
+  assert.equal(f.binaryEditMode(false, null), null, 'nor is NULL');
+  assert.equal(f.binaryEditMode(undefined, '0x41'), 'hexShownAsText',
+    'a grid with no column types at all must not offer to write bytes');
 });
 
 // A procedure's results, and every SELECT but the last in a script, were run and thrown away. Such a
