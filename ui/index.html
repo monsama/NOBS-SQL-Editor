@@ -2477,7 +2477,7 @@ function clip(v,n){const s=String(v);return s.length>n?s.slice(0,n)+'\u2026':s;}
 // that hex form is what makes round-tripping a value with a real embedded NUL byte safe (a raw
 // NUL in the actual SQL text risks truncation when passed as a command-line argument).
 const CTRL_NAMES={0:'NUL',1:'SOH',2:'STX',3:'ETX',4:'EOT',5:'ENQ',6:'ACK',7:'BEL',8:'BS',11:'VT',12:'FF',14:'SO',15:'SI',16:'DLE',17:'DC1',18:'DC2',19:'DC3',20:'DC4',21:'NAK',22:'SYN',23:'ETB',24:'CAN',25:'EM',26:'SUB',27:'ESC',28:'FS',29:'GS',30:'RS',31:'US'};
-function ctrlBadge(b){return '<span style="background:#4a3a1f;color:#e8c589;border-radius:3px;padding:0 3px;font-size:10px;font-weight:600;margin:0 1px" title="Control character (0x'+b.toString(16).padStart(2,'0').toUpperCase()+') - not printable text">'+CTRL_NAMES[b]+'</span>';}
+function ctrlBadge(b){return '<span class="cellmark" style="background:#4a3a1f;color:#e8c589;border-radius:3px;padding:0 3px;font-size:10px;font-weight:600;margin:0 1px" title="Control character (0x'+b.toString(16).padStart(2,'0').toUpperCase()+') - not printable text">'+CTRL_NAMES[b]+'</span>';}
 // Text holding a control character (a NUL, say) showed it as nothing at all, so 'a<NUL>b' looked
 // like 'ab'. Marked the same way as above.
 const CTRL_RE=/[\x00-\x08\x0B\x0C\x0E-\x1F]/g;
@@ -2526,7 +2526,7 @@ function decodeCtrlCharCell(hexStr,maxChars){
 // renderer and print the marker itself, the one value in a grid shown as its own wire format. It is
 // only said for a column the server declared binary (binCols), because a VARCHAR can perfectly
 // well hold the two characters "0x" and that is exactly what should be shown for it.
-function cellHtml(v,isBit,isBin){if(v===null)return '<span style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(v==='0x'&&isBin)return '<span style="color:#999;font-style:italic;opacity:.6">(0 bytes)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return isBit?esc(hexToBitNumber(v)):decodeCtrlCharCell(v,300);return textCellHtml(v,300);}
+function cellHtml(v,isBit,isBin){if(v===null)return '<span class="cellmark" style="color:#999;font-style:italic">(NULL)</span>';if(v==='')return '<span class="cellmark" style="color:#999;font-style:italic;opacity:.6">(empty)</span>';if(v==='0x'&&isBin)return '<span class="cellmark" style="color:#999;font-style:italic;opacity:.6">(0 bytes)</span>';if(typeof v==='string'&&/^0x[0-9A-Fa-f]+$/.test(v))return isBit?esc(hexToBitNumber(v)):decodeCtrlCharCell(v,300);return textCellHtml(v,300);}
 // When every data column is hidden (via "Hide all" or unchecking each one by hand), the leading
 // row-select checkbox and delete/undo columns are pointless to keep showing on their own - an
 // empty grid with just those two columns looks broken, not "hidden".
@@ -3285,6 +3285,21 @@ function clipWrite(text,alsoTry){
  const inBox=t&&(t.tagName==='TEXTAREA'||t.tagName==='INPUT')&&typeof t.selectionStart==='number';
  const text=inBox?String(t.value==null?'':t.value).slice(t.selectionStart,t.selectionEnd)
                  :String((document.getSelection&&document.getSelection())||'');
+ // Selecting a grid cell with the mouse copies what the grid DREW, which for some values is not
+ // the value: a control character is drawn as a badge, so 'a'+NUL copies as the three letters
+ // N, U, L, and a NULL cell copies as the word "(NULL)". Pasted into another row and saved, that
+ // stores exactly what it looks like - a plausible value nobody typed. The cell's own commands
+ // copy the value itself, so the copy is left alone and what it is gets said instead.
+ if(!inBox){
+  const node=document.getSelection&&document.getSelection().anchorNode;
+  const td=node&&(node.nodeType===1?node:node.parentElement);
+  const cell=td&&td.closest&&td.closest('td');
+  if(cell&&cell.querySelector('.cellmark')){
+   const m='That is how the grid shows the value, not the value itself - a control character is drawn as a badge and an absent value as a word. Right-click the cell and use "Copy value", or "Copy value as hex", to copy what is actually stored.';
+   toast(m,true);log(m);
+   return;
+  }
+ }
  const cut=clipboardCutMsg(text);
  if(!cut)return;
  const hexTabOpen=t&&t.id==='vText'&&$('vHexTabs')&&$('vHexTabs').style.display!=='none';
