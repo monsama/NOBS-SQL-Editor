@@ -560,7 +560,7 @@ window._roBeforeBrowse=false;
 // be interpreted in the session's charset, so the bytes stored would differ from the bytes shown.
 // The backend refuses such a connection's writes on its own (ro_mode, and the server is told
 // SET SESSION TRANSACTION READ ONLY); this is what makes the app stop offering.
-function setBrowseCharset(cs){
+async function setBrowseCharset(cs){
  cs=(cs||'').trim();
  if(cs===window.browseCharset)return;
  if(!window.browseCharset)window._roBeforeBrowse=!!window.readOnly;
@@ -574,7 +574,15 @@ function setBrowseCharset(cs){
  const t=T(activeTab);
  // A table tab reruns the same statement; a tab that has not run anything has nothing to show
  // differently, and will use the new charset the next time it runs.
- if(t&&t.curRun)runSql(t.id,t.curRun);
+ //
+ // A run already in flight is stopped first. It was started in the character set being left
+ // behind, and runSql does not abort a previous run or check on the way back whether a newer
+ // one has started - so whichever finishes last writes its rows into the grid, and that can be
+ // the older one. Switching twice in a row made the grid show the reading from before.
+ if(t&&t.curRun){
+  if(t.runningReqId)await cancelQuery(t.id);
+  runSql(t.id,t.curRun);
+ }
 }
 function renderBrowseCs(){
  const el=$('browseCs');if(!el)return;

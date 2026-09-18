@@ -28,7 +28,7 @@ INSERT INTO ${DB}.mojibake VALUES (1, 0x636166C3A9);`);
       sel ? [...sel.options].map(o => o.value).join(',') : 'no control');
 
     // The diagnostic itself.
-    setBrowseCharset('latin1');
+    await setBrowseCharset('latin1');
     await G.until(() => readsAs() === 'café', 20000);
     G.eq('read in latin1, the same row is the text it was meant to be', readsAs(), 'café');
     G.check('and the connection says it is read-only', window.readOnly === true, window.readOnly);
@@ -44,7 +44,7 @@ INSERT INTO ${DB}.mojibake VALUES (1, 0x636166C3A9);`);
     // rather than a choice. The desktop backend sees the result marked charset 63 and renders every
     // such value as hex; mysql.exe hexes only what its own metadata calls binary, and a VARCHAR
     // read with --default-character-set=binary is not that, so the bytes arrive and are decoded.
-    setBrowseCharset('binary');
+    await setBrowseCharset('binary');
     await G.until(() => { const x = T(t.id); return x && !x.runningReqId && readsAs() !== null; }, 20000);
     await G.wait(300);
     const raw = String(readsAs());
@@ -54,7 +54,7 @@ INSERT INTO ${DB}.mojibake VALUES (1, 0x636166C3A9);`);
     // And back, with nothing left behind. Asked of the backend first and of the grid second, on
     // purpose: one failing while the other holds says which of them did not come back - a grid that
     // never re-ran, or a connection still being opened in the charset it was told to forget.
-    setBrowseCharset('');
+    await setBrowseCharset('');
     G.eq('asked again on the server default, the server sends the transcoded bytes',
       await G.q(`SELECT t FROM ${DB}.mojibake WHERE id=1`, DB), [['cafÃ©']]);
     await G.until(() => readsAs() === 'cafÃ©', 20000);
@@ -65,7 +65,7 @@ INSERT INTO ${DB}.mojibake VALUES (1, 0x636166C3A9);`);
     G.eq('the row is exactly as it was stored',
       await G.q(`SELECT HEX(t) FROM ${DB}.mojibake WHERE id=1`), [['636166C3A9']]);
   } finally {
-    setBrowseCharset('');
+    await setBrowseCharset('');
     await G.A('/api/script', { sql: `DROP DATABASE IF EXISTS ${DB}` });
   }
   return G.report();
