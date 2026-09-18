@@ -71,8 +71,8 @@ ${css.join('\n')}
 <script>
 ${code}
 const LONG='this value sits nine hundred rows down where nothing has ever scrolled to it';
-const rows=[];for(let i=1;i<=900;i++)rows.push([String(i),'short',i===880?LONG:'short',i===5?'W'.repeat(600):'x']);
-const tab={id:'t1',cols:['id','brief','deep','huge'],rows,pk:['id'],pending:{upd:{},del:new Set(),ins:[]},filters:{},sortCol:-1,sortDir:1,binCols:[],bitCols:[]};
+const rows=[];for(let i=1;i<=900;i++)rows.push([String(i),'short',i===880?LONG:'short',i===5?'W'.repeat(600):'x','v']);
+const tab={id:'t1',cols:['id','brief','deep','huge','a_title_longer_than_any_value_in_it'],rows,pk:['id'],pending:{upd:{},del:new Set(),ins:[]},filters:{},sortCol:-1,sortDir:1,binCols:[],bitCols:[]};
 function T(id){return id==='t1'?tab:null;}
 function $(id){return document.getElementById(id);}
 // What renderBody builds: a window of rows, and a spacer row standing in for everything scrolled
@@ -101,6 +101,7 @@ window.probe=()=>{
  out.drawn=$('res_t1').querySelectorAll('tbody tr[data-r]').length;
  out.longValueDrawn=/nine hundred rows down/.test($('res_t1').innerHTML);
  out.brief=fit('brief'); out.deep=fit('deep'); out.huge=fit('huge');
+ out.titled=fit('a_title_longer_than_any_value_in_it');
  out.deepTwice=fit('deep'); out.deepThrice=fit('deep');
  draw(860);
  out.deepFromTheBottom=fit('deep');
@@ -190,6 +191,14 @@ test('a column of short values fits to something narrow', () => {
 
 test('a column whose widest value was never drawn fits to that value', () => {
   assert.ok(probe.deep > probe.brief + 200, `brief ${probe.brief}, deep ${probe.deep}`);
+});
+
+// The title is part of the column: a fit that cut it off would be answering a question nobody
+// asked. This is measured from the header's own markup rather than read off the page, for the same
+// reason the width is - and the first version took the first span in the cell, which after the
+// resize handle moved to the front of it was the handle: 61px for a column whose title needs 232.
+test('a column whose title is longer than its values fits to the title', () => {
+  assert.ok(probe.titled > probe.brief + 100, `brief ${probe.brief}, titled ${probe.titled}`);
 });
 
 test('a value too long for the window stops at the pane', () => {

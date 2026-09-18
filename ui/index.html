@@ -2618,7 +2618,10 @@ function autofitCol(id,ci){const t=T(id);const off=(!!t.pk)?2:1;const wrap=$('re
  // the page: scrollWidth never reports less than the element's own width, so a column that has
  // been fitted once reports the width it was given, and fitting it again adds the slack on top of
  // that. It grew by 16px a go, which is how the scenario found this.
- const head=th&&th.querySelector('span');
+ // Not simply the first span: the resize handle is one too, and since it moved to the front of
+ // the cell it was the one being measured - so a column whose title is longer than anything in it
+ // fitted to the values and cut the title off.
+ const head=th&&th.querySelector('span:not(.rz)');
  if(th&&head)max=Math.max(max,fitMeasure(th,head.innerHTML,true));
  const vals=[];const name=t.cols[ci];
  viewIndices(id).forEach(ri=>{const key=ri+':'+ci;vals.push(t.pending&&t.pending.upd&&(key in t.pending.upd)?t.pending.upd[key]:t.rows[ri][ci]);});

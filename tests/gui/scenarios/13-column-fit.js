@@ -11,9 +11,10 @@
   const LONG = 'this value sits nine hundred rows down where nothing has ever scrolled to it';
   try {
     const rows = [];
-    for (let i = 1; i <= 900; i++) rows.push(`(${i},'short','${i === 880 ? LONG : 'short'}','x')`);
+    for (let i = 1; i <= 900; i++) rows.push(`(${i},'short','${i === 880 ? LONG : 'short'}','x','v')`);
     await G.run(`DROP DATABASE IF EXISTS ${DB}; CREATE DATABASE ${DB};
-CREATE TABLE ${DB}.fit (id INT PRIMARY KEY, brief VARCHAR(255), deep VARCHAR(255), huge VARCHAR(600));
+CREATE TABLE ${DB}.fit (id INT PRIMARY KEY, brief VARCHAR(255), deep VARCHAR(255), huge VARCHAR(600),
+                        a_title_longer_than_any_value_in_it VARCHAR(10));
 INSERT INTO ${DB}.fit VALUES ${rows.join(',')};
 UPDATE ${DB}.fit SET huge = REPEAT('W', 600) WHERE id = 5;`);
 
@@ -36,6 +37,14 @@ UPDATE ${DB}.fit SET huge = REPEAT('W', 600) WHERE id = 5;`);
     const brief = fit('brief'), deep = fit('deep');
     G.check('a column of short values fits to something narrow', brief > 40 && brief < 200, brief);
     G.check('a column whose widest value was never drawn fits to that value', deep > brief + 200, `brief ${brief}, deep ${deep}`);
+
+    // The title is part of the column. It is measured from the header's own markup, and the first
+    // version of that took the first span in the cell - which, once the resize handle moved to the
+    // front of it, was the handle, so a column titled far wider than its values fitted to the
+    // values and cut its own name off.
+    const titled = fit('a_title_longer_than_any_value_in_it');
+    G.check('a column whose title is longer than its values fits to the title', titled > brief + 100,
+      `brief ${brief}, titled ${titled}`);
 
     // The cap. 600 characters cannot fit in any window, and a column wider than the pane trades
     // reading the value for finding it.
