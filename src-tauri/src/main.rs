@@ -255,7 +255,9 @@ type R = Result<Value, String>;
 // interpolated into SQL. Everything here is a charset MySQL or MariaDB ships, and anything else -
 // including anything with a quote or a semicolon in it - is not a charset and is ignored.
 const BROWSE_CHARSETS: &[&str] = &[
-    "binary", "ascii", "latin1", "latin2", "latin5", "latin7", "utf8mb3", "utf8mb4", "ucs2",
+    // No ucs2, utf16 or utf32: MySQL refuses those as a client's character set, so offering one
+    // would be offering a connection error.
+    "binary", "ascii", "latin1", "latin2", "latin5", "latin7", "utf8mb3", "utf8mb4",
     "cp1250", "cp1251", "cp1256", "cp1257", "cp850", "cp852", "cp866", "cp932", "koi8r", "koi8u",
     "greek", "hebrew", "tis620", "big5", "gbk", "gb2312", "sjis", "ujis", "euckr", "macroman",
 ];
