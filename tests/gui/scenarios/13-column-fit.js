@@ -54,18 +54,27 @@ UPDATE ${DB}.fit SET huge = REPEAT('W', 600) WHERE id = 5;`);
     const again = fit('deep');
     G.check('the same column fits the same from another scroll position', Math.abs(again - deep) < 2, `${deep} then ${again}`);
 
-    // The handle you grab has to be on the line you mean. It is positioned from the cell's padding
-    // box, which with collapsed borders stops half a border short of the line, so every offset
-    // lands left of it - measured at 5.5px of the band left of the line and 3.5px right, which is
-    // visible when it highlights.
-    const th = wrap.querySelectorAll('thead tr:first-child th')[t.cols.indexOf('deep') + off];
-    const rz = th.querySelector('.rz');
-    const line = th.getBoundingClientRect().right, band = rz.getBoundingClientRect();
+    // The handle you grab has to be on the line you mean, and grabbable on both sides of it. Two
+    // separate things went wrong there: it was positioned from the cell's padding box, which with
+    // collapsed borders stops half a border short of the line, so every offset landed 1px left;
+    // and it hung off its own cell into the next column, where that column's header - a stacking
+    // context of its own, painted later - covered the half past the line. Of a 9px band, 5px were
+    // real, all of them left. The second one is why the first was not enough: the band measures
+    // centred either way, so the check that matters is what the pointer actually lands on.
+    const ci = t.cols.indexOf('deep');
+    const th = wrap.querySelectorAll('thead tr:first-child th')[ci + off];
+    const rz = wrap.querySelector('thead .rz[data-ci="' + ci + '"]');
+    const box = th.getBoundingClientRect(), line = box.right, band = rz.getBoundingClientRect();
     const centre = (band.left + band.right) / 2;
     G.check('the resize handle is centred on the line it grabs', Math.abs(centre - line) <= 0.5,
       `band ${band.left}-${band.right}, line at ${line}`);
     G.check('and is wide enough to hit on either side', band.width >= 8 && line - band.left >= 3 && band.right - line >= 3,
       `${line - band.left} left, ${band.right - line} right`);
+    const y = (box.top + box.bottom) / 2;
+    const hit = x => { const e = document.elementFromPoint(x, y); return e ? (e.className || e.tagName) : 'nothing'; };
+    const hits = [hit(line - 3), hit(line + 3)];
+    G.check('and is what the pointer lands on either side of the line', hits[0] === 'rz' && hits[1] === 'rz',
+      `3px left hit ${hits[0]}, 3px right hit ${hits[1]}`);
   } finally {
     await G.A('/api/script', { sql: `DROP DATABASE IF EXISTS ${DB}` });
   }

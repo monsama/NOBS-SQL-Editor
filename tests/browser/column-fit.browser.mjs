@@ -79,11 +79,13 @@ function $(id){return document.getElementById(id);}
 // past - the row whose padding a fit once borrowed by accident.
 function draw(start){
  const rowH=23,win=40,span=tab.cols.length+3;
+ // The handle for a column hangs off the left edge of the next header cell, and the last one off
+ // the filler cell at the end - see sortHeader, and the test below that says why.
  let h='<table class="grid"><colgroup><col style="width:30px"><col style="width:34px">'
   +tab.cols.map(()=>'<col style="width:150px">').join('')+'<col></colgroup><thead><tr>'
   +'<th style="width:22px;height:28px;padding:0"><span></span></th><th></th>'
-  +tab.cols.map((c,ci)=>'<th style="cursor:pointer;height:28px;padding:0 8px"><span style="display:flex;align-items:center;gap:4px;height:28px;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+c+'</span></span><span class="rz" data-ci="'+ci+'"></span></th>').join('')
-  +'<th></th></tr></thead><tbody>';
+  +tab.cols.map((c,ci)=>'<th style="cursor:pointer;height:28px;padding:0 8px">'+(ci?'<span class="rz" data-ci="'+(ci-1)+'"></span>':'')+'<span style="display:flex;align-items:center;gap:4px;height:28px;min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+c+'</span></span></th>').join('')
+  +'<th><span class="rz" data-ci="'+(tab.cols.length-1)+'"></span></th></tr></thead><tbody>';
  if(start>0)h+='<tr class="vpad" style="height:'+(start*rowH)+'px"><td colspan="'+span+'" style="padding:0;border:none"></td></tr>';
  for(let ri=start;ri<Math.min(start+win,rows.length);ri++)
   h+='<tr data-r="'+ri+'"><td></td><td></td>'+tab.cols.map((c,ci)=>'<td class="editable">'+cellHtml(rows[ri][ci],false,false)+'</td>').join('')+'<td></td></tr>';
@@ -103,9 +105,18 @@ window.probe=()=>{
  draw(860);
  out.deepFromTheBottom=fit('deep');
  out.pane=$('res_t1').clientWidth;
- const th=$('res_t1').querySelectorAll('thead tr:first-child th')[tab.cols.indexOf('deep')+2];
- const b=th.querySelector('.rz').getBoundingClientRect(),line=th.getBoundingClientRect().right;
+ const ci=tab.cols.indexOf('deep');
+ const th=$('res_t1').querySelectorAll('thead tr:first-child th')[ci+2];
+ const rz=$('res_t1').querySelector('thead .rz[data-ci="'+ci+'"]');
+ const b=rz.getBoundingClientRect(),line=th.getBoundingClientRect().right;
  out.handle={line,left:b.left,right:b.right,centre:(b.left+b.right)/2,width:b.width};
+ // What the pointer would actually land on, three pixels either side of the line. This follows the
+ // same stacking order the paint does, which is the whole point: the band can be centred in layout
+ // while the half of it past the line is covered by the next header, and then it is neither seen
+ // nor clickable there.
+ const y=(th.getBoundingClientRect().top+th.getBoundingClientRect().bottom)/2;
+ const hit=x=>{const e=document.elementFromPoint(x,y);return e?(e.className||e.tagName):'nothing';};
+ out.hits={left:hit(line-3),right:hit(line+3)};
  return JSON.stringify(out);
 };
 </script>`;
@@ -206,4 +217,14 @@ test('the resize handle is centred on the line it grabs', () => {
 test('and is wide enough to hit on either side of it', () => {
   const left = probe.handle.line - probe.handle.left, right = probe.handle.right - probe.handle.line;
   assert.ok(probe.handle.width >= 8 && left >= 3 && right >= 3, `${left} left, ${right} right`);
+});
+
+// Being centred in layout was not enough, and this is the check that says so. Each th is sticky
+// with a z-index, so it is its own stacking context: a handle on a cell's right edge overhung into
+// the next column, and that column's header painted over the half that crossed the line. Hit
+// testing follows the same order, so that half could not be grabbed either - of a 9px band, 5px
+// were real, all of them left of the line. The handle now hangs off the next cell instead.
+test('the handle can be grabbed on both sides of the line, not just the left', () => {
+  assert.deepEqual(probe.hits, { left: 'rz', right: 'rz' },
+    `three pixels left of the line hit ${probe.hits.left}, three right hit ${probe.hits.right}`);
 });
