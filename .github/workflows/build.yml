@@ -6,7 +6,40 @@ on:
   workflow_dispatch: {} # allow manual runs
 
 jobs:
+  # Does this tag belong to the code it points at? Tagging an old commit - marking a release that
+  # never got a tag, say - otherwise built installers from three-week-old code and left a draft
+  # release for it, which is nobody's intention. A mismatch skips the build rather than failing it:
+  # there is nothing wrong, the tag simply is not a release of this tree. The reason goes in the run
+  # summary, so forgetting to bump the version looks like what it is instead of like silence.
+  #
+  # Cheap and separate, because the version can only be read after a checkout, and a job-level
+  # condition cannot wait for that.
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.check.outputs.build }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: check
+        run: |
+          tree=$(node -p "require('./package.json').version")
+          tag="${GITHUB_REF_NAME}"
+          echo "the tree says $tree, this ref is $tag"
+          if [ "${GITHUB_REF_TYPE}" != tag ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Manual run: building." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$tag" = "v$tree" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "Tag \`$tag\` matches the version in the tree. Building." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Tag \`$tag\` does not match the version in the tree (\`$tree\`), so no installers were built and no release was drafted." >> "$GITHUB_STEP_SUMMARY"
+            echo "If this tag was meant to release this code, bump the version first; if it marks an older commit, nothing is wrong." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   windows:
+    needs: gate
+    if: ${{ needs.gate.outputs.build == 'true' }}
     runs-on: windows-latest
     permissions:
       contents: write   # required to create the GitHub Release
